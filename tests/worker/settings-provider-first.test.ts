@@ -190,6 +190,19 @@ describe("selector membership helpers (spec §6.3)", () => {
     });
   });
 
+  test("selectorBase resolves an unambiguous abbreviation and the legacy thinking alias", () => {
+    expect(selectorBase("anthropic/claude-sonnet-4-6:med")).toEqual({
+      provider: "anthropic",
+      literal: "claude-sonnet-4-6:med",
+      model: "claude-sonnet-4-6",
+      base: "anthropic/claude-sonnet-4-6",
+    });
+    expect(selectorBase("anthropic/claude-sonnet-4-6:xhi")?.model).toBe("claude-sonnet-4-6");
+    expect(selectorBase("anthropic/claude-sonnet-4-6:thinking")?.model).toBe("claude-sonnet-4-6");
+    // A single character is not an abbreviation — it stays part of the id.
+    expect(selectorBase("anthropic/claude-sonnet-4-6:h")?.model).toBe("claude-sonnet-4-6:h");
+  });
+
   test("dashboard THINKING_LEVELS cannot drift from the runner vocabulary", () => {
     expect(Object.keys(THINKING_LEVELS).sort()).toEqual(Object.keys(RUNNER_THINKING_LEVELS).sort());
   });
@@ -239,6 +252,14 @@ describe("selector membership helpers (spec §6.3)", () => {
     expect(findFailingSelector(["openrouter/glm-4.7:max"], verified, [])).toBeNull();
     const custom = [{ provider_id: "my-custom", model_ids: ["glm-4.7:max"], has_keys: true }];
     expect(findFailingSelector(["my-custom/glm-4.7:max"], [], custom)).toBeNull();
+  });
+
+  test("abbreviated and legacy thinking tails resolve to the cached base model", () => {
+    const verified = [{ provider: "anthropic", models: ["claude-sonnet-4-6"], fetched_at: "now" }];
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:med"], verified, [])).toBeNull();
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:xhi"], verified, [])).toBeNull();
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:thinking"], verified, [])).toBeNull();
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:h"], verified, [])).toBe("anthropic/claude-sonnet-4-6:h");
   });
 
   test("a KEYLESS custom declaration is offered nothing and rejected everywhere — an unknown provider still stays syntax-only", () => {
@@ -486,6 +507,18 @@ describe("POST save-chain / save-roles membership", () => {
       selector: "anthropic/claude-opus-4-7",
     });
     expect(await store.getModelChain(app.id)).toBe("anthropic/claude-sonnet-4-6:high");
+  });
+
+  test("a stored legacy :thinking selector re-saves verbatim against a cache holding only the base", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    const stored = "anthropic/claude-sonnet-4-6:thinking";
+    await store.setModelChain(app.id, stored);
+    const env = makeEnv(db);
+    const res = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: stored });
+    expect(res.status).toBe(200);
+    expect(await store.getModelChain(app.id)).toBe(stored);
   });
 
   test("no cache row (or probe-only empty cache) stays syntax-only — existing chains still save", async () => {

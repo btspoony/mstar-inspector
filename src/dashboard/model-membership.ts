@@ -17,19 +17,38 @@ export const THINKING_LEVELS: Record<string, true> = {
   xhigh: true,
   max: true,
 };
-// shortcut: exact level names only — the SDK also accepts an unambiguous
-// abbreviation (`:med`, `:xhi`); this validator does not, upgrade if a
-// hand-written abbreviated selector must pass membership.
+/** Levels the SDK accepts abbreviated, provided the prefix matches exactly one of them. */
+const ABBREVIABLE_LEVELS = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * Why: a selector tail is a thinking level when it is the legacy `thinking`
+ * alias, an exact level name, or an unambiguous abbreviation (>= 2 chars,
+ * exactly one level starts with it — the SDK's `:med` / `:xhi` form). `auto`
+ * stays exact-only, as in the SDK.
+ *
+ * The `thinking` alias keeps chains stored before this narrowing re-savable —
+ * docs/deploy.md documents `anthropic/claude-sonnet-4-5:thinking`.
+ */
+function stripsThinkingTail(tail: string): boolean {
+  if (tail === "thinking") return true;
+  if (THINKING_LEVELS[tail] === true) return true;
+  if (tail.length < 2) return false;
+  let matches = 0;
+  for (const level of ABBREVIABLE_LEVELS) {
+    if (level.startsWith(tail)) matches += 1;
+  }
+  return matches === 1;
+}
 
 /**
  * Split one selector into provider + model. The tail after the LAST `:` is
- * dropped from `model` only when it is a known thinking level
- * (THINKING_LEVELS); any other tail stays part of the model id, so provider
- * ids that embed a colon (`ollama-cloud/deepseek-v4.1-flash:1017`,
- * `qwen3:32b`) compare literally. `literal` is the id exactly as written —
- * membership tries it before `model`, because real ids can end in a level
- * name (`glm-4.7:max`). A selector without `/` has no provider prefix —
- * membership cannot apply.
+ * dropped from `model` when it is a known thinking level — an exact name, an
+ * unambiguous abbreviation, or the legacy `thinking` alias; every other tail
+ * stays part of the model id, so provider ids that embed a colon
+ * (`ollama-cloud/deepseek-v4.1-flash:1017`, `qwen3:32b`) compare literally.
+ * `literal` is the id exactly as written — membership tries it before `model`,
+ * because real ids can end in a level name (`glm-4.7:max`). A selector without
+ * `/` has no provider prefix — membership cannot apply.
  */
 export function selectorBase(
   selector: string,
@@ -39,7 +58,7 @@ export function selectorBase(
   const provider = selector.slice(0, slash);
   const literal = selector.slice(slash + 1);
   const colon = literal.lastIndexOf(":");
-  const model = colon !== -1 && THINKING_LEVELS[literal.slice(colon + 1)] === true ? literal.slice(0, colon) : literal;
+  const model = colon !== -1 && stripsThinkingTail(literal.slice(colon + 1)) ? literal.slice(0, colon) : literal;
   return { provider, literal, model, base: `${provider}/${model}` };
 }
 
@@ -97,9 +116,10 @@ export function composeModelOptions(
  * Membership layer for save-chain / save-roles (spec §6.3). Syntax
  * (`parseModelChain`) is the caller's job. Per selector:
  *   (a) built-in provider with a non-empty verified cache → must hit a
- *       cached model id: the literal id first, then the base with a trailing
- *       `:<thinking-level>` removed (selectorBase). A real id may end in a
- *       level name (`glm-4.7:max`), so the literal always gets its chance.
+ *       cached model id: the literal id first, then the base with a thinking
+ *       tail removed (exact level, unambiguous abbreviation, or the legacy
+ *       `thinking` alias — selectorBase). A real id may end in a level name
+ *       (`glm-4.7:max`), so the literal always gets its chance.
  *   (b) probe-only (cache row, empty models) OR no cache row → syntax only
  *   (c) custom provider → same literal-then-base order against the
  *       declaration's model_ids, and the declaration must still hold a key
