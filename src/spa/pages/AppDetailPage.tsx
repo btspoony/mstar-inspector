@@ -31,7 +31,7 @@ import { AppDeliveryTab } from "./AppDeliveryTab";
 import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
-import { apiBase } from "../workspace-base";
+import { apiBase, currentOrigin } from "../workspace-base";
 import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -313,6 +313,11 @@ export async function refreshAppMetadata(base: string, githubAppId: number): Pro
   }
 }
 
+/** F11: the chain is the only App→bot relation; its row count is an App fact. */
+function mountedBotCount(mountedBotIds: readonly string[]): number {
+  return new Set(mountedBotIds).size;
+}
+
 const BLOCKED_REASON_KEYS = {
   bot_not_shared: "appDetail.blockedBotNotShared",
 } as const satisfies Record<BlockedReason, string>;
@@ -338,11 +343,15 @@ export function TargetHeader({
       ? t(locale, BLOCKED_REASON_KEYS[payload.blocked_reason])
       : null;
 
+  // F11: App-scoped facts ONLY. `keys.length` and `model_chains.length` were
+  // BOT configuration reached through an equal id — a different entity after
+  // the split — so the band carries installations, Apps mounted through the
+  // chain, the delivery refusal count and the App's scope, nothing else.
+  const mountedBotNames = payload.can_manage ? (payload.mounted_bot_ids ?? []) : [];
   const metrics: Metric[] = payload.can_manage && !payload.blocked
     ? [
         { key: t(locale, "settings.installations"), value: payload.installations.length },
-        { key: t(locale, "settings.metricKeys"), value: payload.keys.length },
-        { key: t(locale, "settings.modelChains"), value: payload.model_chains.length },
+        { key: t(locale, "appDetail.metricMountedBots"), value: mountedBotCount(mountedBotNames) },
         {
           key: t(locale, "apps.metricRejected24h"),
           value: payload.delivery_summary?.rejected24h ?? 0,
@@ -361,9 +370,7 @@ export function TargetHeader({
             {blockedMessage ? null : (
               <BotSettingsLink
                 locale={locale}
-                mountedBotIds={
-                  payload.can_manage ? ((payload as { mounted_bot_ids?: string[] }).mounted_bot_ids ?? []) : []
-                }
+                mountedBotIds={payload.can_manage ? (payload.mounted_bot_ids ?? []) : []}
               />
             )}
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
@@ -469,6 +476,45 @@ function TargetOpsZone({
 }
 
 /**
+ * F11: the credential controls the plan keeps on the App face for managers.
+ * They are APP facts — the webhook endpoint the App receives on, its numeric
+ * id, and where its stored private key and webhook secret live. The secrets
+ * themselves are never in the payload; this block names them and links the
+ * place they are rotated.
+ */
+export function AppCredentialsSection({
+  locale,
+  workspaceId,
+  app,
+}: {
+  locale: SpaBoot["locale"];
+  workspaceId: string;
+  app: SettingsPayload["app"];
+}) {
+  const webhookUrl = `${currentOrigin()}/webhook/${workspaceId}/${app.id}`;
+  return (
+    <section className="flex flex-col gap-2 py-3" data-slot="app-credentials">
+      <h3 className="text-sm font-semibold">{t(locale, "appDetail.credentialsTitle")}</h3>
+      <p className="text-sm text-muted-foreground">{t(locale, "appDetail.credentialsCopy")}</p>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+        <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsWebhook")}</dt>
+        <dd>
+          <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">{webhookUrl}</code>
+        </dd>
+        {app.github_app_id === null ? null : (
+          <>
+            <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsAppId")}</dt>
+            <dd className="tabular-nums">{app.github_app_id}</dd>
+          </>
+        )}
+        <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsStored")}</dt>
+        <dd>{t(locale, "appDetail.credentialsStoredValue")}</dd>
+      </dl>
+    </section>
+  );
+}
+
+/**
  * The App detail face — pure `t()` + data rendering, no window/router access,
  * so tests can static-render it. A non-manager gets the D4 identity card; a
  * manager gets 应用设置 (identity header, ops, the bot's sections) and 已安装.
@@ -549,6 +595,9 @@ export function AppDetailView({
             ) : null}
             {target === null ? null : (
               <TargetOpsZone locale={locale} payload={target} onReload={onReload} />
+            )}
+            {payload.blocked ? null : (
+              <AppCredentialsSection locale={locale} workspaceId={payload.workspace_id} app={payload.app} />
             )}
             {bot === null || payload.can_manage !== true ? null : (
               <AppShareSection locale={locale} appId={appId} app={payload.app} onReload={onReload} />

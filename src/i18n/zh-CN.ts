@@ -136,6 +136,14 @@ export const zhCN: Dictionary = {
     tabSettings: "应用设置",
     tabDelivery: "投递状态",
     tabInstallations: "已安装",
+    metricMountedBots: "已挂载的机器人",
+    credentialsTitle: "凭据",
+    credentialsCopy:
+      "该 App 保存的凭据：用于认证的私钥，以及用于校验投递的 webhook secret。请在 App 的 GitHub 设置页轮换；仪表盘不会显示任何密钥。",
+    credentialsWebhook: "Webhook 地址",
+    credentialsAppId: "GitHub App ID",
+    credentialsStored: "已保存的凭据",
+    credentialsStoredValue: "私钥与 webhook secret（静态加密保存，永不显示）",
     noRepository: "该应用还没有对应仓库，因此不会进行任何评审。",
     targetsMany: "该应用审查多个仓库，各仓库的评审配置在仓库页中编辑。",
     delivery: {

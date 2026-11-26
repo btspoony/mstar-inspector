@@ -73,10 +73,12 @@ async function configureApp(
   extraKeys: Record<string, string> = {},
 ): Promise<void> {
   const store = createAppConfigStore(db, TEST_KEY);
-  await store.setModelChain(appId, chain);
-  await store.addProviderKey(appId, "ark", ARK_KEY);
+  // F12: the fixture owns the bot it configures.
+  const authority = { botId: appId, workspaceId: "default", role: "owner" as const };
+  await store.setModelChain(authority, appId, chain);
+  await store.addProviderKey(authority, appId, "ark", ARK_KEY);
   for (const [provider, key] of Object.entries(extraKeys)) {
-    await store.addProviderKey(appId, provider, key);
+    await store.addProviderKey(authority, appId, provider, key);
   }
 }
 
@@ -88,8 +90,9 @@ async function mapRole(
 ): Promise<void> {
   const store = createAppConfigStore(db, TEST_KEY);
   const chainName = `seat-${role}`;
-  await store.upsertModelChain(appId, chainName, selector);
-  await store.setModelChainSeat(appId, role, chainName);
+  const authority = { botId: appId, workspaceId: "default", role: "owner" as const };
+  await store.upsertModelChain(authority, appId, chainName, selector);
+  await store.setModelChainSeat(authority, appId, role, chainName);
 }
 
 async function seedTamperedKey(
@@ -382,7 +385,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await configureApp(db, appX.id, "openai/gpt-app");
     const store = createAppConfigStore(db, TEST_KEY);
     const keys = [sk("pool-one"), sk("pool-two")];
-    for (const key of keys) await store.addProviderKey(appX.id, "openai", key);
+    for (const key of keys) await store.addProviderKey({ botId: appX.id, workspaceId: "default", role: "owner" }, appX.id, "openai", key);
     const expected = (await store.getAppConfig(appX.id)).keys.openai!;
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -490,8 +493,8 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
       )
       .run(appY.id, padded);
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.addProviderKey(appY.id, "openai", sk("y-o"));
-    await store.addProviderKey(appY.id, "anthropic", sk("y-a"));
+    await store.addProviderKey({ botId: appY.id, workspaceId: "default", role: "owner" }, appY.id, "openai", sk("y-o"));
+    await store.addProviderKey({ botId: appY.id, workspaceId: "default", role: "owner" }, appY.id, "anthropic", sk("y-a"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
@@ -659,13 +662,13 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.addProviderKey(appX.id, "anthropic", sk("v1-SECRET"));
+    await store.addProviderKey({ botId: appX.id, workspaceId: "default", role: "owner" }, appX.id, "anthropic", sk("v1-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id, botId: appX.id }, targetId: appX.targetId })));
     expect(runnerPools()[0]!.anthropic).toEqual([sk("v1-SECRET")]);
 
-    await store.addProviderKey(appX.id, "anthropic", sk("v2-SECRET"));
+    await store.addProviderKey({ botId: appX.id, workspaceId: "default", role: "owner" }, appX.id, "anthropic", sk("v2-SECRET"));
     await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id, botId: appX.id }, targetId: appX.targetId })));
     const second = runnerPools()[1]!.anthropic!;
     expect(second).toHaveLength(2);
@@ -677,7 +680,12 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
+    await createAppConfigStore(db, TEST_KEY).addProviderKey(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
+      appX.id,
+      "not-a-provider",
+      sk("rogue-SECRET"),
+    );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id, botId: appX.id }, targetId: appX.targetId })));
@@ -699,7 +707,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", { openai: sk("x-openai") });
-    await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "anthropic", "   ");
+    await createAppConfigStore(db, TEST_KEY).addProviderKey({ botId: appX.id, workspaceId: "default", role: "owner" }, appX.id, "anthropic", "   ");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
@@ -803,7 +811,11 @@ describe("runner input modelOverrides threading", () => {
     const appX = await seedApp(db, "app-x");
     const store = createAppConfigStore(db, TEST_KEY);
     await mapRole(db, appX.id, "mstar-review-seat", "first/model");
-    await store.clearModelChainSeat(appX.id, "mstar-review-seat");
+    await store.clearModelChainSeat(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
+      appX.id,
+      "mstar-review-seat",
+    );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await withFrozenClock(() => consumer(makeBatch(makePayload({ botRef: { appId: appX.id, botId: appX.id }, targetId: appX.targetId }))));
@@ -925,6 +937,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     await configureApp(db, appX.id, "openai/gpt-app", { openai: sk("x-openai") });
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       {
         provider_id: "my-provider",
@@ -1024,6 +1037,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const appX = await seedApp(db, "app-x");
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       {
         provider_id: "my-provider",
@@ -1034,6 +1048,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
       sk("custom-fixture-AAA"),
     );
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       {
         provider_id: "second-one",
@@ -1090,6 +1105,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
       "my-model-2": { contextWindow: 32_000, maxTokens: 4_096 },
     };
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       {
         provider_id: "my-provider",
@@ -1101,6 +1117,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
       sk("custom-fixture-AAA"),
     );
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       {
         provider_id: "id-only",
@@ -1141,6 +1158,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     await configureApp(db, appX.id, "my-provider/model-1");
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       {
         provider_id: "my-provider",
@@ -1170,6 +1188,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const appX = await seedApp(db, "app-x");
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       {
         provider_id: "my-provider",
@@ -1228,6 +1247,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const appX = await seedApp(db, "app-x");
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       { provider_id: "my-provider", base_url: "https://one.example.com/v1", api: "openai-completions", model_ids: ["m1"] },
       sk("custom-fixture-AAA"),
@@ -1235,8 +1255,13 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id, botId: appX.id }, targetId: appX.targetId })));
-    await store.removeCustomProvider(appX.id, "my-provider");
+    await store.removeCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
+      appX.id,
+      "my-provider",
+    );
     await store.upsertCustomProvider(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
       appX.id,
       { provider_id: "my-provider", base_url: "https://two.example.com/v1", api: "openai-completions", model_ids: ["m2"] },
       sk("custom-fixture-BBB"),
@@ -1377,6 +1402,7 @@ describe("custom provider sizes resolve from the catalog at the runner boundary"
       const appX = await seedApp(db, "app-x");
       const store = createAppConfigStore(db, TEST_KEY);
       await store.upsertCustomProvider(
+        { botId: appX.id, workspaceId: "default", role: "owner" },
         appX.id,
         {
           provider_id: covered.providerId,

@@ -158,6 +158,14 @@ export const en = {
     tabSettings: "App settings",
     tabDelivery: "Deliveries",
     tabInstallations: "Installed",
+    metricMountedBots: "Mounted bots",
+    credentialsTitle: "Credentials",
+    credentialsCopy:
+      "This App's stored credentials: the private key it authenticates with and the webhook secret it verifies deliveries against. Rotate them on the App's GitHub settings page; the dashboard never displays a secret.",
+    credentialsWebhook: "Webhook URL",
+    credentialsAppId: "GitHub App ID",
+    credentialsStored: "Stored credentials",
+    credentialsStoredValue: "Private key and webhook secret (encrypted at rest, never displayed)",
     noRepository: "This App has no repository yet, so it reviews nothing.",
     targetsMany:
       "This App reviews several repositories, so its review settings live on the Repositories page.",

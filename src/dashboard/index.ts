@@ -162,6 +162,7 @@ import {
   parseModelChain,
   type AppConfigBatchFace,
   type AppConfigStore,
+  type BotWriteAuthority,
   type CustomProviderApi,
   type CustomProviderModelMeta,
   type CustomProviderModelsMeta,
@@ -2524,30 +2525,40 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
     if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
       return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
     }
-    // The bot-scoped sections key the SAME id — the ids are equal this
-    // release — so the row the config store reads is the bot the split
-    // created for this App. The payload's App fields stay real (F2's null
-    // placeholders belong to the bot routes only).
-    const botRow = await store.getScopedBotById(appRow.id, member.scope.workspaceId);
-    const sections = botRow
-      ? await botScopedSections(member.db, botRouteRow(botRow), c.env.DASHBOARD_ENCRYPTION_KEY, member.scope)
-      : {
-          installations: [],
-          keys: [],
-          model_chain: null,
-          model_roles: {},
-          model_chains: [],
-          custom_providers: [],
-          configured_providers: [],
-          provider_catalog_version: (await providerCatalog()).version,
-          provider_eligibility: {},
-          model_role_ids: MODEL_ROLE_IDS,
-          custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
-          sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
-        };
-    const installations = canWriteBotScope(appRow, member.scope)
-      ? await store.listInstallations(appRow.id)
-      : [];
+    // F11: the App face is App-scoped. Nothing here reads a BOT through an
+    // equal id — the split keeps them independent, so a same-id bot's keys,
+    // chains, providers or sandbox would be a different entity's data.
+    // The bot-owned sections therefore stay empty on the App payload; the
+    // bot's configuration lives only on `/bots/:botId`.
+    const catalog = await providerCatalog();
+    const appInstallations = await installationsVisibleTo(store, appRow, member.scope.workspaceId);
+    const appDelivery = await store.deliverySummary(appRow.id, member.scope.workspaceId);
+    const sections = {
+      installations: [] as Array<unknown>,
+      keys: [] as Array<unknown>,
+      model_chain: null as string | null,
+      model_roles: {} as Record<string, string>,
+      model_chains: [] as Array<unknown>,
+      custom_providers: [] as Array<unknown>,
+      configured_providers: [] as Array<unknown>,
+      provider_catalog_version: catalog.version,
+      provider_eligibility: {} as Record<string, string>,
+      model_role_ids: MODEL_ROLE_IDS,
+      custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
+      sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
+      delivery_summary: {
+        latest: appDelivery.latest
+          ? {
+              event_name: appDelivery.latest.event_name,
+              outcome: appDelivery.latest.outcome,
+              status_code: appDelivery.latest.status_code,
+              created_at: appDelivery.latest.created_at,
+            }
+          : null,
+        rejected24h: appDelivery.rejected24h,
+      },
+    };
+    const installations = appInstallations;
     return c.json({
       can_manage: true,
       workspace_id: member.scope.workspaceId,
@@ -2558,7 +2569,9 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         status: appRow.status,
         created_by: appRow.created_by,
         last_webhook_at: appRow.last_webhook_at ?? null,
-        sandbox_image_id: botRow?.sandbox_image_id ?? "omp",
+        // F11: no same-id bot read — sandbox_image_id is the BOT's column. The
+        // App payload omits it; the bot page is where it is configured.
+
         github_name: appRow.github_name ?? null,
         github_slug: appRow.github_slug ?? null,
         github_visibility: appRow.github_visibility ?? null,
@@ -2636,6 +2649,11 @@ function isOmpRuntimeImage(sandboxImageId: string): boolean {
 
 function repositoryLandingPath(gate: { target: ReviewTargetRow | null }): string | null {
   return gate.target === null ? null : `${REPOS_LIST_REDIRECT}/${gate.target.id}`;
+}
+
+/** F12: the authority a bot-configuration write carries into the store. */
+function botWriteAuthority(gate: { app: { id: string }; scope: WorkspaceScope }): BotWriteAuthority {
+  return { botId: gate.app.id, workspaceId: gate.scope.workspaceId, role: gate.scope.role };
 }
 
 function settingsPostResponse(
@@ -3626,6 +3644,7 @@ type DeclaredKeyAppendOutcome =
 
 async function appendDeclaredProviderKey(
   store: AppConfigStore,
+  authority: BotWriteAuthority,
   appId: string,
   providerId: string,
   plainKey: string,
@@ -3639,7 +3658,7 @@ async function appendDeclaredProviderKey(
   });
   if (!verified.ok) return { status: "rejected", reason: verified.reason };
   try {
-    await store.addCustomProviderKey(appId, providerId, plainKey, {
+    await store.addCustomProviderKey(authority, appId, providerId, plainKey, {
       base_url: declared.base_url,
       api: declared.api,
     });
@@ -3689,7 +3708,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   if (!PROVIDER_IDS.includes(provider)) {
     try {
-      const outcome = await appendDeclaredProviderKey(store, gate.app.id, provider, plainKey);
+      const outcome = await appendDeclaredProviderKey(store, botWriteAuthority(gate), gate.app.id, provider, plainKey);
       if (outcome.status === "undeclared") {
         return verifyKeyed400(c, SETTINGS_400_KEYS.customProviderUndeclared, { provider });
       }
@@ -3731,7 +3750,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
     if (!verified.ok) {
       return c.json({ ok: false, reason: mapVerifyReason(verified.reason) }, 400);
     }
-    await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
+    await store.saveVerifiedKey(botWriteAuthority(gate), gate.app.id, provider, plainKey, verified.models);
     return c.json({ ok: true, provider, models: verified.models });
   } catch (err) {
     logSettingsFailure("verify_key", gate.app.id, err);
@@ -3853,7 +3872,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (!verified.ok) {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
-      await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
+      await store.saveVerifiedKey(botWriteAuthority(gate), gate.app.id, provider, plainKey, verified.models);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
       if (err instanceof ProviderKeyLimitError) {
@@ -3871,7 +3890,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const raw = typeof form.model_chain === "string" ? form.model_chain : "";
     try {
       if (raw.trim() === "") {
-        await store.setModelChain(gate.app.id, null);
+        await store.setModelChain(botWriteAuthority(gate), gate.app.id, null);
         return settingsPostResponse(c, repositoryLandingPath(gate), `Cleared the model chain for ${appDisplayName(gate.app)} — reviews fail closed until a chain + provider keys are configured (per-App only).`,
         );
       }
@@ -3893,7 +3912,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (failing) {
         return settingsMembershipFailResponse(c, repositoryLandingPath(gate), failing);
       }
-      await store.setModelChain(gate.app.id, raw);
+      await store.setModelChain(botWriteAuthority(gate), gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3935,7 +3954,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
           return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.roleChainUnknown, { role });
         }
       }
-      await store.setModelChainSeats(gate.app.id, refs);
+      await store.setModelChainSeats(botWriteAuthority(gate), gate.app.id, refs);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3972,7 +3991,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsMembershipFailResponse(c, repositoryLandingPath(gate), failing);
     }
     try {
-      await store.upsertModelChain(gate.app.id, name, chain);
+      await store.upsertModelChain(botWriteAuthority(gate), gate.app.id, name, chain);
     } catch (err) {
       logSettingsFailure("add_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3985,7 +4004,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.defaultChainRemoveProtected);
     }
     try {
-      await store.removeModelChain(gate.app.id, name);
+      await store.removeModelChain(botWriteAuthority(gate), gate.app.id, name);
     } catch (err) {
       logSettingsFailure("remove_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -4078,6 +4097,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
       await store.upsertCustomProvider(
+        botWriteAuthority(gate),
         gate.app.id,
         { provider_id: providerId, base_url: baseUrl, api: api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
         plainKey,
@@ -4124,7 +4144,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     try {
-      const outcome = await appendDeclaredProviderKey(store, gate.app.id, providerId, plainKey);
+      const outcome = await appendDeclaredProviderKey(store, botWriteAuthority(gate), gate.app.id, providerId, plainKey);
       if (outcome.status === "undeclared") {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.customProviderUndeclared, {
           provider: providerId,
@@ -4252,6 +4272,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
       await store.upsertCustomProvider(
+        botWriteAuthority(gate),
         gate.app.id,
         { provider_id: templateId, base_url: baseUrl, api: declApi, model_ids: declModelIds },
         plainKey,
@@ -4353,7 +4374,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
     let removed: boolean;
     try {
-      removed = await store.removeCustomProvider(gate.app.id, providerId);
+      removed = await store.removeCustomProvider(botWriteAuthority(gate), gate.app.id, providerId);
     } catch (err) {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -4398,8 +4419,8 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
       (row) => row.provider_id === provider,
     );
     removed = declaredCustom
-      ? await store.deleteCustomProviderKey(gate.app.id, provider, keyId)
-      : await store.deleteProviderKey(gate.app.id, provider, keyId);
+      ? await store.deleteCustomProviderKey(botWriteAuthority(gate), gate.app.id, provider, keyId)
+      : await store.deleteProviderKey(botWriteAuthority(gate), gate.app.id, provider, keyId);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
     return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);

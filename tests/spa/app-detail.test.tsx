@@ -765,31 +765,43 @@ describe("header metric band on the manage face (static SSR)", () => {
     [...renderDetail(payload).matchAll(/data-slot="metric-key"[^>]*>([^<]+)<\/span><span data-slot="metric-value"[^>]*class="([^"]*)"[^>]*>(\d+)<\/span>/g)]
       .map((m) => ({ key: m[1]!, value: m[3]!, danger: m[2]!.includes("tone-danger") }));
 
-  const payloadWith = (counts: { keys: number; chains: number; installations: number; rejected: number | null }): SettingsManagePayload => ({
+  // F11: the band is App-scoped. `keys` and `model_chains` were BOT
+  // configuration reached through an equal id, so the counts that remain are
+  // installations, mounted bots (the chain), and the delivery refusals.
+  const payloadWith = (counts: {
+    mounted: number;
+    installations: number;
+    rejected: number | null;
+  }): SettingsManagePayload => ({
     ...managePayload,
-    keys: Array.from({ length: counts.keys }, () => keyRow),
-    model_chains: Array.from({ length: counts.chains }, () => chain),
     installations: Array.from({ length: counts.installations }, () => installation),
+    mounted_bot_ids: Array.from({ length: counts.mounted }, (_, index) => `bot-${index}`),
     delivery_summary: counts.rejected === null ? undefined : summary(counts.rejected),
   });
 
-  test("the four figures render in band order, each wired to its own source count", () => {
-    const pairs = band(payloadWith({ installations: 2, keys: 3, chains: 5, rejected: 7 }));
+  test("the three figures render in band order, each wired to its own source count", () => {
+    const pairs = band(payloadWith({ installations: 2, mounted: 5, rejected: 7 }));
     expect(pairs.map(({ key, value }) => [key, value])).toEqual([
       ["Installations", "2"],
-      ["Keys", "3"],
-      ["Model chains", "5"],
+      ["Mounted bots", "5"],
       ["24h rejected", "7"],
     ]);
   });
 
+  test("no bot-owned figure appears on the App band", () => {
+    const pairs = band(payloadWith({ installations: 1, mounted: 1, rejected: 0 }));
+    const keys = pairs.map(({ key }) => key);
+    expect(keys).not.toContain("Keys");
+    expect(keys).not.toContain("Model chains");
+  });
+
   test("a zero rejected count renders without the danger tone; non-zero wears it", () => {
-    const zero = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: 0 }));
-    expect(zero[3]!).toEqual({ key: "24h rejected", value: "0", danger: false });
-    const absent = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: null }));
-    expect(absent[3]!).toEqual({ key: "24h rejected", value: "0", danger: false });
-    const refused = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: 4 }));
-    expect(refused[3]!).toEqual({ key: "24h rejected", value: "4", danger: true });
+    const zero = band(payloadWith({ installations: 1, mounted: 1, rejected: 0 }));
+    expect(zero[2]!).toEqual({ key: "24h rejected", value: "0", danger: false });
+    const absent = band(payloadWith({ installations: 1, mounted: 1, rejected: null }));
+    expect(absent[2]!).toEqual({ key: "24h rejected", value: "0", danger: false });
+    const refused = band(payloadWith({ installations: 1, mounted: 1, rejected: 4 }));
+    expect(refused[2]!).toEqual({ key: "24h rejected", value: "4", danger: true });
   });
 });
 

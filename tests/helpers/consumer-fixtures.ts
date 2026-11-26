@@ -209,10 +209,12 @@ export async function seedAppConfig(
   extraKeys: Record<string, string> = {},
 ): Promise<void> {
   const store = createAppConfigStore(db, TEST_KEY);
-  await store.setModelChain(appId, modelChain);
-  await store.addProviderKey(appId, "ark", "ark-key");
+  // F12: bot-configuration writes carry the owning workspace's authority.
+  const authority = { botId: appId, workspaceId: "default", role: "owner" as const };
+  await store.setModelChain(authority, appId, modelChain);
+  await store.addProviderKey(authority, appId, "ark", "ark-key");
   for (const [provider, key] of Object.entries(extraKeys)) {
-    await store.addProviderKey(appId, provider, key);
+    await store.addProviderKey(authority, appId, provider, key);
   }
 }
 

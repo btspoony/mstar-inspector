@@ -496,6 +496,10 @@ export function isReviewLevel(value: unknown): value is ReviewLevel {
  * log, sandbox_image_id, review-trigger runtime config) stays behind the
  * manager face (the server keys the split on `can_manage`).
  */
+/** F11/F7: the bot ids an App's chain mounts here — the App's only App→bot
+ * relation, and the App band's "mounted bots" count. Absent means no chain. */
+export type MountedBotIds = { mounted_bot_ids?: string[] };
+
 export type SettingsIdentityAppMeta = {
   github_app_id: number | null;
   status: string | null;
@@ -740,7 +744,9 @@ export type BotSettingsAppMeta = {
   multiplier?: number | null;
   status: string | null;
   scope: BotScope;
-  sandbox_image_id: string;
+  /** BOT configuration: the bot payload always carries it; the App face
+   * deliberately omits it (F11), so the shared meta stays optional. */
+  sandbox_image_id?: string;
   last_webhook_at: string | null;
   github_name: string | null;
   github_slug: string | null;
@@ -757,7 +763,7 @@ export type BotSettingsAppMeta = {
  * so both faces feed them the same data.
  */
 export type BotConfigSections = {
-  app: BotSettingsAppMeta;
+  app: BotSettingsAppMeta & { sandbox_image_id: string };
   keys: ProviderKeyRow[];
   model_chain: string | null;
   model_roles: Record<string, string>;
@@ -852,7 +858,7 @@ export type SettingsReadOnlyPayload = {
   target_id?: string;
   targets_many?: boolean;
   app: SettingsIdentityAppMeta;
-};
+} & MountedBotIds;
 
 /**
  * The App's operator-facing display name (D0): GitHub's current name, then
@@ -907,10 +913,17 @@ export type SettingsManagePayload = SettingsManageBase & {
  * defaulted (`target_id?: undefined` is the discriminant {@link hasTargetFacts}
  * reads).
  */
+/** The App face never serves the BOT's sandbox image (F11) — an App has no
+ * runtime harness of its own; the field belongs to the bot it mounts. */
+type AppFaceSandbox = { sandbox_image_id?: string };
+
 export type SettingsUntargetedPayload = SettingsManageBase & {
   target_id?: undefined;
   check_gate?: undefined;
-  app: BotSettingsAppMeta & { created_by: string; github_visibility: GithubVisibility | null };
+  app: BotSettingsAppMeta & AppFaceSandbox & {
+    created_by: string;
+    github_visibility: GithubVisibility | null;
+  };
 };
 
 /**
@@ -929,7 +942,7 @@ export type SettingsBlockedPayload = {
   app: BlockedAppIdentity;
   targets_many?: false;
   installation: BoundInstallation | null;
-} & TargetOwnedSections;
+} & TargetOwnedSections & MountedBotIds;
 
 /**
  * The Blocked manager face of a bot this workspace holds SEVERAL repositories
@@ -937,7 +950,7 @@ export type SettingsBlockedPayload = {
  * target-owned slice is absent and `target_id` is an explicit `null` — the
  * shape the SPA's `targets_many` notice reads.
  */
-export type SettingsBlockedManyPayload = {
+export type SettingsBlockedManyPayload = MountedBotIds & {
   can_manage: true;
   blocked: true;
   blocked_reason: BlockedReason;
@@ -2513,7 +2526,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   }
   if (typeof data.official_workspace !== "boolean") return null;
   if (typeof data.can_configure_bot !== "boolean") return null;
-  if (typeof data.app.sandbox_image_id !== "string") return null;
+  if (data.app.sandbox_image_id !== undefined && typeof data.app.sandbox_image_id !== "string") return null;
   if (!isBotScope(data.app.scope)) return null;
   if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
   if (!isPendingInstallationList(data.pending_installations)) return null;
