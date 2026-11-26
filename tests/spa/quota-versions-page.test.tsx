@@ -150,7 +150,7 @@ describe("console quota versions page", () => {
 
     const preview = surface.sent.find((request) => request.url.endsWith("/quota-versions/preview"));
     expect(preview?.body).toMatchObject({
-      effectiveFrom: `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`,
+      effectiveFrom: new Date().toISOString().slice(0, 10),
       base: { quick: 1, default: 2, deep: 6 },
       source: { byok: 1, shared: 10 },
       rpPerCredit: 20,
@@ -210,12 +210,24 @@ describe("console quota versions page", () => {
     await surface.close();
   });
 
-  test("a failed preview blocks publishing with its own copy", async () => {
+  test("a failed preview shows the backend reason, never only the generic sentence", async () => {
+    const reason = 'effectiveFrom "2026-11-26T00:00:00.000Z" is not a calendar date (YYYY-MM-DD)';
     const surface = await mount((request) =>
-      request.url.endsWith("/quota-versions/preview") ? new Response("boom", { status: 500 }) : json(DATA),
+      request.url.endsWith("/quota-versions/preview") ? json({ error: reason }, 400) : json(DATA),
     );
     await surface.click(previewButton(surface));
-    expect(surface.text()).toContain(t("en", "admin.quotaVersions.previewLoadFailed"));
+    expect(surface.text()).toContain(t("en", "admin.quotaVersions.previewLoadFailed", { detail: reason }));
+    expect(publishButton(surface)?.hasAttribute("disabled")).toBe(true);
+    await surface.close();
+  });
+
+  test("an unreachable preview says so instead of quoting a status", async () => {
+    const surface = await mount((request) => {
+      if (request.url.endsWith("/quota-versions/preview")) throw new TypeError("Failed to fetch");
+      return json(DATA);
+    });
+    await surface.click(previewButton(surface));
+    expect(surface.text()).toContain(t("en", "admin.quotaVersions.previewUnreachable"));
     expect(publishButton(surface)?.hasAttribute("disabled")).toBe(true);
     await surface.close();
   });

@@ -1453,10 +1453,13 @@ export const zhCN: Dictionary = {
       previewCount: "按今日用量，{total} 个工作区中有 {count} 个会超出月度上限。",
       previewNone: "按今日用量，没有工作区会超出月度上限。",
       previewStartsOn: "此版本自 {date} 起判定额度；当月沿用覆盖其 1 日的版本。",
+      noVersion:
+        "尚无任何额度版本，因此 {plans} 都没有月度上限。发布一个版本会追加版本 1，并恢复计量。",
       uncoveredPlans:
         "版本 {version} 没有为 {plans} 设置月度上限，因此这些套餐上的审查会在开始前被拒绝。创建一个覆盖所有套餐的版本即可恢复。",
       previewRequired: "发布前请先检查影响。",
-      previewLoadFailed: "无法计算影响——在加载完成前不可发布。",
+      previewLoadFailed: "无法计算影响：{detail}",
+      previewUnreachable: "无法计算影响——服务器没有响应。在加载完成前不可发布。",
       previewAction: "检查影响",
       published: "已创建版本 {version}。",
       publishFailed: "无法创建额度版本。",

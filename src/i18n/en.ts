@@ -1551,10 +1551,14 @@ export const en = {
       previewNone: "No workspace would be over its monthly limit at today's usage under these numbers.",
       previewStartsOn:
         "This version judges quota from {date}; the current month keeps the version that covered its 1st.",
+      noVersion:
+        "No quota version exists yet, so nothing sets a monthly limit for {plans}. Publishing one appends version 1 and restores metering.",
       uncoveredPlans:
         "Version {version} sets no monthly limit for {plans}, so reviews on those plans are refused before they start. Create a version that covers every plan to restore them.",
       previewRequired: "Check the impact before publishing.",
-      previewLoadFailed: "The impact could not be computed — publishing stays unavailable until it loads.",
+      previewLoadFailed: "The impact could not be computed: {detail}",
+      previewUnreachable:
+        "The impact could not be computed — the server did not answer. Publishing stays unavailable until it loads.",
       previewAction: "Check impact",
       published: "Version {version} created.",
       publishFailed: "Could not create the quota version.",

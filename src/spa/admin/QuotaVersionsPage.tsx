@@ -25,8 +25,6 @@ const STATE_COPY = {
   past: "admin.quotaVersions.statusHistorical",
 } as const satisfies Record<QuotaVersionRow["state"], DictionaryKey>;
 
-const instantOf = (date: string): string => `${date}T00:00:00.000Z`;
-
 const todayDate = (): string => new Date().toISOString().slice(0, 10);
 
 function wholeNumber(raw: string): number | null {
@@ -87,7 +85,7 @@ function candidateOf(drafts: Drafts, data: QuotaVersionsData): QuotaCandidate | 
     monthlyRp[plan.id] = rp;
   }
   return {
-    effectiveFrom: instantOf(drafts.effectiveFrom),
+    effectiveFrom: drafts.effectiveFrom,
     base: { quick, default: standard, deep },
     source: { byok, shared },
     rpPerCredit,
@@ -133,7 +131,14 @@ export function QuotaVersionsPage({ locale }: { locale: Locale }) {
       >
         {(data) => (
           <div className="flex flex-col gap-6">
-            {data.uncoveredPlanIds.length === 0 ? null : (
+            {data.judgingVersion === null ? (
+              <PageNotice
+                kind="warn"
+                message={t(locale, "admin.quotaVersions.noVersion", {
+                  plans: data.plans.map((plan) => plan.name).join(", "),
+                })}
+              />
+            ) : data.uncoveredPlanIds.length === 0 ? null : (
               <PageNotice
                 kind="error"
                 message={t(locale, "admin.quotaVersions.uncoveredPlans", {
@@ -146,7 +151,7 @@ export function QuotaVersionsPage({ locale }: { locale: Locale }) {
             )}
             <DataTable columns={columns} rows={data.versions} rowKey={(row) => row.id} />
             <CreateQuotaVersionForm
-              key={data.judgingVersion}
+              key={data.judgingVersion ?? 0}
               locale={locale}
               data={data}
               onPublished={reload}
@@ -170,7 +175,7 @@ function CreateQuotaVersionForm({
   const [drafts, setDrafts] = useState<Drafts>(() => seedDrafts(data));
   const [preview, setPreview] = useState<{ fingerprint: string; impact: QuotaImpact } | null>(null);
   const [previewing, setPreviewing] = useState(false);
-  const [previewFailed, setPreviewFailed] = useState(false);
+  const [previewFailure, setPreviewFailure] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
 
@@ -182,14 +187,18 @@ function CreateQuotaVersionForm({
   async function runPreview() {
     if (candidate === null) return;
     setPreviewing(true);
-    setPreviewFailed(false);
+    setPreviewFailure(null);
     setNotice(null);
     try {
       const impact = await previewQuotaVersion(candidate);
       setPreview({ fingerprint: JSON.stringify(candidate), impact });
-    } catch {
+    } catch (error) {
       setPreview(null);
-      setPreviewFailed(true);
+      setPreviewFailure(
+        error instanceof AdminWriteError
+          ? t(locale, "admin.quotaVersions.previewLoadFailed", { detail: error.message })
+          : t(locale, "admin.quotaVersions.previewUnreachable"),
+      );
     } finally {
       setPreviewing(false);
     }
@@ -283,9 +292,11 @@ function CreateQuotaVersionForm({
                 {t(locale, "admin.quotaVersions.effectiveFromHint")}
               </p>
               <p className="text-xs text-muted-foreground">
-                {t(locale, "admin.quotaVersions.effectiveFromJudges", {
-                  date: quotaStartsOn(instantOf(drafts.effectiveFrom)),
-                })}
+                {/^\d{4}-\d{2}-\d{2}$/.test(drafts.effectiveFrom)
+                  ? t(locale, "admin.quotaVersions.effectiveFromJudges", {
+                      date: quotaStartsOn(`${drafts.effectiveFrom}T00:00:00.000Z`),
+                    })
+                  : null}
               </p>
             </div>
             <div className="flex min-w-60 flex-col gap-1.5">
@@ -335,8 +346,8 @@ function CreateQuotaVersionForm({
             </Button>
           </div>
         </form>
-        {previewFailed ? (
-          <PageNotice kind="error" message={t(locale, "admin.quotaVersions.previewLoadFailed")} />
+        {previewFailure !== null ? (
+          <PageNotice kind="error" message={previewFailure} />
         ) : fresh && preview !== null ? (
           <div className="flex flex-col gap-1">
             <p className="text-sm">

@@ -32,7 +32,7 @@ export type QuotaVersionRow = {
 };
 
 export type QuotaVersionsPayload = {
-  judgingVersion: number;
+  judgingVersion: number | null;
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
@@ -61,14 +61,16 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
   ]);
   const profiles = decodeQuotaProfiles((profileResult?.results ?? []) as QuotaProfileListRow[]);
   const plans = (planResult?.results ?? []) as QuotaPlan[];
-  const judging = pickQuotaProfile(profiles, month.startIso);
+  // An empty table is a fresh deployment, not a read failure: the operator
+  // needs the form to publish the first version, so nothing here throws.
+  const judging = profiles.length === 0 ? null : pickQuotaProfile(profiles, month.startIso);
   const versions = profiles.map((profile: QuotaProfileVersion, index) => ({
     id: profile.id,
     version: profile.version,
     effectiveFrom: profile.effectiveFrom,
     effectiveTo: profiles[index + 1]?.effectiveFrom ?? null,
     state:
-      profile.id === judging.id
+      profile.id === judging?.id
         ? ("current" as const)
         : profile.effectiveFrom > month.startIso
           ? ("scheduled" as const)
@@ -79,9 +81,12 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
     notes: profile.notes,
     monthlyRp: profile.monthlyRp,
   }));
-  const uncoveredPlanIds = plans.filter((plan) => !Object.hasOwn(judging.monthlyRp, plan.id)).map((plan) => plan.id);
+  const uncoveredPlanIds =
+    judging === null
+      ? plans.map((plan) => plan.id)
+      : plans.filter((plan) => !Object.hasOwn(judging.monthlyRp, plan.id)).map((plan) => plan.id);
   return {
-    judgingVersion: judging.version,
+    judgingVersion: judging?.version ?? null,
     nextVersion: profiles.reduce((max, profile) => Math.max(max, profile.version), 0) + 1,
     plans,
     versions,

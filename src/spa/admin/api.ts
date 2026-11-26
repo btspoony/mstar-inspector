@@ -1033,7 +1033,7 @@ export type QuotaVersionRow = {
 };
 
 export type QuotaVersionsData = {
-  judgingVersion: number;
+  judgingVersion: number | null;
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
@@ -1072,7 +1072,7 @@ function quotaCeilings(value: unknown, what: string): Record<string, number | nu
 export async function readQuotaVersions(): Promise<QuotaVersionsData> {
   const body = map(await fetchJson(`${BASE}/quota-versions`), "quota versions response");
   return {
-    judgingVersion: num(body, "judgingVersion"),
+    judgingVersion: maybeNum(body, "judgingVersion"),
     nextVersion: num(body, "nextVersion"),
     plans: list(body.plans, "plans").map((row) => ({ id: text(row, "id"), name: text(row, "name") })),
     uncoveredPlanIds: planIds(body.uncoveredPlanIds),

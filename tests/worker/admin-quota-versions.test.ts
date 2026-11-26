@@ -288,6 +288,41 @@ describe("POST /_internal_admin/api/quota-versions/preview", () => {
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("unlimited");
   });
+
+  test("previews a blank-ceiling form and a pre-filled one alike, and writes nothing", async () => {
+    const db = fixture();
+    seedWorkspace(db, "ws-over");
+    seedSubscription(db, "ws-over", "free");
+    seedUsage(db, "ws-over", 5000);
+    const before = db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get();
+    const live = (db.raw.query("SELECT COUNT(*) AS n FROM workspaces WHERE deleted_at IS NULL").get() as { n: number }).n;
+
+    const blank = (await (await adminFetch(db, "POST", "/api/quota-versions/preview", {
+      ...candidate(),
+      monthlyRp: { free: null, pro: null, unlimited: null },
+    })).json()) as { count: number; total: number; startsOn: string };
+    expect(blank).toEqual({ count: 0, total: live, startsOn: nextFirst() });
+
+    const filled = (await (await adminFetch(db, "POST", "/api/quota-versions/preview", candidate())).json()) as {
+      count: number;
+      total: number;
+      startsOn: string;
+    };
+    expect(filled).toEqual({ count: 1, total: live, startsOn: nextFirst() });
+
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual(before);
+  });
+
+  test("a regression: the ISO-instant effectiveFrom the console used to send is a named 400", async () => {
+    const db = fixture();
+    const res = await adminFetch(db, "POST", "/api/quota-versions/preview", {
+      ...candidate(),
+      effectiveFrom: `${nextFirst()}T00:00:00.000Z`,
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("is not a calendar date (YYYY-MM-DD)");
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: 1 });
+  });
 });
 
 describe("POST /_internal_admin/api/quota-versions", () => {
@@ -396,6 +431,38 @@ describe("POST /_internal_admin/api/quota-versions", () => {
     expect(again.status).toBe(409);
     expect(((await again.json()) as { error: string }).error).toContain("already starts at");
     expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: 2 });
+  });
+
+  test("publishes version 1 end to end when no profile exists yet", async () => {
+    const db = fixture();
+    seed(db, "DELETE FROM quota_profile_plans");
+    seed(db, "DELETE FROM quota_profiles");
+
+    const impact = (await (await adminFetch(db, "POST", "/api/quota-versions/preview", candidate())).json()) as {
+      count: number;
+      total: number;
+      startsOn: string;
+    };
+    const res = await adminFetch(db, "POST", "/api/quota-versions", { ...candidate(), impact });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ version: 1, startsOn: nextFirst() });
+
+    const listed = (await (await adminFetch(db, "GET", "/api/quota-versions")).json()) as {
+      judgingVersion: number | null;
+      uncoveredPlanIds: string[];
+      versions: Array<{ version: number; effectiveFrom: string; monthlyRp: Record<string, number | null> }>;
+    };
+    expect(listed.judgingVersion).toBe(1);
+    expect(listed.uncoveredPlanIds).toEqual([]);
+    expect(
+      listed.versions.map((row) => ({ version: row.version, effectiveFrom: row.effectiveFrom, monthlyRp: row.monthlyRp })),
+    ).toEqual([
+      {
+        version: 1,
+        effectiveFrom: `${nextFirst()}T00:00:00.000Z`,
+        monthlyRp: { free: 2000, pro: 20000, unlimited: null },
+      },
+    ]);
   });
 });
 
@@ -682,10 +749,22 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
     expect(body.uncoveredPlanIds).toEqual(["unlimited"]);
   });
 
-  test("an empty profile table is the missing-migration error, unchanged", async () => {
+  test("an empty profile table renders the form instead of throwing, so version 1 can be published", async () => {
     const db = fixture();
     seed(db, "DELETE FROM quota_profile_plans");
     seed(db, "DELETE FROM quota_profiles");
-    await expect(listQuotaVersions(db, new Date())).rejects.toThrow(/0063_quota_profiles\.sql/);
+    const res = await adminFetch(db, "GET", "/api/quota-versions");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      judgingVersion: null,
+      nextVersion: 1,
+      plans: [
+        { id: "free", name: "Free" },
+        { id: "pro", name: "Pro" },
+        { id: "unlimited", name: "Unlimited" },
+      ],
+      versions: [],
+      uncoveredPlanIds: ["free", "pro", "unlimited"],
+    });
   });
 });
