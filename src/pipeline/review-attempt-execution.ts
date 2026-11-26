@@ -2712,7 +2712,6 @@ export function internalFailureDetail(input: {
   attemptId: string;
 }): string {
   const phaseClause = `internal error in phase ${input.phase} (stage ${input.stage})`;
-  const message = input.message.trim() === "" ? "(no message recorded)" : input.message;
   // The traced stage is structural, ours, and must survive a flood of runner
   // diagnostics: the clause's room is reserved BEFORE the free-text message is
   // shortened, so no length of stderr can push it out of the row again.
@@ -2720,6 +2719,13 @@ export function internalFailureDetail(input: {
     input.lastStage === undefined || input.lastStage.trim() === ""
       ? undefined
       : input.lastStage.replace(/\s+/g, " ").trim().slice(0, 60);
+  // The structural clause is the ONLY one the row carries: the runner's detail
+  // text appends its own in-text suffix for lanes that never thread the data,
+  // so a short enough message would otherwise read the stage twice.
+  const rawMessage = input.message.trim() === "" ? "(no message recorded)" : input.message;
+  const stripped =
+    stageToken === undefined ? rawMessage : rawMessage.replace(/\s*\(last stage: [^()]*\)\s*$/, "").trim();
+  const message = stripped === "" ? "(no message recorded)" : stripped;
   const stageClause = stageToken === undefined ? "" : ` (last stage: ${stageToken})`;
   const bounded = boundFailureMessage(message, Math.max(40, 400 - stageClause.length - 20));
   const what =
@@ -2742,13 +2748,20 @@ export function internalFailureCheckText(input: {
   phase: AttemptPhase;
   stage: FailureStage;
   errorClass: string | undefined;
+  recorded: boolean;
   attemptId: string;
 }): string {
   const phaseClause = `internal error in phase ${input.phase} (stage ${input.stage})`;
+  // The sentence must reflect what actually happened: when the failure-store
+  // insert itself failed, nothing is recorded, and claiming otherwise sends
+  // the operator hunting for a row that does not exist.
+  const recordClause = input.recorded
+    ? "the detail is recorded with the failure, not published here"
+    : "the failure could not be recorded — nothing durable exists beyond this attempt";
   const what =
     input.errorClass === undefined
-      ? `${phaseClause} — the detail is recorded with the failure, not published here`
-      : `${phaseClause}: ${normalizedErrorClass(input.errorClass)} — the detail is recorded with the failure, not published here`;
+      ? `${phaseClause} — ${recordClause}`
+      : `${phaseClause}: ${normalizedErrorClass(input.errorClass)} — ${recordClause}`;
   return `${what} (attempt ${input.attemptId})`;
 }
 
@@ -5116,8 +5129,10 @@ async function publishPhase(
 /**
  * The attempt's sealed credential set, read from D1 at settlement time. The
  * redaction never travels in a handoff (design D6 rule 3): the envelope is the
- * durable copy, and an attempt that never sealed one (or whose envelope cannot
- * be opened) redacts with the empty set instead of failing the settlement.
+ * durable copy. An attempt that never sealed one redacts with the empty set;
+ * an envelope that cannot be OPENED yields `null` and the settlement returns
+ * `unknown` rather than writing anything derived from unprovable text. A
+ * transient read fault is neither: it propagates, and the step retries.
  */
 async function sealedSecretValues(deps: ProcessDeps, attemptId: string): Promise<string[] | null> {
   // The READ is outside the guard: a transient D1 fault is not evidence about
@@ -5564,6 +5579,7 @@ export async function settleAttemptFailure(
           phase: failure.phase,
           stage: failure.stage,
           errorClass: sanitizedErrorClass,
+          recorded: durableOutcome,
           attemptId,
         })
       : undefined;

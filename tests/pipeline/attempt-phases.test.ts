@@ -65,6 +65,7 @@ const {
   collectAttempt,
   createCheckSettlement,
   errorClassOf,
+  internalFailureDetail,
   PhaseTransientError,
   prepareAttempt,
   publishAttempt,
@@ -4426,6 +4427,67 @@ describe("an unclassified internal error reports its stage and cause", () => {
     expect(concluded[0]!.failureDetail).not.toContain("last stage");
     expect(concluded[0]!.failureDetail).not.toContain("diagnostics flood");
     expect(concluded[0]!.failureDetail).toContain("(stage runner)");
+  });
+
+  test("a short runner message with a traced stage reads the stage exactly once", () => {
+    // R1: the runner's detail text appends its own in-text suffix; the composed
+    // clause is structural. Both in one row is a duplication, not two facts.
+    const detail = internalFailureDetail({
+      phase: "review",
+      stage: "runner",
+      errorClass: "Error",
+      message: "runner failed: exit 1, stdout 0B, stderr tail: boom (last stage: synthesize)",
+      lastStage: "synthesize",
+      attemptId: ATTEMPT_ID,
+    });
+    const occurrences = detail.split("last stage: synthesize").length - 1;
+    expect(occurrences).toBe(1);
+    expect(detail).toContain("stderr tail: boom");
+    expect(detail).toContain(`(attempt ${ATTEMPT_ID})`);
+  });
+
+  test("the Check never claims a record the failure-store insert failed to write", async () => {
+    // R2: the insert throws and no launch row exists — settlement cannot prove
+    // anything durable, so it must not publish a sentence that says otherwise.
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    const concluded: Array<{ outcome: string; failureDetail?: string }> = [];
+    deps.checks = {
+      begin: async () => HANDLE,
+      terminalize: async (input: { outcome: string; failureDetail?: string }) => {
+        concluded.push(input);
+      },
+    };
+    const check = createCheckSettlement({ deps, payload: ref.payload, attemptId: ATTEMPT_ID, checkBudgets: null, deadlineMs: Date.now() + 900_000 });
+    check.handle = HANDLE;
+    deps.checkSettlements.set(ATTEMPT_ID, check);
+    deps.failureStore = {
+      record: async () => {
+        throw new Error("d1 write fault");
+      },
+    } as unknown as ProcessDeps["failureStore"];
+
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "prepare",
+        stage: "pipeline",
+        headSha: SHA,
+        runnerReturned: false,
+        message: "checkout refused the ref",
+        errorClass: "Error",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(concluded).toHaveLength(1);
+    expect(concluded[0]!.failureDetail).not.toContain("the detail is recorded with the failure");
+    expect(concluded[0]!.failureDetail).toContain("the failure could not be recorded");
+    expect(concluded[0]!.failureDetail).toContain(`attempt ${ATTEMPT_ID}`);
   });
 
   test("the thrown error's class crosses a prototype-less rebuild as data", async () => {
