@@ -125,6 +125,37 @@ export async function resolveWorkspaceQuotaProfile(
 }
 
 /**
+ * Pin this workspace's month to a version, and answer the version that actually
+ * won — the metering path's HALF of D36, and the only writer of the table.
+ *
+ * `INSERT OR IGNORE` on `(workspace_id, month)` means a concurrent first
+ * metering of the same month does not move the pin: whoever lands first wins,
+ * and every later caller reads that same row. The read-back is not an
+ * optimisation — it is what makes the price follow the BINDING rather than the
+ * resolver's own view. Two calls racing across an `effective_from` boundary can
+ * resolve two different profiles; only the read-back makes both price the same
+ * version. Callers MUST price from the returned profile.
+ *
+ * A crash between the insert and the caller's usage row leaves a binding with no
+ * usage behind it: harmless, because the next call reads it instead of
+ * re-resolving, and the month's version is exactly what it would have pinned.
+ */
+export async function bindWorkspaceQuotaProfile(
+  db: D1Like,
+  input: { workspaceId: string; month: string; at: string },
+): Promise<QuotaProfile> {
+  const inForce = await resolveQuotaProfile(db, input.at);
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO workspace_quota_binding (workspace_id, month, profile_id)
+       VALUES (?1, ?2, ?3)`,
+    )
+    .bind(input.workspaceId, input.month, inForce.id)
+    .run();
+  return resolveWorkspaceQuotaProfile(db, input.workspaceId, input.month, input.at);
+}
+
+/**
  * The executing bot's price multiplier (D11). One statement, one column: the
  * metering path and the enqueue ceiling both read it here rather than each
  * carrying their own copy of the SQL.

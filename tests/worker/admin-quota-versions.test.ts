@@ -185,7 +185,8 @@ describe("GET /_internal_admin/api/quota-versions", () => {
         state: "scheduled",
         base: { quick: 50, default: 100, deep: 300 },
         rpPerCredit: 1000,
-        notes: "v2: large base 50/100/300, 1 credit = 1000 RP; ceilings scaled with the price.",
+        notes:
+          "v2: large base 50/100/300, 1 credit = 1000 RP; ceilings scaled by the superseded profile's own base total.",
         monthlyRp: { free: 100_000, pro: 1_000_000, unlimited: null },
       },
     ]);

@@ -40,7 +40,7 @@ import {
   recordUsageEvent,
   type UsageSource,
 } from "../store/usage-store";
-import { quotaMonth, readBotMultiplier, resolveWorkspaceQuotaProfile, rpFor } from "../store/quota-store";
+import { bindWorkspaceQuotaProfile, quotaMonth, readBotMultiplier, rpFor } from "../store/quota-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   CHECK_BACKOFF_MS,
@@ -3026,29 +3026,35 @@ async function preparePhase(
   const usageOccurredAt = usageNow.toISOString();
   const usageMonth = quotaMonth(usageNow);
   try {
-    // The bound version is resolved at the INSTANT being charged, so a
-    // workspace metering for the first time today pins today's version rather
-    // than the one covering the 1st (D13).
-    const boundProfile = await resolveWorkspaceQuotaProfile(
-      deps.env.DB,
-      usageWorkspaceId,
-      usageMonth.month,
-      usageOccurredAt,
-    );
-    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
-    if (multiplier === null) {
-      throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
+    // (1) A replayed token is the same paid execution: nothing to charge and
+    // nothing to record. Check BEFORE binding, so a replay in a NEW month does
+    // not pin that month's version for a workspace that never metered in it (I1).
+    const alreadyCharged = await hasUsageEventForExecutionToken(deps.env.DB, executionToken);
+    if (!alreadyCharged) {
+      // (2)+(3) Pin the BINDING first, then price from what actually won it.
+      // Two first meterings of one month can resolve the profile on opposite
+      // sides of an `effective_from` boundary; `INSERT OR IGNORE` keeps one row,
+      // and reading it back is what makes both calls charge the SAME version.
+      const boundProfile = await bindWorkspaceQuotaProfile(deps.env.DB, {
+        workspaceId: usageWorkspaceId,
+        month: usageMonth.month,
+        at: usageOccurredAt,
+      });
+      const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
+      if (multiplier === null) {
+        throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
+      }
+      // (4) Price from the bound version, then append the row.
+      await recordUsageEvent(deps.env.DB, {
+        reviewId,
+        executionToken,
+        workspaceId: usageWorkspaceId,
+        occurredAt: usageOccurredAt,
+        rp: rpFor(level, multiplier, boundProfile),
+        source: usageSource,
+        botId: payload.botRef.botId,
+      });
     }
-    await recordUsageEvent(deps.env.DB, {
-      reviewId,
-      executionToken,
-      workspaceId: usageWorkspaceId,
-      occurredAt: usageOccurredAt,
-      rp: rpFor(level, multiplier, boundProfile),
-      source: usageSource,
-      botId: payload.botRef.botId,
-      quota: { month: usageMonth.month, profileId: boundProfile.id },
-    });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const applied: true | false | "unknown" = await hasUsageEventForExecutionToken(

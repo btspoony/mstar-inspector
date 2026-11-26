@@ -9755,14 +9755,22 @@ describe("usage ledger (migration 0031)", () => {
   test("an ambiguous usage failure records applied: true so it is not backfilled twice", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // Metering is a plain insert now, so the ambiguous case is its `run()`:
+    // the row COMMITS and the driver then throws, which is what the read-back
+    // must be able to tell apart from a pre-commit failure.
     const appliedThenThrew: TestD1 = {
       ...db,
-      async batch(statements) {
-        const results = await db.batch(statements);
-        // The metering batch is the one that landed: the row (and its binding)
-        // exist, then the driver throws — the ambiguous case.
-        if (results.length === 2) throw new Error("usage boom after commit");
-        return results;
+      prepare(query: string) {
+        const real = db.prepare(query);
+        if (!query.includes("INSERT INTO usage_events")) return real;
+        return {
+          bind: (...values: unknown[]) => ({
+            run: async () => {
+              await real.bind(...values).run();
+              throw new Error("usage boom after commit");
+            },
+          }),
+        } as never;
       },
     };
     const consumer = createReviewConsumer(
