@@ -106,12 +106,14 @@ import {
   MemberCapError,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
   checkEntitlement,
+  UNLIMITED_PLAN_ID,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
   sharedBotAvailability,
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
 import { readWorkspaceQuota } from "./quota-faces";
+import { quotaMonth, resolveMonthlyQuota } from "../store/quota-store";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -2141,6 +2143,7 @@ const appListRoute = async (c: DashboardContext) => {
       const target = targetByBot.get(app.id);
       return {
         github_app_id: app.github_app_id,
+        owned: app.workspace_id === gate.scope.workspaceId,
         bot_id: app.id,
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
@@ -2164,7 +2167,82 @@ const appListRoute = async (c: DashboardContext) => {
       };
     }),
     shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
+    // The installed tab's pending-bind rows: every unbound physical
+    // installation of an App this workspace may install through — its own,
+    // or a shared one (D8/D43 — install states are install-state-chain Task 2's).
+    pending_installations: await apps.listWorkspacePendingInstallations(gate.scope.workspaceId),
   });
+};
+
+/**
+ * One ordered read of every bot this workspace may use (D6/D18): its own
+ * first — own-before-shared, name case-insensitively inside each group, the
+ * bot id as tie-break — plus the caller's month spend per bot, batched in
+ * ONE aggregate statement so the read never fans out per row.
+ */
+async function usableBotsRead(
+  db: DashboardDb,
+  workspaceId: string,
+): Promise<{
+  workspace_id: string;
+  plan_monthly_rp: number | null;
+  bots: Array<Record<string, unknown>>;
+}> {
+  const rows = await createReviewBotsStore(db).listUsableBots(workspaceId);
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total
+           FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  return {
+    workspace_id: workspaceId,
+    plan_monthly_rp: await readPlanMonthlyRp(db, workspaceId, month.startIso),
+    bots: rows.map((bot) => ({
+      id: bot.id,
+      name: bot.name,
+      description: bot.description,
+      workspace_id: bot.workspace_id,
+      workspace_name: bot.workspace_name,
+      owned: bot.workspace_id === workspaceId,
+      scope: bot.scope,
+      multiplier: bot.multiplier,
+      month_used_rp: spend.get(bot.id) ?? 0,
+    })),
+  };
+}
+
+/**
+ * The consuming workspace's plan ceiling (D31): NULL when the plan is
+ * unlimited, the deployment is self-hosted, or no profile row covers the
+ * plan — every such case reads as "no ceiling", never as an error.
+ */
+async function readPlanMonthlyRp(
+  db: DashboardDb,
+  workspaceId: string,
+  monthStart: string,
+): Promise<number | null> {
+  try {
+    const plan = await resolveWorkspacePlan(db, workspaceId, "saas");
+    if (plan.id === UNLIMITED_PLAN_ID) return null;
+    return (await resolveMonthlyQuota(db, monthStart, plan.id)).monthlyRp;
+  } catch {
+    return null;
+  }
+}
+
+const usableBotsRoute = async (c: DashboardContext) => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  c.header("Cache-Control", "private, no-store");
+  return c.json(await usableBotsRead(gate.db, gate.scope.workspaceId));
 };
 
 async function appStatusAction(
@@ -2280,6 +2358,188 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
     scope: member.scope,
   };
 }
+
+/**
+ * The App detail's settings face — the same contract as the pre-split
+ * `/api/apps/:appId/settings`: resolution by numeric GitHub App id, REAL App
+ * fields (the bot route's null placeholders stay on the bot routes), the
+ * App's own installations and pending binds, and the bot-scoped sections
+ * keyed by the SAME id (the ids are equal this release — D34 keeps them
+ * independent, so nothing here joins App onto bot).
+ */
+const appDetailSettingsRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const store = createReviewBotsStore(member.db);
+  const githubAppId = parseGithubAppId(c.req.param("appId") ?? "");
+  const appRow = githubAppId === null ? null : await store.getScopedAppByGithubId(githubAppId, member.scope.workspaceId);
+  if (!appRow) return c.json({ error: "unknown app" }, 404);
+  const live = await liveTargetsForBot(member.db, member.scope.workspaceId, appRow.id);
+  const target = live.length === 1 ? live[0]! : null;
+  const targetsMany = live.length > 1;
+  const blockedReason = blockedReasonFor(appRow, member.scope.workspaceId);
+  try {
+    c.header("Cache-Control", "private, no-store");
+    const defaults = await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId);
+    if (!canManageApp(member.scope)) {
+      return c.json({
+        can_manage: false,
+        workspace_id: member.scope.workspaceId,
+        ...(target === null ? {} : { target_id: target.id }),
+        blocked: blockedReason !== null,
+        blocked_reason: blockedReason,
+        app: {
+          github_app_id: appRow.github_app_id,
+          status: appRow.status,
+          ...(target === null
+            ? {}
+            : { review_enabled: effectiveTargetSettings(target, defaults).reviewEnabled }),
+          created_by: appRow.created_by,
+          created_at: appRow.created_at,
+          github_name: appRow.github_name ?? null,
+          github_slug: appRow.github_slug ?? null,
+          id: appRow.id,
+          github_description: appRow.github_description ?? null,
+          github_html_url: appRow.github_html_url ?? null,
+          github_avatar_url: appRow.github_avatar_url ?? null,
+          ...(blockedReason === null
+            ? { github_metadata_synced_at: appRow.github_metadata_synced_at ?? null }
+            : {}),
+        },
+      });
+    }
+    // No target holds an installation id (the pre-split route already served
+    // `installation: null` here), so the bound row stays unresolved until
+    // install-state-chain owns the binding read.
+    const binding = null;
+    if (blockedReason !== null) {
+      const effective = target === null ? null : effectiveTargetSettings(target, defaults);
+      const checkGate = effective === null ? null : checkGateOf(effective);
+      const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(member.db)).value;
+      return c.json({
+        can_manage: true,
+        blocked: true,
+        blocked_reason: blockedReason,
+        workspace_id: member.scope.workspaceId,
+        targets_many: targetsMany,
+        target_id: target === null ? null : target.id,
+        ...(target === null
+          ? {}
+          : {
+              check_gate:
+                checkGate === null
+                  ? null
+                  : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+            }),
+        app: {
+          github_app_id: appRow.github_app_id,
+          id: appRow.id,
+          status: appRow.status,
+          created_by: appRow.created_by,
+          ...(target === null
+            ? {}
+            : {
+                review_enabled: effective!.reviewEnabled,
+                review_trigger_mode: effective!.triggerMode,
+                review_level: effective!.level,
+                default_review_level: defaultReviewLevel,
+              }),
+          scope: appRow.scope,
+          github_name: appRow.github_name ?? null,
+          github_slug: appRow.github_slug ?? null,
+          github_description: appRow.github_description ?? null,
+          github_html_url: appRow.github_html_url ?? null,
+          github_avatar_url: appRow.github_avatar_url ?? null,
+          github_visibility: appRow.github_visibility ?? null,
+        },
+        installation: binding,
+      });
+    }
+    const effective = target === null ? null : effectiveTargetSettings(target, defaults);
+    const checkGate = effective === null ? null : checkGateOf(effective);
+    const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(member.db)).value;
+    const officialWorkspaceId = await readOfficialWorkspaceId(member.db);
+    const targetOwned =
+      target === null
+        ? { app: {}, top: {} }
+        : {
+            app: {
+              review_enabled: effective!.reviewEnabled,
+              review_trigger_mode: effective!.triggerMode,
+              review_level: effective!.level,
+              default_review_level: defaultReviewLevel,
+            },
+            top: {
+              target_id: target.id,
+              check_gate:
+                checkGate === null
+                  ? null
+                  : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+            },
+          };
+    if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+      return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
+    }
+    // The bot-scoped sections key the SAME id — the ids are equal this
+    // release — so the row the config store reads is the bot the split
+    // created for this App. The payload's App fields stay real (F2's null
+    // placeholders belong to the bot routes only).
+    const botRow = await store.getScopedBotById(appRow.id, member.scope.workspaceId);
+    const sections = botRow
+      ? await botScopedSections(member.db, botRouteRow(botRow), c.env.DASHBOARD_ENCRYPTION_KEY, member.scope)
+      : {
+          installations: [],
+          keys: [],
+          model_chain: null,
+          model_roles: {},
+          model_chains: [],
+          custom_providers: [],
+          configured_providers: [],
+          provider_catalog_version: (await providerCatalog()).version,
+          provider_eligibility: {},
+          model_role_ids: MODEL_ROLE_IDS,
+          custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
+          sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
+        };
+    const installations = canWriteBotScope(appRow, member.scope)
+      ? await store.listInstallations(appRow.id)
+      : [];
+    return c.json({
+      can_manage: true,
+      workspace_id: member.scope.workspaceId,
+      targets_many: targetsMany,
+      ...targetOwned.top,
+      app: {
+        github_app_id: appRow.github_app_id,
+        status: appRow.status,
+        created_by: appRow.created_by,
+        last_webhook_at: appRow.last_webhook_at ?? null,
+        sandbox_image_id: botRow?.sandbox_image_id ?? "omp",
+        github_name: appRow.github_name ?? null,
+        github_slug: appRow.github_slug ?? null,
+        github_visibility: appRow.github_visibility ?? null,
+        scope: appRow.scope,
+        id: appRow.id,
+        github_description: appRow.github_description ?? null,
+        github_html_url: appRow.github_html_url ?? null,
+        github_avatar_url: appRow.github_avatar_url ?? null,
+        github_metadata_synced_at: appRow.github_metadata_synced_at ?? null,
+        ...targetOwned.app,
+      },
+      installation: binding,
+      pending_installations: await store.listPendingInstallations(appRow.id, member.scope.workspaceId),
+      blocked: false,
+      blocked_reason: null,
+      official_workspace: officialWorkspaceId !== null && officialWorkspaceId === appRow.workspace_id,
+      can_configure_bot: canWriteBotScope(appRow, member.scope),
+      ...sections,
+      installations,
+    });
+  } catch (err) {
+    logSettingsFailure("api_render", appRow.id, err);
+    return c.text("the app settings could not be read from encrypted storage", 500);
+  }
+};
 
 async function requireAppSettings(c: DashboardContext): Promise<AppSettingsGate> {
   const gate = await requireAppVisible(c);
@@ -2900,15 +3160,47 @@ const appBotRoute = async (c: DashboardContext) => {
   if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
     return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
   }
-  const sections = await botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope);
+  const month = quotaMonth(new Date());
+  const [sections, provider, spendRow, mountRows, planMonthlyRp] = await Promise.all([
+    botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope),
+    member.db
+      .prepare(`SELECT name FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
+      .bind(bot.workspace_id)
+      .first<{ name: string }>(),
+    member.db
+      .prepare(
+        `SELECT COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND bot_id = ?2 AND occurred_at >= ?3 AND occurred_at < ?4`,
+      )
+      .bind(member.scope.workspaceId, bot.id, month.startIso, month.endIso)
+      .first<{ total: number }>(),
+    // The caller's Apps whose chain holds this bot (D23 "Mounted by"): the
+    // chain table is empty until install-state-chain's writers land, so the
+    // read honestly answers nothing before then.
+    member.db
+      .prepare(
+        `SELECT DISTINCT m.github_app_id FROM app_install_bots m
+          JOIN github_apps g ON g.id = m.github_app_id AND g.deleted_at IS NULL
+          WHERE m.workspace_id = ?1 AND m.bot_id = ?2
+          ORDER BY m.github_app_id`,
+      )
+      .bind(member.scope.workspaceId, bot.id)
+      .all<{ github_app_id: string }>(),
+    readPlanMonthlyRp(member.db, member.scope.workspaceId, month.startIso),
+  ]);
   return c.json({
     can_manage: canWriteBotScope(app, member.scope) && canManageApp(member.scope),
     app: {
       github_app_id: app.github_app_id,
       id: app.id,
+      name: bot.name,
+      description: bot.description,
       status: app.status,
       scope: app.scope,
+      shared_at: bot.shared_at,
       sandbox_image_id: app.sandbox_image_id,
+      multiplier: bot.multiplier,
+      monthly_rp: bot.monthly_rp,
       last_webhook_at: app.last_webhook_at ?? null,
       github_name: app.github_name ?? null,
       github_slug: app.github_slug ?? null,
@@ -2916,6 +3208,15 @@ const appBotRoute = async (c: DashboardContext) => {
       github_html_url: app.github_html_url ?? null,
       github_avatar_url: app.github_avatar_url ?? null,
       github_metadata_synced_at: app.github_metadata_synced_at ?? null,
+    },
+    overview: {
+      provider_workspace: provider?.name ?? bot.workspace_id,
+      month_used_rp: Number(spendRow?.total ?? 0),
+      plan_monthly_rp: planMonthlyRp,
+      mounted_apps: mountRows.results.map((row) => ({
+        id: row.github_app_id,
+        name: row.github_app_id,
+      })),
     },
     ...sections,
   });
@@ -5120,6 +5421,8 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
     handler: appInstallationRepositoriesRoute,
     access: "write",
   },
+  { method: "get", path: "/api/review-bots", handler: usableBotsRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId", handler: appDetailSettingsRoute, access: "write" },
   { method: "get", path: "/api/review-bots/:botId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/review-bots/:botId/bot", handler: appBotRoute, access: "write" },
   { method: "patch", path: "/api/apps/:appId/scope", handler: appScopeRoute, access: "write" },

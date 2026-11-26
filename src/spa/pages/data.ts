@@ -96,6 +96,7 @@ export type AppsPayload = {
   viewer: { login: string; role: Role };
   apps: Array<{
     github_app_id: number;
+    owned?: boolean;
     github_name: string | null;
     github_slug: string | null;
     github_avatar_url: string | null;
@@ -108,7 +109,74 @@ export type AppsPayload = {
     };
   }>;
   shared_bots?: SharedBotRow[];
+  pending_installations?: PendingBindRow[];
 };
+
+/** One unbound physical installation of an App the workspace may install through. */
+export type PendingBindRow = {
+  installation_id: number;
+  account_login: string | null;
+  seen_at: string;
+  app_id: string;
+};
+
+function isPendingBindRow(value: unknown): value is PendingBindRow {
+  return (
+    isRecord(value) &&
+    typeof value.installation_id === "number" &&
+    Number.isSafeInteger(value.installation_id) &&
+    typeof value.app_id === "string" &&
+    isNullableString(value.account_login) &&
+    typeof value.seen_at === "string"
+  );
+}
+
+/** One row of the "Bots I can use" read (D6): the bot plus the caller's month. */
+export type UsableBotRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  workspace_id: string;
+  workspace_name: string;
+  owned: boolean;
+  scope: BotScope;
+  multiplier: number;
+  month_used_rp: number;
+};
+
+export type UsableBotsPayload = {
+  workspace_id: string;
+  plan_monthly_rp: number | null;
+  bots: UsableBotRow[];
+};
+
+function isUsableBotRow(value: unknown): value is UsableBotRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    isNullableString(value.description) &&
+    typeof value.workspace_id === "string" &&
+    typeof value.workspace_name === "string" &&
+    typeof value.owned === "boolean" &&
+    isBotScope(value.scope) &&
+    typeof value.multiplier === "number" &&
+    typeof value.month_used_rp === "number"
+  );
+}
+
+export function parseUsableBots(data: unknown): UsableBotsPayload | null {
+  if (!isRecord(data)) return null;
+  if (typeof data.workspace_id !== "string") return null;
+  if (data.plan_monthly_rp !== null && typeof data.plan_monthly_rp !== "number") return null;
+  if (!Array.isArray(data.bots)) return null;
+  const bots: UsableBotRow[] = [];
+  for (const row of data.bots) {
+    if (!isUsableBotRow(row)) return null;
+    bots.push(row);
+  }
+  return { workspace_id: data.workspace_id, plan_monthly_rp: data.plan_monthly_rp, bots };
+}
 
 /** One `shared` bot the workspace may create a target on. */
 export type SharedBotRow = {
@@ -412,10 +480,10 @@ export function isReviewLevel(value: unknown): value is ReviewLevel {
  * manager face (the server keys the split on `can_manage`).
  */
 export type SettingsIdentityAppMeta = {
-  github_app_id: number;
-  status: string;
+  github_app_id: number | null;
+  status: string | null;
   review_enabled?: boolean;
-  created_by: string;
+  created_by: string | null;
   created_at: string;
   id: string;
   github_name: string | null;
@@ -432,7 +500,7 @@ export type SettingsIdentityAppMeta = {
  * and required-when-readable in `parseSettings`.
  */
 export type AppIdentityCardApp = {
-  github_app_id: number;
+  github_app_id: number | null;
   id: string;
   github_name: string | null;
   github_description: string | null;
@@ -524,7 +592,7 @@ type TargetOwnedSections = {
  * `last_webhook_at` and `github_metadata_synced_at` — the bot's own data.
  */
 export type AppInstallApp = {
-  github_app_id: number;
+  github_app_id: number | null;
   id: string;
   github_name: string | null;
   github_slug: string | null;
@@ -533,10 +601,10 @@ export type AppInstallApp = {
 };
 
 export type BlockedAppIdentityBase = {
-  github_app_id: number;
+  github_app_id: number | null;
   id: string;
-  status: string;
-  created_by: string;
+  status: string | null;
+  created_by: string | null;
   scope: BotScope;
   github_name: string | null;
   github_slug: string | null;
@@ -588,7 +656,7 @@ function isPendingInstallationList(value: unknown): value is PendingInstallation
  * bot identity alone.
  */
 export type SettingsAppMeta = BotSettingsAppMeta & {
-  created_by: string;
+  created_by: string | null;
   github_visibility: GithubVisibility | null;
   review_trigger_mode: ReviewTriggerMode;
   review_level: ReviewLevel | null;
@@ -647,9 +715,13 @@ export const DELIVERY_PAGE_SIZE = 20;
  * with the workspace's review policy added.
  */
 export type BotSettingsAppMeta = {
-  github_app_id: number;
+  github_app_id: number | null;
   id: string;
-  status: string;
+  name?: string | null;
+  description?: string | null;
+  shared_at?: string | null;
+  multiplier?: number | null;
+  status: string | null;
   scope: BotScope;
   sandbox_image_id: string;
   last_webhook_at: string | null;
@@ -695,9 +767,38 @@ export type BotConfigSections = {
  * the workspace that OWNS the bot" — a consuming workspace gets these sections
  * read-only, and the bot's scope never enters the answer.
  */
+/** The bot detail page's overview block (D23): the provider, the caller's
+ * month, the consuming workspace's plan ceiling, and the mounts — the
+ * editable sections stay out of this shape so the read-only region proves
+ * nothing the API did not serve. */
+export type BotOverview = {
+  provider_workspace: string;
+  month_used_rp: number;
+  plan_monthly_rp: number | null;
+  mounted_apps: Array<{ id: string; name: string }>;
+};
+
+function parseBotOverview(value: unknown): BotOverview | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.provider_workspace !== "string") return null;
+  if (typeof value.month_used_rp !== "number") return null;
+  if (value.plan_monthly_rp !== null && typeof value.plan_monthly_rp !== "number") return null;
+  if (!Array.isArray(value.mounted_apps)) return null;
+  for (const row of value.mounted_apps) {
+    if (!isRecord(row) || typeof row.id !== "string" || typeof row.name !== "string") return null;
+  }
+  return {
+    provider_workspace: value.provider_workspace,
+    month_used_rp: value.month_used_rp,
+    plan_monthly_rp: value.plan_monthly_rp,
+    mounted_apps: value.mounted_apps.map((row) => ({ id: row.id, name: row.name })),
+  };
+}
+
 export type BotSettingsPayload = {
   can_manage: boolean;
   official_workspace?: boolean;
+  overview?: BotOverview;
 } & BotConfigSections;
 
 /** Provider-management data after the static catalog has loaded. */
@@ -723,11 +824,19 @@ export type SettingsReadOnlyPayload = {
  * appDisplayName, so a rename shows up wherever the SPA names the App.
  */
 export function appDisplayName(app: {
+  name?: string | null;
   github_name: string | null;
   github_slug: string | null;
-  github_app_id: number;
+  github_app_id: number | null;
 }): string {
-  return app.github_name ?? app.github_slug ?? String(app.github_app_id);
+  // Mirrors the server's: post-split bot rows carry null placeholders for
+  // every App field, so the bot's own `name` is what a notice prints there.
+  return (
+    app.name ??
+    app.github_name ??
+    app.github_slug ??
+    (app.github_app_id === null ? "the app" : String(app.github_app_id))
+  );
 }
 
 type SettingsManageBase = {
@@ -854,7 +963,7 @@ export function reviewEnabled(app: { review_enabled?: number | boolean }): boole
  * both faces) — over the same normalization, so the App status pill and
  * SettingsPage's OpsCard share one derivation.
  */
-export function isPaused(app: { status: string; review_enabled?: number | boolean }): boolean {
+export function isPaused(app: { status: string | null; review_enabled?: number | boolean }): boolean {
   return app.status === "active" && !reviewEnabled(app);
 }
 
@@ -865,7 +974,7 @@ export function isPaused(app: { status: string; review_enabled?: number | boolea
  */
 export function appStatusPill(
   locale: Locale,
-  app: { status: string; review_enabled?: number | boolean },
+  app: { status: string | null; review_enabled?: number | boolean },
 ): { label: string; tone: "success" | "warn" } {
   const paused = isPaused(app);
   return {
@@ -1863,7 +1972,14 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
-  return { ...(data as AppsPayload), shared_bots: parseSharedBots(data.shared_bots) };
+  const pending = Array.isArray(data.pending_installations)
+    ? data.pending_installations.filter(isPendingBindRow)
+    : [];
+  return {
+    ...(data as AppsPayload),
+    shared_bots: parseSharedBots(data.shared_bots),
+    pending_installations: pending,
+  };
 }
 
 /** One repository target row of `GET /:ref/api/targets` (product spec J1). */
@@ -2295,8 +2411,9 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
-  if (typeof data.app.status !== "string") return null;
-  if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
+  if (data.app.status !== null && typeof data.app.status !== "string") return null;
+  if (!isNullableString(data.app.created_by)) return null;
+  if (data.app.github_app_id !== null && typeof data.app.github_app_id !== "number") return null;
   if (typeof data.app.id !== "string") return null;
   if (!isNullableString(data.app.github_slug)) return null;
   if (typeof data.blocked !== "boolean") return null;
@@ -2395,8 +2512,8 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   const app = data.app;
-  if (typeof app.github_app_id !== "number" || typeof app.id !== "string") return null;
-  if (typeof app.status !== "string") return null;
+  if ((app.github_app_id !== null && typeof app.github_app_id !== "number") || typeof app.id !== "string") return null;
+  if (app.status !== null && typeof app.status !== "string") return null;
   if (!isBotScope(app.scope)) return null;
   if (typeof app.sandbox_image_id !== "string") return null;
   if (
@@ -2420,7 +2537,8 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   if (!isSandboxImageList(data.sandbox_images)) return null;
-  return data as BotSettingsPayload;
+  if (data.overview !== undefined && data.overview !== null && parseBotOverview(data.overview) === null) return null;
+  return { ...(data as BotSettingsPayload), overview: data.overview == null ? undefined : parseBotOverview(data.overview) ?? undefined };
 }
 
 function isPrVerdict(value: unknown): value is (typeof PR_VERDICTS)[number] {

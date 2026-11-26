@@ -27,12 +27,11 @@ import {
   postPinnedOutcome,
 } from "./SettingsPage";
 import { AppDeliveryTab } from "./AppDeliveryTab";
-import { BotSettingsView } from "./BotSettingsPage";
-import { fetchJson } from "../api";
+import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
 import { apiBase } from "../workspace-base";
-import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
+import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
@@ -97,7 +96,7 @@ export function AppDetailShell({
  * pathnames.
  */
 export async function loadAppDetail(base: string, appId: string): Promise<SettingsPayload | null> {
-  return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/settings`));
+  return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}`));
 }
 
 async function loadModelGroups(base: string, appId: string): Promise<ModelOptionGroup[]> {
@@ -296,7 +295,7 @@ export function TargetHeader({
     <>
       <PageHeader
         title={appDisplayName(payload.app)}
-        description={t(locale, "apps.by", { login: payload.app.created_by })}
+        description={t(locale, "apps.by", { login: payload.app.created_by ?? "—" })}
         actions={
           <>
             {blockedMessage ? null : <BotSettingsLink locale={locale} appId={appId} />}
@@ -471,15 +470,8 @@ export function AppDetailView({
             {target === null ? null : (
               <TargetOpsZone locale={locale} payload={target} onReload={onReload} />
             )}
-            {bot === null ? null : (
-              <BotSettingsView
-                locale={locale}
-                payload={{ ...bot, can_manage: bot.can_configure_bot === true }}
-                groups={groups}
-                modelsLoading={modelsLoading}
-                notice={null}
-                onReload={onReload}
-              />
+            {bot === null || payload.can_manage !== true ? null : (
+              <AppShareSection locale={locale} appId={appId} app={payload.app} onReload={onReload} />
             )}
           </div>
         </TabsContent>
@@ -516,6 +508,95 @@ export function AppDetailView({
           </div>
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+/**
+ * "Share this app" (Task 5's second block): the one App-owned mutating
+ * control the detail keeps, PATCHing `/api/apps/:appId/scope` behind the
+ * same confirm-then-write shape the bot's share switch uses. Sharing is an
+ * App property — a shared App is installable by any workspace — never a bot
+ * property, so the control lives here and nowhere on the bot page.
+ */
+export function AppShareSection({
+  locale,
+  appId,
+  app,
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  app: { scope: "owned" | "shared" };
+  onReload: (options?: { background?: boolean }) => Promise<unknown>;
+}) {
+  const [pending, setPending] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function submitScope(scope: "owned" | "shared"): Promise<void> {
+    setBusy(true);
+    try {
+      const { status } = await patchJson(
+        `${apiBase()}/api/apps/${encodeURIComponent(appId)}/scope`,
+        { scope, ...(scope === "owned" ? { confirm: true } : {}) },
+      );
+      if (status < 200 || status >= 300) {
+        setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+      } else {
+        await onReload({ background: true });
+        setNotice({
+          kind: "success",
+          message: t(locale, scope === "shared" ? "apps.shareAppSaved" : "apps.unshareAppSaved"),
+        });
+      }
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+    } finally {
+      setBusy(false);
+      setPending(false);
+    }
+  }
+
+  const sharing = app.scope === "shared";
+  return (
+    <div className="flex flex-col gap-2 py-3" data-slot="app-share">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-muted-foreground">
+          {t(locale, sharing ? "apps.shareAppOn" : "apps.shareAppOff")}
+        </p>
+        <Button type="button" variant={sharing ? "destructive-outline" : "secondary"} onClick={() => setPending(true)}>
+          {t(locale, "apps.shareAppSwitch")}
+        </Button>
+      </div>
+      <NoticeRegion notice={notice} />
+      {pending ? (
+        <Dialog open onOpenChange={(open) => { if (!open) setPending(false); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t(locale, "apps.shareAppSwitch")}</DialogTitle>
+              <DialogDescription>
+                {t(locale, sharing ? "apps.shareAppConfirmOff" : "apps.shareAppConfirm")}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button type="button" variant="outline">
+                  {t(locale, "common.cancel")}
+                </Button>
+              </DialogClose>
+              <Button
+                type="button"
+                variant={sharing ? "destructive" : "default"}
+                disabled={busy}
+                onClick={() => void submitScope(sharing ? "owned" : "shared")}
+              >
+                {t(locale, "apps.shareAppSwitch")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </div>
   );
 }

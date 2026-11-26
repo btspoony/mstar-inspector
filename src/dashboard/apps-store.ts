@@ -523,6 +523,35 @@ export type SharedBotRow = {
   target_count: number;
 };
 
+/**
+ * One "Bots I can use" row (D6): the bot's own columns plus its providing
+ * workspace's display name, so the list never needs a second lookup.
+ */
+export type UsableBotListRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  workspace_id: string;
+  workspace_name: string;
+  scope: BotScope;
+  shared_at: string | null;
+  multiplier: number;
+  monthly_rp: number | null;
+};
+
+/**
+ * "Bots I can use" (D6/D18): the caller's own bots first, then shared ones —
+ * name case-insensitively inside each group, the bot id as tie-break. Scoped
+ * to the workspace in SQL, so no caller can widen it by dropping a filter.
+ */
+const USABLE_BOT_LIST_SQL = `
+  SELECT r.id, r.name, r.description, r.workspace_id, r.scope, r.shared_at, r.multiplier, r.monthly_rp,
+         ws.name AS workspace_name
+    FROM review_bots r
+    JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
+   WHERE r.deleted_at IS NULL AND (r.workspace_id = ?1 OR r.scope = 'shared')
+   ORDER BY (r.workspace_id = ?1) DESC, LOWER(r.name) ASC, r.id ASC`;
+
 const SHARED_BOT_LIST_SQL = `
   SELECT r.id, b.github_slug, r.name,
          (SELECT COUNT(*) FROM review_targets t
@@ -781,6 +810,19 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return res.results;
     },
 
+    /**
+     * Every bot the workspace may use, in the D18 order the page renders. The
+     * store owns the `review_bots` read (tenant read-face allowlist), so the
+     * dashboard handler never names the table.
+     */
+    async listUsableBots(workspaceId: string): Promise<UsableBotListRow[]> {
+      const res = await db
+        .prepare(USABLE_BOT_LIST_SQL)
+        .bind(workspaceId)
+        .all<UsableBotListRow>();
+      return res.results;
+    },
+
     async getAppById(id: string): Promise<GithubAppTenantRow | null> {
       return db.prepare(APP_READ_SQL.getAppById).bind(id).first<GithubAppTenantRow>();
     },
@@ -1024,6 +1066,31 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         )
         .bind(appId, workspaceId)
         .all<AppInstallationRow>();
+      return res.results;
+    },
+
+    /**
+     * Every unbound live installation of an App the workspace may install
+     * through (its own, or a shared one) — the installed tab's "Waiting to be
+     * bound" rows, each carrying its App row id so the UI can name the App.
+     */
+    async listWorkspacePendingInstallations(
+      workspaceId: string,
+    ): Promise<Array<AppInstallationRow & { app_id: string }>> {
+      const res = await db
+        .prepare(
+          `SELECT i.installation_id, i.account_login, i.seen_at, i.app_id FROM github_app_installations i
+             JOIN github_apps b ON b.id = i.app_id AND b.deleted_at IS NULL
+            WHERE i.removed_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM workspaces bw
+                               WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
+              AND (b.scope = 'shared'
+                   OR EXISTS (SELECT 1 FROM app_workspaces w
+                               WHERE w.app_id = b.id AND w.workspace_id = ?1))
+            ORDER BY i.seen_at DESC, i.installation_id`,
+        )
+        .bind(workspaceId)
+        .all<AppInstallationRow & { app_id: string }>();
       return res.results;
     },
 

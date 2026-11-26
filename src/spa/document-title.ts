@@ -31,6 +31,7 @@ const PAGE_LABELS: Record<SpaPageId, DictionaryKey> = {
   settings: "nav.settings",
   login: "login.heading",
   "app-detail": "appDetail.documentPage",
+  "bot-detail": "bots.overviewTitle",
 };
 
 export function pageDocumentTitle(
