@@ -24,3 +24,31 @@ INSERT INTO app_workspaces (app_id, workspace_id)
 SELECT g.id, 'default'
 FROM github_apps g
 WHERE NOT EXISTS (SELECT 1 FROM app_workspaces w WHERE w.app_id = g.id);
+
+INSERT INTO review_bots (
+  id, workspace_id, name, description, scope, shared_at,
+  sandbox_image_id, multiplier, monthly_rp, deleted_at, created_at, updated_at
+)
+SELECT
+  g.id,
+  w.workspace_id,
+  g.name,
+  NULL,
+  g.scope,
+  g.shared_at,
+  'omp',
+  CASE WHEN g.scope = 'shared' THEN
+    COALESCE(
+      (SELECT source_shared FROM quota_profiles
+        WHERE effective_from <= strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        ORDER BY effective_from DESC LIMIT 1),
+      (SELECT source_shared FROM quota_profiles ORDER BY effective_from ASC LIMIT 1)
+    )
+  ELSE 1 END,
+  NULL,
+  g.deleted_at,
+  g.created_at,
+  g.updated_at
+FROM github_apps g
+INNER JOIN app_workspaces w ON w.app_id = g.id
+WHERE NOT EXISTS (SELECT 1 FROM review_bots b WHERE b.id = g.id);

@@ -4,7 +4,7 @@ import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-seve
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
 
-/** A row of `review_bots` (D1 column names, snake_case; migrations 0004/0036). */
+/** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
   id: string;
   github_app_id: number;
@@ -24,7 +24,6 @@ export type GithubAppRow = {
   github_slug: string | null;
   github_metadata_synced_at: string | null;
   github_metadata_attempted_at: string | null;
-  sandbox_image_id: string;
   created_at: string;
   updated_at: string;
   scope: BotScope;
@@ -34,12 +33,34 @@ export type GithubAppRow = {
 export type GithubAppStatus = "active" | "disabled";
 
 /**
- * An execution-facing App row: the two resolutions INNER JOIN `bot_workspaces`,
+ * An execution-facing App row: the two resolutions INNER JOIN `app_workspaces`,
  * so `workspace_id` is present by construction. Typing it here (instead of at
  * the call sites with `!`) keeps the invariant where SQL enforces it — a future
  * LEFT JOIN breaks the read's type rather than binding `undefined`.
  */
 export type GithubAppTenantRow = GithubAppRow & { workspace_id: string };
+
+/**
+ * A bot-scoped read (SCOPED_BOT_SQL / VISIBLE_BOT_SQL): the BOT's own columns
+ * and nothing else. D5/D34 — no App owns a bot: authorization reads
+ * `workspace_id` and the bot's own `scope`, never a same-id App row. App
+ * fields a surface needs (the mount list) arrive with `install-state-chain`
+ * reading `app_install_bots`; until then the mount list is empty.
+ */
+export type BotScopedRow = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string | null;
+  scope: BotScope;
+  shared_at: string | null;
+  sandbox_image_id: string;
+  multiplier: number;
+  monthly_rp: number | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
 
 /**
  * Cached GitHub App visibility (migration 0045, the `github_visibility`
@@ -101,7 +122,7 @@ export type GithubAppMetadataInput = {
 };
 
 /**
- * A `bot_installations` row as the settings health panel reads it
+ * A `github_app_installations` row as the settings health panel reads it
  * (DDL = migration 0004). The `id` PK is deliberately not projected —
  * the panel keys installations by installation_id.
  */
@@ -177,7 +198,7 @@ const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'reject
 const DELIVERY_SUMMARY_CHUNK = 90;
 
 const DELIVERY_WORKSPACE_REPO_SQL = `EXISTS (SELECT 1 FROM review_targets t
-  WHERE t.bot_id = webhook_deliveries.bot_id AND t.workspace_id = ? AND t.deleted_at IS NULL
+  WHERE t.app_id = webhook_deliveries.app_id AND t.workspace_id = ? AND t.deleted_at IS NULL
     AND t.repo_owner IS NOT NULL AND t.repo_name IS NOT NULL
     AND webhook_deliveries.repository_full_name = (t.repo_owner || '/' || t.repo_name) COLLATE NOCASE)`;
 
@@ -311,7 +332,7 @@ export type RecordDeliveryInput = {
 /** A row of `webhook_deliveries` (D1 column names, snake_case; migration 0011). */
 export type WebhookDeliveryRow = {
   id: string;
-  bot_id: string;
+  app_id: string;
   event_name: string | null;
   outcome: DeliveryOutcome;
   status_code: number | null;
@@ -434,28 +455,61 @@ function countOf(result: AppsStoreBatchResult): number {
  * must not hide its Apps from operators.
  */
 export const APP_READ_SQL = {
-  getAppById: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
-  getAppForWebhook: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
-  getAppByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
-  getVisibleBotByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR g.scope = 'shared') ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`,
-  listApps: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
+  getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
+  getAppForWebhook: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
+  getAppByGithubId: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
+  listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
-const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.bot_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.app_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+
+/**
+ * The bot-scoped read faces: the BOT's own columns, authorized from its own
+ * row. The owner is `review_bots.workspace_id` (D5/D34 — no App owns a bot);
+ * a consumer workspace sees the bot through its own `scope = 'shared'` or a
+ * live target it already holds on it. No App row is consulted: a bot without
+ * a same-id App resolves the same, and a same-id App in another workspace
+ * cannot shift the authorization. An all-digits id is rejected before any
+ * query — it names the numeric App id space, never a bot (F1).
+ */
+const SCOPED_BOT_SQL = `SELECT r.* FROM review_bots r INNER JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL WHERE r.id = ?1 AND r.deleted_at IS NULL AND (r.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.app_id = r.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) LIMIT 1`;
+const VISIBLE_BOT_SQL = `SELECT r.* FROM review_bots r INNER JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL WHERE r.id = ?1 AND r.deleted_at IS NULL AND (r.workspace_id = ?2 OR r.scope = 'shared') LIMIT 1`;
 
 const UPSERT_INSTALLATION_SQL = {
-  authoritative: `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+  authoritative: `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
     VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-    ON CONFLICT (bot_id, installation_id) DO UPDATE SET
+    ON CONFLICT (app_id, installation_id) DO UPDATE SET
       account_login = COALESCE(excluded.account_login, account_login),
       seen_at = strftime('%Y-%m-%d %H:%M:%f','now'),
       removed_at = NULL`,
-  inferred: `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+  inferred: `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
     VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-    ON CONFLICT (bot_id, installation_id) DO UPDATE SET
+    ON CONFLICT (app_id, installation_id) DO UPDATE SET
       account_login = COALESCE(account_login, excluded.account_login),
       seen_at = strftime('%Y-%m-%d %H:%M:%f','now')`,
 } as const;
+
+/**
+ * A row of `review_bots` (D1 column names, snake_case; the entity split,
+ * migration 0115): the review configuration entity — model chains keyed beside
+ * it, its sandbox image, its price multiplier and monthly quota. Bot
+ * soft-delete is a product need (`deleted_at`), backfilled from the pre-split
+ * row so the pair dies together.
+ */
+export type ReviewBotRow = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string | null;
+  scope: BotScope;
+  shared_at: string | null;
+  sandbox_image_id: string;
+  multiplier: number;
+  monthly_rp: number | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
 
 /**
  * One `shared` bot as a workspace's creation chooser lists it (contract § 7.1).
@@ -470,14 +524,15 @@ export type SharedBotRow = {
 };
 
 const SHARED_BOT_LIST_SQL = `
-  SELECT b.id, b.github_slug, b.name,
+  SELECT r.id, b.github_slug, r.name,
          (SELECT COUNT(*) FROM review_targets t
-           WHERE t.bot_id = b.id AND t.workspace_id = ?1 AND t.deleted_at IS NULL) AS target_count
-    FROM review_bots b
-   WHERE b.scope = 'shared' AND b.deleted_at IS NULL
-   ORDER BY b.name, b.id`;
+           WHERE t.app_id = r.id AND t.workspace_id = ?1 AND t.deleted_at IS NULL) AS target_count
+    FROM review_bots r
+    JOIN github_apps b ON b.id = r.id AND b.deleted_at IS NULL
+   WHERE r.scope = 'shared' AND r.deleted_at IS NULL
+   ORDER BY r.name, r.id`;
 
-/** Create the review_bots / bot_installations store over one D1 handle. */
+/** Create the github_apps / github_app_installations store over one D1 handle. */
 export function createReviewBotsStore(db: AppsStoreD1) {
   async function sweepTerminalPullRequests({ days, cap }: PullRequestRetention): Promise<number> {
     // The state predicate must stay identical to idx_pull_requests_terminal_seen's WHERE (0099).
@@ -500,7 +555,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     const row = await db
       .prepare(
         `SELECT 1 AS hit FROM review_targets
-         WHERE bot_id = ? AND workspace_id = ? AND deleted_at IS NULL
+         WHERE app_id = ? AND workspace_id = ? AND deleted_at IS NULL
            AND repo_owner IS NOT NULL AND repo_name IS NOT NULL
          LIMIT 1`,
       )
@@ -529,11 +584,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     const [latestRes, rejectedRes] = await Promise.all([
       db
         .prepare(
-          `WITH requested(bot_id) AS (VALUES ${appIds.map(() => "(?)").join(", ")})
-           SELECT bot_id, id, event_name, outcome, status_code, repository_full_name, created_at
+          `WITH requested(app_id) AS (VALUES ${appIds.map(() => "(?)").join(", ")})
+           SELECT app_id, id, event_name, outcome, status_code, repository_full_name, created_at
            FROM webhook_deliveries WHERE rowid IN (
              SELECT (SELECT rowid FROM webhook_deliveries
-                     WHERE bot_id = requested.bot_id ${scopeSql}
+                     WHERE app_id = requested.app_id ${scopeSql}
                      ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
                      LIMIT 1)
              FROM requested
@@ -543,24 +598,24 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .all<WebhookDeliveryRow>(),
       db
         .prepare(
-          `SELECT bot_id, COUNT(*) AS n FROM webhook_deliveries
-           WHERE bot_id IN (${placeholders}) AND outcome = 'rejected'
+          `SELECT app_id, COUNT(*) AS n FROM webhook_deliveries
+           WHERE app_id IN (${placeholders}) AND outcome = 'rejected'
              AND created_at > datetime('now', '-24 hours') ${scopeSql}
-           GROUP BY bot_id`,
+           GROUP BY app_id`,
         )
         .bind(...appIds, ...scopeBinds)
-        .all<{ bot_id: string; n: number }>(),
+        .all<{ app_id: string; n: number }>(),
     ]);
     const byApp: Record<string, DeliverySummary> = {};
     for (const appId of appIds) {
       byApp[appId] = { latest: null, rejected24h: 0 };
     }
     for (const row of latestRes.results) {
-      const entry = byApp[row.bot_id];
+      const entry = byApp[row.app_id];
       if (entry) entry.latest = row;
     }
     for (const row of rejectedRes.results) {
-      const entry = byApp[row.bot_id];
+      const entry = byApp[row.app_id];
       if (entry) entry.rejected24h = row.n;
     }
     return byApp;
@@ -588,6 +643,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
   return {
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
+      if (isAllDigitsId(id)) {
+        throw new Error(
+          "apps-store: createApp refuses an all-digits id — it could collide with a numeric GitHub App id at the route boundary",
+        );
+      }
       const liveWorkspace = await db
         .prepare(`SELECT id FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
         .bind(input.workspaceId)
@@ -600,13 +660,13 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           ? ""
           : `
               AND (SELECT COUNT(*)
-                     FROM bot_workspaces w
-                     JOIN review_bots b ON b.id = w.bot_id
+                     FROM app_workspaces w
+                     JOIN github_apps b ON b.id = w.app_id
                     WHERE w.workspace_id = ?8 AND b.deleted_at IS NULL) < ?9`;
       const results = await db.batch([
         db
           .prepare(
-            `INSERT INTO review_bots
+            `INSERT INTO github_apps
                (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
                 created_by, status, created_at, updated_at)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', datetime('now'), datetime('now')
@@ -625,8 +685,24 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           ),
         db
           .prepare(
-            `INSERT INTO bot_workspaces (bot_id, workspace_id)
-             SELECT id, ?2 FROM review_bots WHERE id = ?1 AND changes() > 0`,
+            `INSERT INTO app_workspaces (app_id, workspace_id)
+             SELECT id, ?2 FROM github_apps WHERE id = ?1 AND changes() > 0`,
+          )
+          .bind(id, input.workspaceId),
+        // Every App owns exactly one bot — the same id — the way the entity
+        // split created the migrated rows. Owned scope pays its own keys, so
+        // multiplier 1; a workspace flips the scope row later through the
+        // share/unshare path, which owns the multiplier re-price.
+        db
+          .prepare(
+            // The bot row follows the App row only when this call created it:
+            // a retry of the same hold (App row already present) must not
+            // duplicate the bot and trip its PRIMARY KEY.
+            `INSERT INTO review_bots
+               (id, workspace_id, name, multiplier, created_at, updated_at)
+             SELECT id, ?2, name, 1, datetime('now'), datetime('now')
+              FROM github_apps
+             WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM review_bots b WHERE b.id = ?1)`,
           )
           .bind(id, input.workspaceId),
       ]);
@@ -643,7 +719,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         }
         throw new AppCountExceededError(input.maxApps);
       }
-      const row = await db.prepare(`SELECT * FROM review_bots WHERE id = ?`).bind(id).first<GithubAppRow>();
+      const row = await db.prepare(`SELECT * FROM github_apps WHERE id = ?`).bind(id).first<GithubAppRow>();
       if (!row) {
         throw new Error("apps-store: createApp row vanished on read-back");
       }
@@ -654,8 +730,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       const row = await db
         .prepare(
           `SELECT COUNT(*) AS n
-             FROM bot_workspaces w
-             JOIN review_bots b ON b.id = w.bot_id
+             FROM app_workspaces w
+             JOIN github_apps b ON b.id = w.app_id
             WHERE w.workspace_id = ? AND b.deleted_at IS NULL`,
         )
         .bind(workspaceId)
@@ -680,16 +756,6 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .first<GithubAppTenantRow>();
     },
 
-    async getVisibleBotByGithubId(
-      githubAppId: number,
-      workspaceId: string,
-    ): Promise<GithubAppTenantRow | null> {
-      return db
-        .prepare(APP_READ_SQL.getVisibleBotByGithubId)
-        .bind(githubAppId, workspaceId)
-        .first<GithubAppTenantRow>();
-    },
-
     async getScopedAppByGithubId(
       githubAppId: number,
       workspaceId: string,
@@ -698,6 +764,16 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .prepare(SCOPED_APP_SQL)
         .bind(githubAppId, workspaceId)
         .first<GithubAppTenantRow>();
+    },
+
+    async getScopedBotById(botId: string, workspaceId: string): Promise<BotScopedRow | null> {
+      if (isAllDigitsId(botId)) return null;
+      return db.prepare(SCOPED_BOT_SQL).bind(botId, workspaceId).first<BotScopedRow>();
+    },
+
+    async getVisibleBotById(botId: string, workspaceId: string): Promise<BotScopedRow | null> {
+      if (isAllDigitsId(botId)) return null;
+      return db.prepare(VISIBLE_BOT_SQL).bind(botId, workspaceId).first<BotScopedRow>();
     },
 
     async listSharedBots(workspaceId: string): Promise<SharedBotRow[]> {
@@ -716,15 +792,23 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
     async getSandboxImageId(appId: string): Promise<string | null> {
       const row = await db
-        .prepare(`SELECT sandbox_image_id FROM review_bots WHERE id = ?`)
+        .prepare(`SELECT sandbox_image_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
         .bind(appId)
         .first<{ sandbox_image_id: string }>();
       return row?.sandbox_image_id ?? null;
     },
 
+    async getBotScope(botId: string): Promise<BotScope | null> {
+      const row = await db
+        .prepare(`SELECT scope FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+        .bind(botId)
+        .first<{ scope: BotScope }>();
+      return row?.scope ?? null;
+    },
+
     async getGithubVisibility(appId: string): Promise<GithubVisibility | null> {
       const row = await db
-        .prepare(`SELECT github_visibility FROM review_bots WHERE id = ?`)
+        .prepare(`SELECT github_visibility FROM github_apps WHERE id = ?`)
         .bind(appId)
         .first<{ github_visibility: GithubVisibility | null }>();
       if (!row) return null;
@@ -734,7 +818,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async setAppStatus(id: string, status: GithubAppStatus): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE review_bots SET status = ?, updated_at = datetime('now')
+          `UPDATE github_apps SET status = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(status, id)
@@ -745,7 +829,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async setReviewEnabled(id: string, enabled: boolean): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE review_bots SET review_enabled = ?, updated_at = datetime('now')
+          `UPDATE github_apps SET review_enabled = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(enabled ? 1 : 0, id)
@@ -756,7 +840,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async saveGithubVisibility(id: string, visibility: GithubVisibility): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE review_bots SET github_visibility = ?
+          `UPDATE github_apps SET github_visibility = ?
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(visibility, id)
@@ -785,6 +869,15 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       const [botResult] = await db.batch([
         db
           .prepare(
+            `UPDATE github_apps SET deleted_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ? AND deleted_at IS NULL`,
+          )
+          .bind(id),
+        // The bot dies with its App: review configuration is meaningless for a
+        // deleted App, and the migration backfills the pair's deleted_at
+        // together, so the write keeps the invariant the schema started with.
+        db
+          .prepare(
             `UPDATE review_bots SET deleted_at = datetime('now'), updated_at = datetime('now')
              WHERE id = ? AND deleted_at IS NULL`,
           )
@@ -792,7 +885,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         db
           .prepare(
             `UPDATE review_targets SET deleted_at = datetime('now'), updated_at = datetime('now')
-             WHERE bot_id = ? AND deleted_at IS NULL`,
+             WHERE app_id = ? AND deleted_at IS NULL`,
           )
           .bind(id),
       ]);
@@ -801,7 +894,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
     async touchLastWebhook(id: string): Promise<void> {
       await db
-        .prepare(`UPDATE review_bots SET last_webhook_at = datetime('now') WHERE id = ?`)
+        .prepare(`UPDATE github_apps SET last_webhook_at = datetime('now') WHERE id = ?`)
         .bind(id)
         .run();
     },
@@ -809,7 +902,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async saveGithubMetadata(id: string, metadata: GithubAppMetadataInput): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE review_bots
+          `UPDATE github_apps
            SET github_name = ?, github_description = ?, github_html_url = ?,
                github_avatar_url = ?, github_slug = COALESCE(?, github_slug),
                github_metadata_synced_at = datetime('now')
@@ -830,7 +923,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async touchGithubMetadataAttempt(id: string): Promise<void> {
       await db
         .prepare(
-          `UPDATE review_bots SET github_metadata_attempted_at = datetime('now')
+          `UPDATE github_apps SET github_metadata_attempted_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(id)
@@ -848,8 +941,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async listInstallations(appId: string): Promise<AppInstallationRow[]> {
       const res = await db
         .prepare(
-          `SELECT installation_id, account_login, seen_at FROM bot_installations
-           WHERE bot_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
+          `SELECT installation_id, account_login, seen_at FROM github_app_installations
+           WHERE app_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
         )
         .bind(appId)
         .all<AppInstallationRow>();
@@ -864,8 +957,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async listInstallationsBoundTo(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
       const res = await db
         .prepare(
-          `SELECT installation_id, account_login, seen_at FROM bot_installations
-           WHERE bot_id = ? AND bound_workspace_id = ? AND removed_at IS NULL
+          `SELECT installation_id, account_login, seen_at FROM github_app_installations
+           WHERE app_id = ? AND bound_workspace_id = ? AND removed_at IS NULL
            ORDER BY seen_at DESC, installation_id`,
         )
         .bind(appId, workspaceId)
@@ -880,9 +973,9 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     ): Promise<{ bound_workspace_id: string | null; removed_at: string | null } | null> {
       return db
         .prepare(
-          `SELECT w.id AS bound_workspace_id, i.removed_at FROM bot_installations i
+          `SELECT w.id AS bound_workspace_id, i.removed_at FROM github_app_installations i
              LEFT JOIN workspaces w ON w.id = i.bound_workspace_id AND w.deleted_at IS NULL
-           WHERE i.bot_id = ? AND i.installation_id = ?`,
+           WHERE i.app_id = ? AND i.installation_id = ?`,
         )
         .bind(appId, installationId)
         .first<{ bound_workspace_id: string | null; removed_at: string | null }>();
@@ -900,17 +993,17 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     ): Promise<BindInstallationOutcome> {
       const res = await db
         .prepare(
-          `UPDATE bot_installations SET bound_workspace_id = ?3
-           WHERE bot_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
+          `UPDATE github_app_installations SET bound_workspace_id = ?3
+           WHERE app_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
              AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3
                   OR NOT EXISTS (SELECT 1 FROM workspaces w
-                                  WHERE w.id = bot_installations.bound_workspace_id AND w.deleted_at IS NULL))`,
+                                  WHERE w.id = github_app_installations.bound_workspace_id AND w.deleted_at IS NULL))`,
         )
         .bind(appId, installationId, workspaceId)
         .run();
       if (res.meta.changes > 0) return "bound";
       const row = await db
-        .prepare(`SELECT removed_at FROM bot_installations WHERE bot_id = ? AND installation_id = ?`)
+        .prepare(`SELECT removed_at FROM github_app_installations WHERE app_id = ? AND installation_id = ?`)
         .bind(appId, installationId)
         .first<{ removed_at: string | null }>();
       return row !== null && row.removed_at === null ? "bound_elsewhere" : "unknown";
@@ -919,14 +1012,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async listPendingInstallations(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
       const res = await db
         .prepare(
-          `SELECT i.installation_id, i.account_login, i.seen_at FROM bot_installations i
-             JOIN review_bots b ON b.id = i.bot_id
-            WHERE i.bot_id = ?1 AND i.removed_at IS NULL
+          `SELECT i.installation_id, i.account_login, i.seen_at FROM github_app_installations i
+             JOIN github_apps b ON b.id = i.app_id
+            WHERE i.app_id = ?1 AND i.removed_at IS NULL
               AND NOT EXISTS (SELECT 1 FROM workspaces bw
                                WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
               AND (b.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM bot_workspaces w
-                               WHERE w.bot_id = b.id AND w.workspace_id = ?2))
+                   OR EXISTS (SELECT 1 FROM app_workspaces w
+                               WHERE w.app_id = b.id AND w.workspace_id = ?2))
             ORDER BY i.seen_at DESC, i.installation_id`,
         )
         .bind(appId, workspaceId)
@@ -940,8 +1033,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     ): Promise<AppInstallationState | null> {
       return db
         .prepare(
-          `SELECT installation_id, account_login, removed_at FROM bot_installations
-           WHERE bot_id = ? AND installation_id = ?`,
+          `SELECT installation_id, account_login, removed_at FROM github_app_installations
+           WHERE app_id = ? AND installation_id = ?`,
         )
         .bind(appId, installationId)
         .first<AppInstallationState>();
@@ -958,8 +1051,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
       await db
         .prepare(
-          `UPDATE bot_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
-           WHERE bot_id = ? AND installation_id = ?`,
+          `UPDATE github_app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+           WHERE app_id = ? AND installation_id = ?`,
         )
         .bind(appId, installationId)
         .run();
@@ -975,8 +1068,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         db
           .prepare(
             `WITH snapshot(body) AS (SELECT ?)
-             UPDATE bot_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
-             WHERE bot_id = ?
+             UPDATE github_app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+             WHERE app_id = ?
                AND removed_at IS NULL
                AND seen_at <= (SELECT json_extract(body, '$.observedAt') FROM snapshot)
                AND installation_id NOT IN (
@@ -987,8 +1080,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         db
           .prepare(
             `WITH snapshot(body) AS (SELECT ?)
-             UPDATE bot_installations SET removed_at = NULL
-             WHERE bot_id = ?
+             UPDATE github_app_installations SET removed_at = NULL
+             WHERE app_id = ?
                AND removed_at IS NOT NULL
                AND removed_at < (SELECT json_extract(body, '$.observedAt') FROM snapshot)
                AND installation_id IN (
@@ -1013,7 +1106,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       const reason = input.reason === null ? null : truncateBounded(input.reason, DELIVERY_REASON_MAX_LENGTH);
       await db
         .prepare(
-          `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name, reason)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
@@ -1038,7 +1131,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       const latest = await db
         .prepare(
           `SELECT * FROM webhook_deliveries
-           WHERE bot_id = ? AND ${DELIVERY_WORKSPACE_REPO_SQL}
+           WHERE app_id = ? AND ${DELIVERY_WORKSPACE_REPO_SQL}
            ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
            LIMIT 1`,
         )
@@ -1047,7 +1140,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       const rejected = await db
         .prepare(
           `SELECT COUNT(*) AS n FROM webhook_deliveries
-           WHERE bot_id = ? AND outcome = 'rejected'
+           WHERE app_id = ? AND outcome = 'rejected'
              AND created_at > datetime('now', '-24 hours')
              AND ${DELIVERY_WORKSPACE_REPO_SQL}`,
         )
@@ -1073,7 +1166,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       if (workspaceId !== null && !(await hasNamedTarget(appId, workspaceId))) {
         return { rows: [], total: 0, repos: [], types: [] };
       }
-      const scopePredicates = ["bot_id = ?"];
+      const scopePredicates = ["app_id = ?"];
       const scopeBinds: string[] = [appId];
       if (workspaceId !== null) {
         scopePredicates.push(DELIVERY_WORKSPACE_REPO_SQL);
@@ -1141,7 +1234,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       await db
         .prepare(
           `INSERT INTO pull_requests
-             (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, head_at, last_seen_at)
+             (id, app_id, target_id, owner, repo, pr_number, title, state, head_sha, head_at, last_seen_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
            ON CONFLICT (target_id, owner, repo, pr_number) DO UPDATE SET
              title = COALESCE(excluded.title, title),
@@ -1486,6 +1579,19 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 }
 
 
+/**
+ * The bot/App id disjointness rule (the split, task 4 F1): an App is
+ * addressed on App routes by its numeric GitHub App id, so a row id that is
+ * ALL DIGITS could collide with one. New rows therefore never get an
+ * all-digit id — `createApp` is the only writer and rejects such an id; the
+ * two route resolvers reject the wrong shape before any query (an all-digit
+ * bot id and a non-digit App path segment both refuse, never fall back).
+ * Migrated rows keep their inherited UUID ids, which satisfy the rule.
+ */
+export function isAllDigitsId(id: string): boolean {
+  return /^[0-9]+$/.test(id);
+}
+
 /** A bot's scope: `owned` serves its workspace only, `shared` is offered platform-wide. */
 export type BotScope = "owned" | "shared";
 
@@ -1499,7 +1605,13 @@ export type BotScopeOutcome =
   | { outcome: "outside_official_workspace" }
   | { outcome: "confirm_required" };
 
-/** One live bot as the operator console lists it (contract § 8.3). */
+/**
+ * One live App/bot pair as the operator console lists it (contract § 8.3).
+ * Post-split the two scopes are independent columns: `scope`/`shared_at` are
+ * the APP's share switch (`github_apps` — who may act through these
+ * credentials); `bot_scope`/`bot_shared_at` are the BOT's (`review_bots` —
+ * whose workspaces may consume this review configuration).
+ */
 export type BotScopeRow = {
   id: string;
   name: string;
@@ -1507,6 +1619,8 @@ export type BotScopeRow = {
   workspace_id: string | null;
   scope: BotScope;
   shared_at: string | null;
+  bot_scope: BotScope | null;
+  bot_shared_at: string | null;
   deleted_at: string | null;
   workspace_name: string | null;
   is_official: number;
@@ -1514,34 +1628,85 @@ export type BotScopeRow = {
   live_target_count: number;
 };
 
-const BOT_SCOPE_READ_SQL = `
+const APP_SCOPE_READ_SQL = `
+  SELECT scope, shared_at FROM github_apps WHERE id = ? AND deleted_at IS NULL`;
+
+const REVIEW_BOT_SCOPE_READ_SQL = `
   SELECT scope, shared_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
 
 const BOT_SCOPE_LIST_SQL = `
   SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at,
+         rb.scope AS bot_scope, rb.shared_at AS bot_shared_at,
          ws.name AS workspace_name,
          EXISTS (SELECT 1
                    FROM review_runtime_settings s
                    JOIN workspaces live ON live.id = s.value AND live.deleted_at IS NULL
                   WHERE s.key = '${OFFICIAL_WORKSPACE_KEY}' AND s.value = w.workspace_id) AS is_official,
-         (SELECT COUNT(*) FROM bot_installations i
-           WHERE i.bot_id = b.id AND i.removed_at IS NULL) AS installation_count,
+         (SELECT COUNT(*) FROM github_app_installations i
+           WHERE i.app_id = b.id AND i.removed_at IS NULL) AS installation_count,
          (SELECT COUNT(*) FROM review_targets t
-           WHERE t.bot_id = b.id AND t.deleted_at IS NULL) AS live_target_count
-    FROM review_bots b
-    LEFT JOIN bot_workspaces w ON w.bot_id = b.id
+           WHERE t.app_id = b.id AND t.deleted_at IS NULL) AS live_target_count
+    FROM github_apps b
+    LEFT JOIN review_bots rb ON rb.id = b.id
+    LEFT JOIN app_workspaces w ON w.app_id = b.id
     LEFT JOIN workspaces ws ON ws.id = w.workspace_id
    WHERE b.deleted_at IS NULL
    ORDER BY b.name, b.id`;
 
 const officialWorkspaceGuardSql = (botIdRef: string) => `EXISTS (
-           SELECT 1 FROM bot_workspaces w
+           SELECT 1 FROM app_workspaces w
              JOIN review_runtime_settings s
                ON s.key = '${OFFICIAL_WORKSPACE_KEY}' AND s.value = w.workspace_id
              JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
-            WHERE w.bot_id = ${botIdRef})`;
+            WHERE w.app_id = ${botIdRef})`;
 
-const BOT_SCOPE_SHARE_AUDIT_SQL = `
+/**
+ * The BOT switch's official-workspace guard: the bot's owner is
+ * `review_bots.workspace_id` (D5/D34 — no App owns a bot), so the guard binds
+ * THAT column directly. app_workspaces answers where an APP is installed —
+ * a different question the bot's shareability never reads.
+ */
+const botOfficialWorkspaceGuardSql = `EXISTS (
+           SELECT 1 FROM review_runtime_settings s
+             JOIN workspaces ws ON ws.id = s.value AND ws.deleted_at IS NULL
+            WHERE s.key = '${OFFICIAL_WORKSPACE_KEY}'
+              AND s.value = review_bots.workspace_id)`;
+
+const APP_SCOPE_SHARE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'runtime.app_scope.set', 'app', ?3,
+         json_object(
+           'before', json_object('scope', (SELECT scope FROM github_apps WHERE id = ?3),
+                                 'shared_at', (SELECT shared_at FROM github_apps WHERE id = ?3)),
+           'after', json_object('scope', 'shared', 'shared_at', ?4)),
+         ?5
+   WHERE EXISTS (SELECT 1 FROM github_apps b
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'shared'
+                    AND ${officialWorkspaceGuardSql("b.id")})`;
+
+const APP_SCOPE_SHARE_SQL = `
+  UPDATE github_apps SET scope = 'shared', shared_at = ?2
+   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'shared'
+     AND ${officialWorkspaceGuardSql("github_apps.id")}`;
+
+const APP_SCOPE_UNSHARE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'runtime.app_scope.set', 'app', ?3,
+         json_object(
+           'before', json_object('scope', (SELECT scope FROM github_apps WHERE id = ?3),
+                                 'shared_at', (SELECT shared_at FROM github_apps WHERE id = ?3)),
+           'after', json_object('scope', 'owned', 'shared_at', NULL)),
+         ?4
+   WHERE EXISTS (SELECT 1 FROM github_apps b
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'owned')`;
+
+const APP_SCOPE_UNSHARE_SQL = `
+  UPDATE github_apps SET scope = 'owned', shared_at = NULL
+   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'owned'`;
+
+const REVIEW_BOT_SCOPE_SHARE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   SELECT ?1, ?2, 'runtime.bot_scope.set', 'bot', ?3,
@@ -1552,14 +1717,14 @@ const BOT_SCOPE_SHARE_AUDIT_SQL = `
          ?5
    WHERE EXISTS (SELECT 1 FROM review_bots b
                   WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'shared'
-                    AND ${officialWorkspaceGuardSql("b.id")})`;
+                    AND ${botOfficialWorkspaceGuardSql.replace("review_bots.workspace_id", "b.workspace_id")})`;
 
-const BOT_SCOPE_SHARE_SQL = `
+const REVIEW_BOT_SCOPE_SHARE_SQL = `
   UPDATE review_bots SET scope = 'shared', shared_at = ?2
    WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'shared'
-     AND ${officialWorkspaceGuardSql("review_bots.id")}`;
+     AND ${botOfficialWorkspaceGuardSql}`;
 
-const BOT_SCOPE_UNSHARE_AUDIT_SQL = `
+const REVIEW_BOT_SCOPE_UNSHARE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   SELECT ?1, ?2, 'runtime.bot_scope.set', 'bot', ?3,
@@ -1571,25 +1736,33 @@ const BOT_SCOPE_UNSHARE_AUDIT_SQL = `
    WHERE EXISTS (SELECT 1 FROM review_bots b
                   WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'owned')`;
 
-const BOT_SCOPE_UNSHARE_SQL = `
+const REVIEW_BOT_SCOPE_UNSHARE_SQL = `
   UPDATE review_bots SET scope = 'owned', shared_at = NULL
    WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'owned'`;
 
 /**
- * Move one bot between `owned` and `shared`, auditing accepted writes in the
- * same batch. A same-value transition is a no-op that appends nothing;
- * `shared → owned` needs an explicit `confirm: true`; `owned → shared` needs the
- * bot's workspace to BE the official workspace. Unsharing ignores that last
- * condition on purpose (a stale share stays revocable).
+ * The shared transition engine behind both share switches. A same-value
+ * transition is a no-op that appends nothing; `shared → owned` needs an
+ * explicit `confirm: true`; `owned → shared` needs the entity's workspace to
+ * BE the official workspace — the guard lives INSIDE the batch statements so
+ * a concurrent re-designation cannot be raced through. Unsharing ignores that
+ * last condition on purpose (a stale share stays revocable).
  */
-export async function setBotScope(
+async function scopeTransition(
   db: AppsStoreD1,
-  input: { botId: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
+  input: { id: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
+  sql: {
+    read: string;
+    shareAudit: string;
+    share: string;
+    unshareAudit: string;
+    unshare: string;
+  },
 ): Promise<BotScopeOutcome> {
-  const { botId, scope, actor, now } = input;
+  const { id, scope, actor, now } = input;
   const current = await db
-    .prepare(BOT_SCOPE_READ_SQL)
-    .bind(botId)
+    .prepare(sql.read)
+    .bind(id)
     .first<{ scope: BotScope; shared_at: string | null }>();
   if (!current) return { outcome: "bot_not_found" };
   if (current.scope === scope) return { outcome: "ok", scope, sharedAt: current.shared_at };
@@ -1598,14 +1771,12 @@ export async function setBotScope(
   const [, write] =
     scope === "shared"
       ? await db.batch([
-          db
-            .prepare(BOT_SCOPE_SHARE_AUDIT_SQL)
-            .bind(crypto.randomUUID(), actor, botId, now, now),
-          db.prepare(BOT_SCOPE_SHARE_SQL).bind(botId, now),
+          db.prepare(sql.shareAudit).bind(crypto.randomUUID(), actor, id, now, now),
+          db.prepare(sql.share).bind(id, now),
         ])
       : await db.batch([
-          db.prepare(BOT_SCOPE_UNSHARE_AUDIT_SQL).bind(crypto.randomUUID(), actor, botId, now),
-          db.prepare(BOT_SCOPE_UNSHARE_SQL).bind(botId),
+          db.prepare(sql.unshareAudit).bind(crypto.randomUUID(), actor, id, now),
+          db.prepare(sql.unshare).bind(id),
         ]);
 
   if ((write?.meta.changes ?? 0) > 0) {
@@ -1613,12 +1784,57 @@ export async function setBotScope(
   }
 
   const persisted = await db
-    .prepare(BOT_SCOPE_READ_SQL)
-    .bind(botId)
+    .prepare(sql.read)
+    .bind(id)
     .first<{ scope: BotScope; shared_at: string | null }>();
   if (persisted === null) return { outcome: "bot_not_found" };
   if (persisted.scope === scope) return { outcome: "ok", scope, sharedAt: persisted.shared_at };
   return { outcome: "outside_official_workspace" };
+}
+
+/**
+ * The APP share switch: writes `github_apps.scope` — who may act through
+ * these credentials — and audits it as `runtime.app_scope.set` on target
+ * type `app`. `id` is the App row id.
+ */
+export async function setAppScope(
+  db: AppsStoreD1,
+  input: { appId: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
+): Promise<BotScopeOutcome> {
+  return scopeTransition(
+    db,
+    { ...input, id: input.appId },
+    {
+      read: APP_SCOPE_READ_SQL,
+      shareAudit: APP_SCOPE_SHARE_AUDIT_SQL,
+      share: APP_SCOPE_SHARE_SQL,
+      unshareAudit: APP_SCOPE_UNSHARE_AUDIT_SQL,
+      unshare: APP_SCOPE_UNSHARE_SQL,
+    },
+  );
+}
+
+/**
+ * The BOT share switch: writes `review_bots.scope` — which workspaces may
+ * consume this review configuration — and audits it as
+ * `runtime.bot_scope.set` on target type `bot`. `id` is the bot row id
+ * (equal to the App's this release; keyed independently on purpose).
+ */
+export async function setReviewBotScope(
+  db: AppsStoreD1,
+  input: { botId: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
+): Promise<BotScopeOutcome> {
+  return scopeTransition(
+    db,
+    { ...input, id: input.botId },
+    {
+      read: REVIEW_BOT_SCOPE_READ_SQL,
+      shareAudit: REVIEW_BOT_SCOPE_SHARE_AUDIT_SQL,
+      share: REVIEW_BOT_SCOPE_SHARE_SQL,
+      unshareAudit: REVIEW_BOT_SCOPE_UNSHARE_AUDIT_SQL,
+      unshare: REVIEW_BOT_SCOPE_UNSHARE_SQL,
+    },
+  );
 }
 
 /**

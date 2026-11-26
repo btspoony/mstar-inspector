@@ -190,8 +190,12 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
     const targetIdSql = options?.targetIdExpression?.sql ?? "?";
     const targetIdBinds: readonly unknown[] =
       options?.targetIdExpression === undefined ? [doc.targetId] : options.targetIdExpression.binds;
-    const reviewColumns = `(id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)`;
-    const reviewValues = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${targetIdSql}, ?, ?, ?, ?, ?`;
+    // Both attribution columns, equal this release (one App executes through
+    // exactly one bot — its own): app_id is the acting App, bot_id the
+    // executing bot. Writing only bot_id would drop the publishing tree's
+    // renamed attribution column entirely.
+    const reviewColumns = `(id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)`;
+    const reviewValues = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${targetIdSql}, ?, ?, ?, ?, ?`;
     const reviewStmt: ComposedStatement = {
       sql:
         options?.guard === undefined
@@ -212,6 +216,7 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
         payload.summary_md ?? null,
         REVIEW_SKILL_VERSION,
         JSON.stringify(payload),
+        appId,
         appId,
         ...targetIdBinds,
         doc.model ?? null,

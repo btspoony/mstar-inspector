@@ -8,7 +8,7 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createReviewBotsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import type { DeliveryOutcome } from "../../src/dashboard/apps-store";
-import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, createTestD1, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import {
   WEBHOOK_DELIVERIES_MIGRATIONS,
   WEBHOOK_DELIVERIES_TAIL,
@@ -20,10 +20,16 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 describe("migrations/0011_webhook_deliveries.sql", () => {
   function shape(db: ReturnType<typeof createTestD1>): { parent: string; attribution: string } {
-    const renamed = (db.raw
-      .query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'review_bots'")
-      .get() as { present?: number } | null)?.present === 1;
-    return renamed ? { parent: "review_bots", attribution: "bot_id" } : { parent: "github_apps", attribution: "app_id" };
+    const names = new Set(
+      (db.raw.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+        (row) => row.name,
+      ),
+    );
+    // 0056–0114 renames the credential table to review_bots; 0115 splits it
+    // back, so "both exist" is post-split and github_apps wins.
+    return names.has("github_apps")
+      ? { parent: "github_apps", attribution: "app_id" }
+      : { parent: "review_bots", attribution: "bot_id" };
   }
 
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
@@ -51,7 +57,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
   ): void {
     const row = {
       id: "delivery-1",
-      bot_id: "app-1",
+      app_id: "app-1",
       event_name: "pull_request",
       outcome: "ok",
       status_code: null,
@@ -62,7 +68,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
         `INSERT INTO webhook_deliveries (id, ${shape(db).attribution}, event_name, outcome, status_code)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.bot_id, row.event_name, row.outcome, row.status_code);
+      .run(row.id, row.app_id, row.event_name, row.outcome, row.status_code);
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0010 with live rows); existing tables untouched", () => {
@@ -73,6 +79,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
          VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'ok')`,
       )
       .run();
+  syncReviewBotColumn(db);
     applyMigrations(db, [
       "0003_dashboard_users.sql",
       "0004_github_apps.sql",
@@ -142,10 +149,10 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     expect(count.n).toBe(5);
   });
 
-  test("bot_id is NOT NULL FK to review_bots — an unknown app is refused", () => {
+  test("app_id is NOT NULL FK to github_apps — an unknown app is refused", () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    expect(() => insertDelivery(db, { id: "delivery-fk", bot_id: "no-such-app" })).toThrow(
+    expect(() => insertDelivery(db, { id: "delivery-fk", app_id: "no-such-app" })).toThrow(
       /FOREIGN KEY constraint failed/,
     );
   });
@@ -169,6 +176,9 @@ describe("migrations/0043_webhook_delivery_repository.sql", () => {
                  'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
       .run();
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
     db.raw
       .prepare(
         `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code)
@@ -239,14 +249,16 @@ describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () 
 describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliveries)", () => {
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
     const appNum = Number(id.replace(/\D/g, "")) || 1;
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
-      )
-      .run(id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
+    )
+    .run(id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   }
 
   test("recordDelivery persists a full row: UUID id, caller fields, datetime('now') created_at", async () => {
@@ -259,7 +271,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
 
     const rows = db.raw.query("SELECT * FROM webhook_deliveries ORDER BY rowid").all() as Array<{
       id: string;
-      bot_id: string;
+      app_id: string;
       event_name: string | null;
       outcome: string;
       status_code: number | null;
@@ -267,7 +279,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     }>;
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
-      bot_id: "app-1",
+      app_id: "app-1",
       event_name: "pull_request",
       outcome: "ok",
       status_code: null,
@@ -376,7 +388,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
 
     expect(page.rows).toHaveLength(5);
     expect(page.total).toBe(7);
-    expect(page.rows.every((r) => r.bot_id === "app-1")).toBe(true);
+    expect(page.rows.every((r) => r.app_id === "app-1")).toBe(true);
     expect(page.rows[0]!.created_at >= page.rows[4]!.created_at).toBe(true);
 
     const empty = await store.listDeliveries("no-such-app", {
@@ -566,16 +578,18 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
     const appCountRow = db.raw.query(`SELECT COUNT(*) AS n FROM review_bots`).get() as { n: number };
     const appCount = appCountRow.n;
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
-      )
-      .run(id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
+    )
+    .run(id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
     db.raw
-      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
+      .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
       .run(id);
     const target = await createTargetsStore(db).create({
       workspaceId: "default",
@@ -655,7 +669,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     return db.raw
       .query(
         `SELECT event_name, outcome, status_code FROM webhook_deliveries
-         WHERE bot_id = ? ORDER BY rowid`,
+         WHERE app_id = ? ORDER BY rowid`,
       )
       .all(appId) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
   }
@@ -697,7 +711,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(res.status).toBe(200);
     const rows = db.raw
-      .query("SELECT repository_full_name FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ repository_full_name: string | null }>;
     expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
   });
@@ -719,7 +733,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(await res.text()).toBe("ignored");
     const rows = db.raw
-      .query("SELECT repository_full_name FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ repository_full_name: string | null }>;
     expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
   });
@@ -738,7 +752,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(res.status).toBe(200);
     const rows = db.raw
-      .query("SELECT event_name, repository_full_name FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, repository_full_name FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; repository_full_name: string | null }>;
     expect(rows).toEqual([{ event_name: "ping", repository_full_name: null }]);
   });
@@ -783,7 +797,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       { event_name: "pull_request", outcome: "paused", status_code: null },
     ]);
     const bot = db.raw
-      .query("SELECT review_enabled FROM review_bots WHERE id = ?")
+      .query("SELECT review_enabled FROM github_apps WHERE id = ?")
       .get(appRow.id) as { review_enabled: number } | null;
     expect(bot?.review_enabled).toBe(1);
   });
@@ -868,11 +882,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
           if (mutation === "soft-delete") {
             db.raw
               .prepare(
-                `UPDATE review_bots SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
+                `UPDATE github_apps SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
               )
               .run(appId);
           } else {
-            db.raw.prepare(`DELETE FROM review_bots WHERE id = ?`).run(appId);
+            db.raw.prepare(`DELETE FROM github_apps WHERE id = ?`).run(appId);
           }
           return originalRun();
         }) as typeof stmt.run;
@@ -899,7 +913,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       { event_name: "pull_request", outcome: "ok", status_code: null },
     ]);
     const app = db.raw
-      .query("SELECT deleted_at FROM review_bots WHERE id = ?")
+      .query("SELECT deleted_at FROM github_apps WHERE id = ?")
       .get(appRow.id) as { deleted_at: string | null };
     expect(app.deleted_at).not.toBeNull();
   });
@@ -1004,7 +1018,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       { event_name: "pull_request", outcome: "refused", status_code: null },
     ]);
     const reason = db.raw
-      .query("SELECT reason FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT reason FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ reason: string | null }>;
     expect(reason).toHaveLength(1);
     expect(reason[0]!.reason).toContain("review.route.workflow");
@@ -1064,7 +1078,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       { event_name: "pull_request", outcome: "paused", status_code: null },
     ]);
     const reason = db.raw
-      .query("SELECT reason FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT reason FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ reason: string | null }>;
     expect(reason).toEqual([{ reason: null }]);
   });

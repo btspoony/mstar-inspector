@@ -48,8 +48,7 @@ function seedWorkspace(db: TestD1, id: string, name: string, deletedAt: string |
 function seedReviewNow(db: TestD1, id: string, prNumber: number, targetId: string, botId: string): void {
   seed(
     db,
-    `INSERT INTO reviews
-       (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, bot_id, target_id)
+    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, app_id, target_id)
      VALUES (?, 1, 'acme', 'widgets', ?, ?, ?, 'pass', ?, ?)`,
     id,
     prNumber,

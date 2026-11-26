@@ -14,7 +14,7 @@ import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import { quotaMonth } from "../../src/store/quota-store";
 import { sumMonthlyRp } from "../../src/store/usage-store";
 import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
-import { createTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createTestD1, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import {
   CONSUMER_POST_CHAINS_MIGRATIONS,
   CONSUMER_PRE_CHAINS_MIGRATIONS,
@@ -417,7 +417,7 @@ function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payload
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, created_ms, updated_ms)
        VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', ?, ?, 1000, 1000)`,
     )
@@ -427,7 +427,7 @@ function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payload
 function seedAppInstallation(db: TestD1): void {
   db.raw
     .prepare(
-      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
        VALUES (?, ?, 123, 'acme', datetime('now'))`,
     )
     .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
@@ -562,6 +562,7 @@ describe("createReviewConsumer", () => {
     const row = db.raw.query("SELECT * FROM reviews").get() as {
       head_sha: string;
       verdict: string;
+      app_id: string | null;
       bot_id: string | null;
       model: string | null;
       provider: string | null;
@@ -2467,7 +2468,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));
-    await consumer(h.makeBatch(makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID }, targetId: `target-${TEST_SECOND_APP_ID}` })));
+    await consumer(h.makeBatch(makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID, botId: TEST_SECOND_APP_ID }, targetId: `target-${TEST_SECOND_APP_ID}` })));
 
     const levels = h.sandbox.calls
       .filter((c) => c.cmd.includes("--input"))
@@ -2875,25 +2876,27 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const commaAppId = "22222222-3333-4444-5555-666666666666";
     const box = createSecretbox(TEST_KEY);
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, 424243, 'comma-chain-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
-      )
-      .run(
+    )
+    .run(
         commaAppId,
         await box.encryptSecret(TEST_APP_PEM, `github_apps.private_key_enc:${commaAppId}`),
         await box.encryptSecret("whsec-comma-app", `github_apps.webhook_secret_enc:${commaAppId}`),
       );
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
     db.raw
-      .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
+      .prepare(`INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
       .run(commaAppId);
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+           (id, workspace_id, app_id, name, created_by, created_at, updated_at)
          VALUES (?, 'default', ?, 'comma-chain-app', 'tester', datetime('now'), datetime('now'))`,
       )
       .run(`target-${commaAppId}`, commaAppId);
@@ -2915,7 +2918,7 @@ describe("createReviewConsumer", () => {
           id: "m-comma",
           timestamp: new Date(),
           attempts: 1,
-          body: makePayload({ botRef: { appId: commaAppId }, targetId: `target-${commaAppId}` }),
+          body: makePayload({ botRef: { appId: commaAppId, botId: commaAppId }, targetId: `target-${commaAppId}` }),
           retry: () => {},
           ack: () => {},
         },
@@ -2940,14 +2943,13 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const overrideAppId = "33333333-4444-5555-6666-777777777777";
     const box = createSecretbox(TEST_KEY);
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, 424244, 'comma-override-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
-      )
-      .run(
+    )
+    .run(
         overrideAppId,
         await box.encryptSecret(TEST_APP_PEM, `github_apps.private_key_enc:${overrideAppId}`),
         await box.encryptSecret(
@@ -2955,13 +2957,16 @@ describe("createReviewConsumer", () => {
           `github_apps.webhook_secret_enc:${overrideAppId}`,
         ),
       );
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
     db.raw
-      .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
+      .prepare(`INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
       .run(overrideAppId);
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+           (id, workspace_id, app_id, name, created_by, created_at, updated_at)
          VALUES (?, 'default', ?, 'comma-override-app', 'tester', datetime('now'), datetime('now'))`,
       )
       .run(`target-${overrideAppId}`, overrideAppId);
@@ -2992,7 +2997,7 @@ describe("createReviewConsumer", () => {
           id: "m-override",
           timestamp: new Date(),
           attempts: 1,
-          body: makePayload({ botRef: { appId: overrideAppId }, targetId: `target-${overrideAppId}` }),
+          body: makePayload({ botRef: { appId: overrideAppId, botId: overrideAppId }, targetId: `target-${overrideAppId}` }),
           retry: () => {},
           ack: () => {},
         },
@@ -3034,6 +3039,9 @@ describe("createReviewConsumer", () => {
         await box.encryptSecret(TEST_APP_PEM, `github_apps.private_key_enc:${appId}`),
         await box.encryptSecret("whsec-legacy-app", `github_apps.webhook_secret_enc:${appId}`),
       );
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
     const preChain = "ark/deepseek-v4-flash";
     const preOverrides = {
       "mstar-review-seat": "ark/deepseek-v4-flash:high",
@@ -3062,7 +3070,7 @@ describe("createReviewConsumer", () => {
     }
     applyMigrations(db, ["0017_app_model_chains.sql"]);
     applyMigrations(db, CONSUMER_POST_CHAINS_MIGRATIONS);
-    const migratedTarget = db.raw.query("SELECT id FROM review_targets WHERE bot_id = ?").get(appId) as {
+    const migratedTarget = db.raw.query("SELECT id FROM review_targets WHERE app_id = ?").get(appId) as {
       id: string;
     };
     const store = createAppConfigStore(db, TEST_KEY);
@@ -3077,7 +3085,7 @@ describe("createReviewConsumer", () => {
     });
     expect(await store.getModelOverridesForConsumer(appId)).toEqual(preOverrides);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
-    await consumer(h.makeBatch(makePayload({ botRef: { appId }, targetId: migratedTarget.id })));
+    await consumer(h.makeBatch(makePayload({ botRef: { appId, botId: appId }, targetId: migratedTarget.id })));
     const input = JSON.parse(h.sandbox.writtenInputJson!);
     expect(input.modelOverrides).toEqual(preOverrides);
     expect(runnerExecEnv().OMP_REVIEW_MODEL).toBe(preChain);
@@ -3557,7 +3565,7 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(
         `INSERT INTO review_checks
-           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+           (id, app_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
             triggered_by, action, attempt_key, generation, external_id, check_run_id,
             create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
             desired, desired_title, desired_summary, observed, recovery_state,
@@ -3597,7 +3605,7 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(
         `INSERT INTO review_checks
-           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+           (id, app_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
             triggered_by, action, attempt_key, generation, external_id, check_run_id,
             create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
             desired, desired_title, desired_summary, observed, recovery_state,
@@ -3629,7 +3637,7 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(
         `INSERT INTO review_checks
-           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+           (id, app_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
             triggered_by, action, attempt_key, generation, external_id, check_run_id,
             create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
             desired, desired_title, desired_summary, observed, recovery_state,
@@ -3659,7 +3667,7 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(
         `INSERT INTO review_checks
-           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+           (id, app_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
             triggered_by, action, attempt_key, generation, external_id, check_run_id,
             create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
             desired, desired_title, desired_summary, observed, recovery_state,
@@ -3758,6 +3766,7 @@ describe("createReviewConsumer", () => {
          VALUES ('review-of-new-head', 123, 'acme', 'widgets', 42, ?, 'ship it')`,
       )
       .run(NEW_SHA);
+  syncReviewBotColumn(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
@@ -5002,7 +5011,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_threads
-           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
             original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, '{}', 'pending', 3000, 3000)`,
       )
@@ -5287,7 +5296,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms, recovery_state)
          VALUES ('dddddddd-0000-4000-8000-000000000004', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1, 1, 'pending')`,
       )
@@ -5388,7 +5397,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_findings
-           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
             first_seen_round, last_seen_round, state, created_ms, updated_ms)
          VALUES ('eeeeeeee-0000-4000-8000-000000000005', ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'addressed', 1, 1)`,
@@ -5810,7 +5819,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
       db.raw
         .prepare(
           `INSERT INTO review_findings
-             (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms)
            VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
@@ -5834,7 +5843,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
       db.raw
         .prepare(
           `INSERT INTO review_threads
-             (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+             (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
               original_sha, round, intent_json, resolution_state, thread_id, created_ms, updated_ms)
            VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, ?, 'pending', ?, ?, ?)`,
         )
@@ -5971,7 +5980,7 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
     db.raw
       .prepare(
         `INSERT INTO review_threads
-           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
             original_sha, round, intent_json, resolution_state, thread_id,
             superseded_by_publication_id, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, ?, 'pending', ?, ?, ?, ?)`,
@@ -6201,7 +6210,7 @@ describe("degraded publication journal conflict guard (spec §7.7, P67-QC-012)",
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms)
          VALUES ('existing-deg', ?, 123, 'acme', 'widgets', 42, ?, 'degraded', 'failed', ?, 1, 1)`,
       )
@@ -6226,7 +6235,7 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms)
          VALUES ('deg-uncertain', ?, 123, 'acme', 'widgets', 42, 'oldsha', 'degraded', 'unknown', ?, 1, 1)`,
       )
@@ -6247,7 +6256,7 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, created_ms, updated_ms)
          VALUES ('deg-confirmed', ?, 123, 'acme', 'widgets', 42, 'oldsha', 'degraded', 'applied', ?, '{}', 1, 1)`,
       )
@@ -6408,7 +6417,7 @@ function publicationRow(db: TestD1): { id: string; kind: string; phase: string; 
 
 async function targetGate(db: TestD1, appId: string) {
   const rows = await db
-    .prepare(`SELECT * FROM review_targets WHERE bot_id = ? AND deleted_at IS NULL LIMIT 2`)
+    .prepare(`SELECT * FROM review_targets WHERE app_id = ? AND deleted_at IS NULL LIMIT 2`)
     .bind(appId)
     .all<ReviewTargetRow>();
   const target = rows.results.length === 1 ? rows.results[0]! : null;
@@ -6505,7 +6514,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const db = await createSeededTestD1();
     db.raw
       .prepare(
-        `UPDATE review_targets SET follow_workspace_defaults = 1, check_min_score = 95 WHERE bot_id = ?`,
+        `UPDATE review_targets SET follow_workspace_defaults = 1, check_min_score = 95 WHERE app_id = ?`,
       )
       .run(TEST_APP_ID);
     const adapter = checksAdapterFor(db);
@@ -6752,7 +6761,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms, recovery_state)
          VALUES ('dddddddd-0000-4000-8000-000000000004', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1, 1, 'pending')`,
       )
@@ -6797,7 +6806,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a paused App claims no attempt and runs no Check", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    db.raw.prepare("UPDATE review_bots SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
@@ -6813,7 +6822,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("a bot with no review target is a DLQ failure, never a review on defaulted configuration", async () => {
     const db = await createSeededTestD1();
-    db.raw.prepare("DELETE FROM review_targets WHERE bot_id = ?").run(TEST_APP_ID);
+    db.raw.prepare("DELETE FROM review_targets WHERE app_id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
@@ -6846,7 +6855,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     );
     if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
     payload.attachDeliveryId = attached.deliveryId;
-    db.raw.prepare("UPDATE review_bots SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       createAppCommenter: () => commenterWithChecks(adapter),
@@ -7756,7 +7765,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(dueAt).toBeLessThan(abandoned.execution_deadline_ms);
     db.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
          VALUES (?, ?, 123, 'acme', datetime('now'))`,
       )
       .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
@@ -8694,7 +8703,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
          VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', 'confirmed', ?, ?, 1, 'done', 1000, 1000, 1000)`,
       )
@@ -9231,7 +9240,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, created_ms, updated_ms)
          VALUES ('prior-publication', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'applied',
                  ?, '{"prior":true}', 1, 1)`,
@@ -9240,7 +9249,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_checks
-           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+           (id, app_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
             triggered_by, action, attempt_key, generation, external_id, check_run_id,
             create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
             desired, desired_title, desired_summary, observed, recovery_state,
@@ -9427,7 +9436,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
 describe("workspace attribution gate (one read face)", () => {
   function dropWorkspaceMapping(db: TestD1): void {
-    db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = ?").run(TEST_APP_ID);
+    db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(TEST_APP_ID);
   }
 
   test("an unmapped App fails at the credential gate — zero sandbox/token/GitHub, same retry→DLQ path", async () => {
@@ -9456,7 +9465,7 @@ describe("workspace attribution gate (one read face)", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await expect(
-      consumer(h.makeBatch(makePayload({ botRef: { appId: "no-such-app" }, targetId: "no-such-target" }))),
+      consumer(h.makeBatch(makePayload({ botRef: { appId: "no-such-app", botId: "no-such-app" }, targetId: "no-such-target" }))),
     ).rejects.toThrow(
       /per-App credential resolution failed: app no-such-app not found, has no workspace mapping, or its workspace is deleted$/,
     );
@@ -9489,6 +9498,7 @@ describe("usage ledger (migration 0031)", () => {
         occurred_at: expect.any(String),
         rp: 2,
         source: "byok",
+        bot_id: TEST_APP_ID,
       },
     ]);
     expect(reviewCount(db)).toBe(1);
@@ -9591,13 +9601,13 @@ describe("usage ledger (migration 0031)", () => {
     db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
     db.raw
       .prepare(`INSERT INTO review_targets
-                  (id, workspace_id, bot_id, name, review_level, check_min_score, created_by, created_at, updated_at)
+                  (id, workspace_id, app_id, name, review_level, check_min_score, created_by, created_at, updated_at)
                 VALUES ('target-tenant', 'tenant', ?, 'tenant', 'deep', ?, 'tester', datetime('now'), datetime('now'))`)
       .run(TEST_SECOND_APP_ID, DEFAULT_CHECK_MIN_SCORE);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await withFrozenClock(() =>
-      consumer(h.makeBatch(makePayload({ botRef: { appId: TEST_SECOND_APP_ID }, targetId: "target-tenant" }))),
+      consumer(h.makeBatch(makePayload({ botRef: { appId: TEST_SECOND_APP_ID, botId: TEST_SECOND_APP_ID }, targetId: "target-tenant" }))),
     );
 
     expect(usageRows(db).map((row) => ({ workspace_id: row.workspace_id, rp: row.rp, source: row.source }))).toEqual([
@@ -9615,13 +9625,13 @@ describe("usage ledger (migration 0031)", () => {
     db.raw
       .prepare(`INSERT INTO workspaces (id, slug, name, created_at) VALUES ('tenant', 'tenant', 'Tenant', datetime('now'))`)
       .run();
-    db.raw.prepare(`UPDATE bot_workspaces SET workspace_id = 'tenant' WHERE bot_id = ?`).run(TEST_APP_ID);
-    db.raw.prepare(`UPDATE review_targets SET workspace_id = 'tenant' WHERE bot_id = ?`).run(TEST_APP_ID);
+    db.raw.prepare(`UPDATE app_workspaces SET workspace_id = 'tenant' WHERE app_id = ?`).run(TEST_APP_ID);
+    db.raw.prepare(`UPDATE review_targets SET workspace_id = 'tenant' WHERE app_id = ?`).run(TEST_APP_ID);
     await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "quick");
     db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
     db.raw
       .prepare(`INSERT INTO review_targets
-                  (id, workspace_id, bot_id, name, review_level, check_min_score, created_by, created_at, updated_at)
+                  (id, workspace_id, app_id, name, review_level, check_min_score, created_by, created_at, updated_at)
                 VALUES ('target-tenant-shared', 'tenant', ?, 'tenant-shared', 'quick', ?, 'tester', datetime('now'), datetime('now'))`)
       .run(TEST_SECOND_APP_ID, DEFAULT_CHECK_MIN_SCORE);
 
@@ -9630,7 +9640,7 @@ describe("usage ledger (migration 0031)", () => {
     const shared = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
     await shared(
       h.makeBatch(
-        makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID }, targetId: "target-tenant-shared" }),
+        makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID, botId: TEST_SECOND_APP_ID }, targetId: "target-tenant-shared" }),
       ),
     );
 
@@ -9958,7 +9968,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9001 });
     seedClaim(db, payload, 9001, "queued");
 
-    db.raw.prepare("UPDATE review_bots SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE github_apps SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(
       await h.makeEnv({ DB: db as never }),
       h.testLog,
@@ -10095,7 +10105,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
 
   test("a job without comment_id never touches the claim table", async () => {
     const db = await createSeededTestD1();
-    db.raw.prepare("UPDATE review_bots SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE github_apps SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(
       await h.makeEnv({ DB: db as never }),
       h.testLog,
@@ -10172,10 +10182,11 @@ describe("check_run.rerequested rerun (the rerun id is its own idempotency dimen
     const db = await createSeededTestD1();
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, target_id)
          VALUES (?, 123, 'acme', 'widgets', 42, ?, 'ship it', ?, ?)`,
       )
       .run(`idem:123:acme/widgets:42:${SHA}`, SHA, TEST_APP_ID, `target-${TEST_APP_ID}`);
+  syncReviewBotColumn(db);
     h.kvState.entries.set(plainDoneKey(SHA), "done");
     const settled: Array<{ reason: string; attachDeliveryId?: string }> = [];
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
@@ -10462,10 +10473,11 @@ describe("partial seat coverage — a delivered review passes and says what it c
     // A full round on a newer head IS a valid base; the partial head stays excluded.
     const fullRow = db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id, context_incomplete)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, target_id, context_incomplete)
          VALUES (?, 123, 'acme', 'widgets', 42, ?, 'ship it', ?, ?, 0)`,
       )
       .run("idem:123:acme/widgets:42:fullsha", "f".repeat(40), TEST_APP_ID, `target-${TEST_APP_ID}`);
+  syncReviewBotColumn(db);
     expect(fullRow).toBeDefined();
     expect(await findIncrementBase(db as never, { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 })).toBe("f".repeat(40));
   });

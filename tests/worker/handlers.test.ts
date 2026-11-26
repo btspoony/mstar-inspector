@@ -17,7 +17,7 @@ function prPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload 
     head_sha: HEAD_SHA,
     action: "opened",
     triggered_by: "pull_request",
-    botRef: { appId: "11111111-2222-3333-4444-555555555555" },
+    botRef: { appId: "11111111-2222-3333-4444-555555555555", botId: "11111111-2222-3333-4444-555555555555" },
     targetId: "66666666-7777-8888-9999-aaaaaaaaaaaa",
     ...overrides,
   };
@@ -33,7 +33,7 @@ function mentionPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPay
     comment_id: COMMENT_ID,
     action: "created",
     triggered_by: "issue_comment",
-    botRef: { appId: "11111111-2222-3333-4444-555555555555" },
+    botRef: { appId: "11111111-2222-3333-4444-555555555555", botId: "11111111-2222-3333-4444-555555555555" },
     targetId: "66666666-7777-8888-9999-aaaaaaaaaaaa",
     ...overrides,
   };
@@ -264,7 +264,7 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
     expect(JSON.parse(row!.payload_json)).toMatchObject({
       comment_id: COMMENT_ID,
       triggered_by: "issue_comment",
-      botRef: { appId: "11111111-2222-3333-4444-555555555555" },
+      botRef: { appId: "11111111-2222-3333-4444-555555555555", botId: "11111111-2222-3333-4444-555555555555" },
       targetId: "66666666-7777-8888-9999-aaaaaaaaaaaa",
     });
   });

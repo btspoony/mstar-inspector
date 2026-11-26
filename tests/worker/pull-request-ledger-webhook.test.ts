@@ -3,7 +3,7 @@ import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const SECRET = "test-webhook-secret";
@@ -11,9 +11,8 @@ const SECRET = "test-webhook-secret";
 async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Promise<string> {
   const id = `app-${mode}`;
   const box = createSecretbox(TEST_KEY);
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -26,11 +25,14 @@ async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Prom
       await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
       await box.encryptSecret(SECRET, `github_apps.webhook_secret_enc:${id}`),
     );
-  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
+  db.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+         (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
           review_trigger_mode, created_by, created_at, updated_at)
        VALUES (?, 'default', ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
     )
@@ -82,7 +84,7 @@ async function deliver(appId: string, payload: unknown, env: Env, event = "pull_
 }
 
 function ledger(db: TestD1, appId: string): Array<Record<string, unknown>> {
-  return db.raw.prepare("SELECT * FROM pull_requests WHERE bot_id = ?").all(appId) as Array<Record<string, unknown>>;
+  return db.raw.prepare("SELECT * FROM pull_requests WHERE app_id = ?").all(appId) as Array<Record<string, unknown>>;
 }
 
 describe("pull_request delivery → PR ledger", () => {

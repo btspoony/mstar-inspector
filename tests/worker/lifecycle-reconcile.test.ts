@@ -49,7 +49,7 @@ import type { UpsertPlan } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { createReviewCommenter, PreparedSendRejected } from "../../src/pipeline/comment";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { testAppPem } from "../helpers/rsa-key";
@@ -99,19 +99,21 @@ function seedApp(db: TestD1, id: string, seed: AppSeed = {}): void {
     install = true,
     installationId = SCOPE.installationId,
   } = seed;
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, review_enabled, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, ?, ?, datetime('now'), datetime('now'))`,
     )
     .run(id, `reconcile-${id}`, githubAppId, `reconcile-${id}`, status, deletedAt, reviewEnabled);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   seedTarget(db, id, { id: `target-${id}` });
   if (install) {
     db.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
          VALUES (?, ?, ?, 'acme', datetime('now'))`,
       )
       .run(`inst-${id}-${installationId}`, id, installationId);
@@ -253,17 +255,19 @@ async function seedRealApp(db: TestD1, id: string, githubAppId: number): Promise
     pem,
     `github_apps.private_key_enc:${id}`,
   );
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, review_enabled, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'enc-secret', 'tester', 'active', NULL, 1, datetime('now'), datetime('now'))`,
     )
     .run(id, `reconcile-${id}`, githubAppId, `reconcile-${id}`, encrypted);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
     .prepare(
-      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
        VALUES (?, ?, ?, 'acme', datetime('now'))`,
     )
     .run(`inst-${id}-${SCOPE.installationId}`, id, SCOPE.installationId);
@@ -274,7 +278,7 @@ function seedFindingRow(db: TestD1, id: string, publicationId: string, scope: Sc
   db.raw
     .prepare(
       `INSERT INTO review_findings
-         (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
@@ -309,7 +313,7 @@ function seedThreadRow(
   db.raw
     .prepare(
       `INSERT INTO review_threads
-         (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+         (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
           original_sha, round, intent_json, resolution_state, verified_json, attempts, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
     )
@@ -461,7 +465,7 @@ describe("publication lane — confirmed apply", () => {
       head_sha: SHA,
       action: "opened",
       triggered_by: "pull_request",
-      botRef: { appId: SCOPE.appId },
+      botRef: { appId: SCOPE.appId, botId: SCOPE.appId },
       targetId: `target-${SCOPE.appId}`,
     };
     await reserveAttemptHandoff(db as never, {
@@ -517,7 +521,7 @@ describe("publication lane — confirmed apply", () => {
       head_sha: SHA,
       action: "opened",
       triggered_by: "pull_request",
-      botRef: { appId: SCOPE.appId },
+      botRef: { appId: SCOPE.appId, botId: SCOPE.appId },
       targetId: `target-${SCOPE.appId}`,
     };
     await reserveAttemptHandoff(db as never, {
@@ -683,6 +687,7 @@ describe("§7.9a condition 1 — a Check-backed send and its recovery share one 
          VALUES (?, 'provisioned', ?, ?, ?)`,
       )
       .run(ADMITTED_ATTEMPT, T0, identity.attempt_key, identity.generation);
+  syncReviewBotColumn(db);
     expect(await releaseCheckClaim(db as never, attemptId, claimed.lease, T0)).toBe(true);
     db.raw.prepare(`UPDATE review_checks SET terminal_ms = ? WHERE id = ?`).run(T0, attemptId);
     const decoy = await claimAttempt(db as never, {
@@ -982,7 +987,7 @@ describe("§7.9a condition 2 — a pre-intent line batch is discovery-only", () 
     db.raw
       .prepare(
         `INSERT INTO review_threads
-           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
             original_sha, round, intent_json, resolution_state, verified_json, attempts, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '{}', 'pending', NULL, 0, ?, ?)`,
       )
@@ -1685,7 +1690,7 @@ describe("credential routing — suspension and re-enable (spec §7.6/§7.11.1)"
     await reconcile(db, { now: () => T0 });
     expect(pubRow(db, "pub-a").recovery_state).toBe("suspended");
 
-    db.raw.prepare(`UPDATE review_bots SET status = 'active' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET status = 'active' WHERE id = ?`).run(APP);
     await reconcile(db, { now: () => T0 + 1_000, reviewer: okReviewer() });
 
     expect(pubRow(db, "pub-a")).toMatchObject({ recovery_state: "pending", phase: "prepared" });
@@ -2474,7 +2479,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
         correctedPem,
         `github_apps.private_key_enc:${APP}`,
       );
-      db.raw.prepare(`UPDATE review_bots SET private_key_enc = ? WHERE id = ?`).run(corrected, APP);
+      db.raw.prepare(`UPDATE github_apps SET private_key_enc = ? WHERE id = ?`).run(corrected, APP);
       globalThis.fetch = (async (input: unknown) => {
         requests.push(String(input));
         return new Response(JSON.stringify({ id: 1001, slug: "acme-inspector" }), {
@@ -2500,7 +2505,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
     expect(pubRow(db, "pub-a").recovery_state).toBe("suspended");
     expect(pubRow(db, "pub-a").last_error).toContain("suspend:disabled:");
 
-    db.raw.prepare(`UPDATE review_bots SET status = 'active' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET status = 'active' WHERE id = ?`).run(APP);
     await reconcile(db, { now: () => T0 + 1_000, reviewer: okReviewer() });
     expect(pubRow(db, "pub-a")).toMatchObject({ recovery_state: "pending", phase: "prepared" });
   });

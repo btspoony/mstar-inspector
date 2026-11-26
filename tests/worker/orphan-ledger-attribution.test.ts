@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedBot, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import { orphanLedgerAttribution } from "../../src/admin/data-upgrades/orphan-ledger-attribution";
 import {
   readEffectiveTargetSettings,
@@ -20,7 +20,7 @@ const RUN_START = "2026-11-18T00:00:00.000Z";
 
 function seedBotWorkspace(db: TestD1, botId: string, workspaceId = "default"): void {
   db.raw
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
     .run(botId, workspaceId);
 }
 
@@ -32,7 +32,7 @@ function seedInstallation(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
        VALUES (?, ?, ?, 'acme', '2026-08-01T00:00:00.000Z', ?)`,
     )
     .run(`inst-${botId}-${installationId}`, botId, installationId, removedAt);
@@ -45,8 +45,7 @@ function seedOrphanReview(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews
-         (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, bot_id)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, app_id)
        VALUES (?, ?, ?, ?, 1, ?, '2026-08-27T00:00:00.000Z', 'ship it', ?)`,
     )
     .run(
@@ -57,6 +56,7 @@ function seedOrphanReview(
       `sha-${id}`,
       opts.botId === undefined ? BOT : opts.botId,
     );
+  syncReviewBotColumn(db);
 }
 
 function seedOrphanFailure(
@@ -77,7 +77,7 @@ function seedOrphanPr(db: TestD1, id: string, owner: string, repo: string, prNum
   db.raw
     .prepare(
       `INSERT INTO pull_requests
-         (id, bot_id, owner, repo, pr_number, state, last_seen_at, target_id)
+         (id, app_id, owner, repo, pr_number, state, last_seen_at, target_id)
        VALUES (?, ?, ?, ?, ?, 'open', '2026-08-27T00:00:00.000Z', NULL)`,
     )
     .run(id, BOT, owner, repo, prNumber);
@@ -103,10 +103,10 @@ function fixture(): TestD1 {
   return db;
 }
 
-function liveTargets(db: TestD1): Array<{ id: string; bot_id: string; repo_owner: string | null; repo_name: string | null }> {
+function liveTargets(db: TestD1): Array<{ id: string; app_id: string; repo_owner: string | null; repo_name: string | null }> {
   return db.raw
     .query(
-      "SELECT id, bot_id, repo_owner, repo_name FROM review_targets WHERE deleted_at IS NULL ORDER BY id",
+      "SELECT id, app_id, repo_owner, repo_name FROM review_targets WHERE deleted_at IS NULL ORDER BY id",
     )
     .all() as never;
 }
@@ -171,7 +171,7 @@ describe("orphan-ledger-attribution item", () => {
     const live = liveTargets(db);
     expect(live).toHaveLength(2);
     const created = live.find((row) => row.id !== "target-alpha")!;
-    expect(created).toMatchObject({ bot_id: BOT, repo_owner: "acme", repo_name: "beta" });
+    expect(created).toMatchObject({ app_id: BOT, repo_owner: "acme", repo_name: "beta" });
     const row = db.raw
       .prepare(
         "SELECT repo_id, follow_workspace_defaults, workspace_id, created_by FROM review_targets WHERE id = ?",
@@ -332,7 +332,7 @@ describe("orphan-ledger-attribution item", () => {
     const batch = await orphanLedgerAttribution.runBatch(db, null, OPERATOR);
     expect(batch).toMatchObject({ processed: 1, done: true });
     const target = liveTargets(db)[0]!;
-    expect(target).toMatchObject({ bot_id: BOT, repo_owner: "acme", repo_name: "alpha" });
+    expect(target).toMatchObject({ app_id: BOT, repo_owner: "acme", repo_name: "alpha" });
     expect(targetOf(db, "review_failures", "fl-fallback")).toBe(target.id);
     expect(await orphanLedgerAttribution.verify(db, { runStartedAt: null })).toEqual({
       unattributed_ledger_rows: 0,
@@ -349,7 +349,7 @@ describe("orphan-ledger-attribution item", () => {
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+           (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
             check_min_score, created_by, created_at, updated_at)
          VALUES ('target-new', 'default', ?, 'acme/alpha', NULL, 'acme', 'alpha',
                  80, 'fixture', '2030-01-01T00:00:00.000Z', '2030-01-01T00:00:00.000Z')`,
@@ -469,7 +469,7 @@ describe("orphan-ledger-attribution item", () => {
         if (!raced) {
           raced = true;
           db.raw
-            .prepare("UPDATE bot_installations SET bot_id = ? WHERE installation_id = 1")
+            .prepare("UPDATE github_app_installations SET app_id = ? WHERE installation_id = 1")
             .run(OTHER_BOT);
         }
         return db.batch(statements);

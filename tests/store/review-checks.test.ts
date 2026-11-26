@@ -54,7 +54,7 @@ import {
   suspendCheckRecovery,
   suspensionCredentialOf,
 } from "../../src/store/review-checks";
-import { createMigratedTestD1, type TestD1 } from "./helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "./helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const OTHER_APP_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -66,14 +66,16 @@ const T0 = 1_700_000_000_000;
 const DEADLINE = T0 + CHECK_LEASE_MS;
 
 function seedApp(db: TestD1, id: string, githubAppId: number): void {
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, githubAppId, `checks-test-${id}`);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
 }
 
 function seededDb(): TestD1 {
@@ -87,7 +89,7 @@ function seedPublicationRow(db: TestD1, id: string): void {
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, created_ms, updated_ms)
        VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', ?, ?)`,
     )
@@ -325,7 +327,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
       db.raw
         .prepare(
           `INSERT INTO review_checks
-             (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+             (id, app_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
               triggered_by, action, attempt_key, generation, external_id, create_state,
               execution_deadline_ms, desired, observed, recovery_state, attempts, terminal_ms, created_ms, updated_ms)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'u', 'review', 'k', ?, ?, 'not-sent',
@@ -1462,8 +1464,8 @@ describe("tenant and App isolation (spec §7.0)", () => {
     }
     expect(await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId }, "disabled", T0)).toBe(1);
     const suspended = db.raw
-      .prepare(`SELECT bot_id, installation_id FROM review_checks WHERE recovery_state = 'suspended'`)
-      .all() as { bot_id: string; installation_id: number }[];
+      .prepare(`SELECT app_id, installation_id FROM review_checks WHERE recovery_state = 'suspended'`)
+      .all() as { app_id: string; installation_id: number }[];
     expect(suspended).toEqual([{ app_id: APP_ID, installation_id: SCOPE.installationId }]);
   });
 
@@ -1502,7 +1504,7 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
     db.raw
       .prepare(
         `INSERT OR REPLACE INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, holder, lease_epoch, lease_until_ms, attempts,
             recovery_state, last_error, created_ms, updated_ms, confirmed_ms, applied_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, NULL, 0, NULL, 0, 'pending', NULL, ?, ?, NULL, NULL)`,
@@ -1999,7 +2001,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
   test("a not-active App is never resumable, whatever the kind or proof", async () => {
     const db = seededDb();
     await suspendedRow(db, "disabled", "a".repeat(64));
-    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP_ID);
+    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP_ID);
     expect(
       await listReenableableCheckPairs(db, [
         { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null },
@@ -2014,7 +2016,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     expect(await suspendCheckForPause(db, id, lease, "App is paused", T0)).toBe(true);
     expect((await rawRow(db, id)).recovery_state).toBe("suspended");
-    db.raw.prepare(`UPDATE review_bots SET review_enabled = 0 WHERE id = ?`).run(APP_ID);
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 0 WHERE id = ?`).run(APP_ID);
 
     expect(
       await listReenableableCheckPairs(db, [
@@ -2022,7 +2024,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
       ]),
     ).toEqual([]);
 
-    db.raw.prepare(`UPDATE review_bots SET review_enabled = 1 WHERE id = ?`).run(APP_ID);
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 1 WHERE id = ?`).run(APP_ID);
     expect(
       await listReenableableCheckPairs(db, [
         { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null },

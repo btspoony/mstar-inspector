@@ -795,7 +795,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  const handleOutcome = await handleReviewJob({ ...settled.payload, botRef: { appId: row.id }, targetId: target!.id }, {
+  // In this release one App executes through exactly one bot — the one the
+  // entity split created under the same id — so botId is the App's own id.
+  const handleOutcome = await handleReviewJob({ ...settled.payload, botRef: { appId: row.id, botId: row.id }, targetId: target!.id }, {
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
     beforeEnqueue: async (payload) => {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1, execMigrationScript, migrationNumber, migrationsAfter } from "./helpers";
+import { syncReviewBotColumn, createMigratedTestD1, createTestD1, execMigrationScript, migrationNumber, migrationsAfter } from "./helpers";
 import {
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
@@ -15,11 +15,65 @@ import type { D1Like } from "../../src/store/types";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
+/**
+ * Shape-aware family-table lookup, keyed by what exists in the database UNDER
+ * TEST — never by calendar migration number: a migration test must build the
+ * schema named at the migration it tests (PM decision), and the family tables
+ * rename twice across the eras. Returns null before the table exists at all.
+ */
+function familyTable(db: TestD1, kind: "workspaces" | "installations"): { table: string; keyColumn: "app_id" | "bot_id" } | null {
+  const rows = db.raw
+    .query("SELECT name FROM sqlite_master WHERE type = 'table'")
+    .all() as Array<{ name: string }>;
+  const names = new Set(rows.map((r) => r.name));
+  if (kind === "workspaces") {
+    if (names.has("app_workspaces")) return { table: "app_workspaces", keyColumn: names.has("review_bots") && names.has("github_apps") ? "app_id" : "app_id" };
+    if (names.has("bot_workspaces")) return { table: "bot_workspaces", keyColumn: "bot_id" };
+    return null;
+  }
+  if (names.has("github_app_installations")) return { table: "github_app_installations", keyColumn: "app_id" };
+  if (names.has("bot_installations")) return { table: "bot_installations", keyColumn: "bot_id" };
+  if (names.has("app_installations")) return { table: "app_installations", keyColumn: "app_id" };
+  return null;
+}
+
+/** Era-aware ownership seed: one row binding the App/bot to its workspace. */
+function seedOwnershipRow(db: TestD1, appId: string, workspaceId: string): void {
+  const fam = familyTable(db, "workspaces");
+  if (!fam) throw new Error("no ownership table in this migration shape");
+  db.raw
+    .prepare(`INSERT OR REPLACE INTO ${fam.table} (${fam.keyColumn}, workspace_id) VALUES (?, ?)`)
+    .run(appId, workspaceId);
+}
+
+/** Era-aware installation seed, tolerating the column set drift across eras. */
+function seedInstallationRow(
+  db: TestD1,
+  id: string,
+  appId: string,
+  installationId: number,
+  accountLogin: string,
+): void {
+  const fam = familyTable(db, "installations");
+  if (!fam) throw new Error("no installations table in this migration shape");
+  const cols = new Set(
+    (db.raw.query(`PRAGMA table_info(${fam.table})`).all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  const names = ["id", fam.keyColumn, "installation_id", ...(cols.has("account_login") ? ["account_login"] : []), "seen_at"];
+  const qs = names.map(() => "?").join(", ");
+  const args: Array<string | number> = [id, appId, installationId, ...(cols.has("account_login") ? [accountLogin] : []), "2026-01-01 00:00:00"];
+  db.raw.prepare(`INSERT INTO ${fam.table} (${names.join(", ")}) VALUES (${qs})`).run(...args);
+}
+
 function appTable(db: TestD1): "github_apps" | "review_bots" {
-  const row = db.raw
+  // Shape-aware by migration era, per the PM decision: the App family table is
+  // github_apps before 0056, review_bots 0056–0114, github_apps after 0115 —
+  // where BOTH names exist (the new config bot table) and github_apps must win.
+  const rows = db.raw
     .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('github_apps','review_bots')")
-    .get() as { name: string } | null | undefined;
-  return row?.name === "review_bots" ? "review_bots" : "github_apps";
+    .all() as Array<{ name: string }>;
+  const names = new Set(rows.map((r) => r.name));
+  return names.has("github_apps") ? "github_apps" : "review_bots";
 }
 
 function appPathColumn(db: TestD1): "slug" | "webhook_path" | null {
@@ -78,6 +132,22 @@ function insertGithubAppRow(
       row.name ?? row.id,
       row.createdBy ?? "mallory",
     );
+  // Post-0115 the App's bot row and default-workspace mapping exist beside it.
+  // Companions only run on schemas that already carry the split tables — a
+  // single-migration shape seeded before 0115 has nothing to populate.
+  // BOTH split tables must exist — app_workspaces is present from 0026 while
+  // review_bots only arrives at 0115, so checking the ownership table alone
+  // fires the bot-row insert against intermediate eras that have no bot table.
+  const hasSplitTables = (db.raw
+    .query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('app_workspaces', 'review_bots')")
+    .get() as { n: number }).n === 2;
+  if (hasSplitTables) {
+    db.raw.run(`INSERT OR IGNORE INTO app_workspaces (app_id, workspace_id) VALUES ('${row.id.replace(/'/g, "''")}', 'default')`);
+    db.raw.run(
+      `INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+       VALUES ('${row.id.replace(/'/g, "''")}', 'default', '${row.id.replace(/'/g, "''")}', 1, datetime('now'), datetime('now'))`,
+    );
+  }
 }
 
 const REVIEW = {
@@ -248,7 +318,7 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
     expect(count.n).toBe(2);
   });
 
-  test("creates idx_reviews_bot_id ON reviews(bot_id) (fully migrated schema; 0056 recreated it under the bot name)", () => {
+  test("creates idx_reviews_bot_id ON reviews(app_id) (fully migrated schema; 0056 recreated it under the bot name)", () => {
     const db = createMigratedTestD1();
     const index = db.raw
       .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_reviews_bot_id'")
@@ -256,13 +326,13 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
     expect(index).not.toBeNull();
     expect(index!.tbl_name).toBe("reviews");
     const columns = db.raw.query("PRAGMA index_info(idx_reviews_bot_id)").all() as Array<{ name: string }>;
-    expect(columns.map((c) => c.name)).toEqual(["bot_id"]);
+    expect(columns.map((c) => c.name)).toEqual(["app_id"]);
   });
 
   test("the per-bot attribution lookup uses the index (EXPLAIN QUERY PLAN)", () => {
     const db = createMigratedTestD1();
     const plan = db.raw
-      .query("EXPLAIN QUERY PLAN SELECT id FROM reviews WHERE bot_id = 'app-1'")
+      .query("EXPLAIN QUERY PLAN SELECT id FROM reviews WHERE app_id = 'app-1'")
       .all() as Array<{ detail: string }>;
     expect(plan.some((p) => p.detail.includes("USING INDEX idx_reviews_bot_id"))).toBe(true);
   });
@@ -305,7 +375,7 @@ describe("migrations/0008_github_apps_ops.sql", () => {
 
   test("adds review_enabled (INTEGER NOT NULL DEFAULT 1) + last_webhook_at (TEXT nullable) to the parent row", () => {
     const db = createMigratedTestD1();
-    const columns = db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
+    const columns = db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{
       name: string;
       notnull: number;
       dflt_value: string | null;
@@ -324,7 +394,7 @@ describe("migrations/0008_github_apps_ops.sql", () => {
     const db = createMigratedTestD1();
     insertPre0008App(db);
     const row = db.raw
-      .query("SELECT review_enabled, last_webhook_at FROM review_bots WHERE id = 'app-1'")
+      .query("SELECT review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
       .get() as { review_enabled: number; last_webhook_at: string | null };
     expect(row.review_enabled).toBe(1);
     expect(row.last_webhook_at).toBeNull();
@@ -333,9 +403,9 @@ describe("migrations/0008_github_apps_ops.sql", () => {
   test("the ops columns are writable and read back (pause + last-delivery shapes)", () => {
     const db = createMigratedTestD1();
     insertPre0008App(db);
-    db.raw.prepare("UPDATE review_bots SET review_enabled = 0, last_webhook_at = datetime('now') WHERE id = 'app-1'").run();
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0, last_webhook_at = datetime('now') WHERE id = 'app-1'").run();
     const row = db.raw
-      .query("SELECT review_enabled, last_webhook_at FROM review_bots WHERE id = 'app-1'")
+      .query("SELECT review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
       .get() as { review_enabled: number; last_webhook_at: string | null };
     expect(row.review_enabled).toBe(0);
     expect(row.last_webhook_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
@@ -600,7 +670,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
     });
     const rotationColumns = db.raw.query("PRAGMA index_info(idx_finding_rotation)").all() as Array<{ name: string }>;
     expect(rotationColumns.map((c) => c.name)).toEqual([
-      "bot_id", "installation_id", "owner", "repo", "pr_number", "state", "last_scheduled_ms", "id",
+      "app_id", "installation_id", "owner", "repo", "pr_number", "state", "last_scheduled_ms", "id",
     ]);
   });
 
@@ -610,7 +680,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
     const insert = (id: string) =>
       db.raw
         .prepare(
-          `INSERT INTO review_publications (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+          `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
            VALUES (?, 'app-1', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1000, 1000)`,
         )
         .run(id, "0".repeat(40));
@@ -618,7 +688,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
     expect(() => insert("pub-2")).toThrow(/UNIQUE constraint failed/);
     db.raw
       .prepare(
-        `INSERT INTO review_publications (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+        `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
          VALUES ('pub-deg', 'app-1', 123, 'acme', 'widgets', 42, ?, 'degraded', 'prepared', '{}', 1000, 1000)`,
       )
       .run("0".repeat(40));
@@ -631,7 +701,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
     insertApp(db, "app-1");
     db.raw
       .prepare(
-        `INSERT INTO review_publications (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, recovery_state, created_ms, updated_ms)
+        `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, recovery_state, created_ms, updated_ms)
          VALUES ('pub-1', 'app-1', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 'pending', 1000, 1000)`,
       )
       .run("0".repeat(40));
@@ -647,7 +717,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
 
     db.raw
       .prepare(
-        `INSERT INTO review_findings (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+        `INSERT INTO review_findings (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha, first_seen_round, last_seen_round,
            state, created_ms, updated_ms)
          VALUES ('row-1', 'app-1', 123, 'acme', 'widgets', 42, 'f-1', '{}', 'pub-1', 'pub-1', ?, ?, 1, 1, 'open', 1000, 1000)`,
@@ -659,7 +729,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
 
     db.raw
       .prepare(
-        `INSERT INTO review_threads (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+        `INSERT INTO review_threads (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
            original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
          VALUES ('a-1', 'row-1', 'pub-1', 'app-1', 123, 'acme', 'widgets', 42, ?, 1, '{}', 'pending', 1000, 1000)`,
       )
@@ -675,7 +745,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
     expect(() =>
       db.raw
         .prepare(
-          `INSERT INTO review_publications (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+          `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
            VALUES ('pub-x', 'no-such-app', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1000, 1000)`,
         )
         .run("0".repeat(40)),
@@ -683,14 +753,14 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
 
     db.raw
       .prepare(
-        `INSERT INTO review_publications (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+        `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
          VALUES ('pub-1', 'app-1', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1000, 1000)`,
       )
       .run("0".repeat(40));
     expect(() =>
       db.raw
         .prepare(
-          `INSERT INTO review_findings (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+          `INSERT INTO review_findings (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha, first_seen_round, last_seen_round,
              state, created_ms, updated_ms)
            VALUES ('row-1', 'app-1', 123, 'acme', 'widgets', 42, 'f-1', '{}', 'pub-missing', 'pub-1', ?, ?, 1, 1, 'open', 1000, 1000)`,
@@ -708,13 +778,13 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
     expect(index!.tbl_name).toBe("review_publications");
     const columns = db.raw.query("PRAGMA index_info(idx_publication_scope)").all() as Array<{ name: string }>;
     expect(columns.map((c) => c.name)).toEqual([
-      "bot_id", "installation_id", "owner", "repo", "pr_number", "kind", "phase",
+      "app_id", "installation_id", "owner", "repo", "pr_number", "kind", "phase",
     ]);
 
     const plan = db.raw
       .query(
         `EXPLAIN QUERY PLAN SELECT id FROM review_publications
-         WHERE bot_id = 'app-1' AND installation_id = 123 AND owner = 'acme' AND repo = 'widgets' AND pr_number = 42
+         WHERE app_id = 'app-1' AND installation_id = 123 AND owner = 'acme' AND repo = 'widgets' AND pr_number = 42
            AND kind = 'degraded' AND proof_json IS NULL AND phase IN ('prepared','sending','unknown')
          LIMIT 1`,
       )
@@ -727,7 +797,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
     const plan = db.raw
       .query(
         `EXPLAIN QUERY PLAN SELECT id FROM review_findings
-         WHERE bot_id = 'app-1' AND installation_id = 123 AND owner = 'acme' AND repo = 'widgets' AND pr_number = 42 AND state = 'open'
+         WHERE app_id = 'app-1' AND installation_id = 123 AND owner = 'acme' AND repo = 'widgets' AND pr_number = 42 AND state = 'open'
          ORDER BY COALESCE(last_scheduled_ms, created_ms), id LIMIT 25`,
       )
       .all() as Array<{ detail: string }>;
@@ -1115,7 +1185,9 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
 
   test("adds sandbox_image_id TEXT NOT NULL DEFAULT 'omp' to the parent row (the 0008 ADD COLUMN pattern)", () => {
     const db = createMigratedTestD1();
-    const columns = db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
+    // 0116 moved the runtime-image column onto review_bots (the bot half of the
+    // split) — the final-shape probe reads the table that owns it now.
+    const columns = db.raw.query(`PRAGMA table_info(review_bots)`).all() as Array<{
       name: string;
       type: string;
       notnull: number;
@@ -1152,8 +1224,8 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
     expect(() =>
       db.raw
         .prepare(
-          `INSERT INTO review_bots (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status, sandbox_image_id, created_at, updated_at)
-           VALUES ('app-null', 1002, 'app-null', 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, sandbox_image_id, created_at, updated_at)
+           VALUES ('app-null', 'default', 'app-null', 1, NULL, datetime('now'), datetime('now'))`,
         )
         .run(),
     ).toThrow(/NOT NULL constraint failed/);
@@ -1228,7 +1300,7 @@ describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
 
   test("adds the five profile columns as TEXT, nullable, no default (the 0008 last_webhook_at form)", () => {
     const db = createMigratedTestD1();
-    const columns = db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
+    const columns = db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{
       name: string;
       type: string;
       notnull: number;
@@ -1254,7 +1326,7 @@ describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
     insertApp(db, "app-1");
     db.raw
       .prepare(
-        `UPDATE review_bots
+        `UPDATE github_apps
          SET github_name = 'Acme Inspector', github_description = 'Reviews PRs',
              github_html_url = 'https://github.com/apps/acme-inspector',
              github_avatar_url = 'https://avatars.githubusercontent.com/u/1?v=4',
@@ -1263,7 +1335,7 @@ describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
       )
       .run();
     const row = db.raw
-      .query("SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at FROM review_bots WHERE id = 'app-1'")
+      .query("SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at FROM github_apps WHERE id = 'app-1'")
       .get() as {
       github_name: string;
       github_description: string;
@@ -1422,14 +1494,14 @@ describe("migrations/0036_app_identity.sql", () => {
       { id: "app-1", webhook_path: "app-1" },
       { id: "app-2", webhook_path: "app-2" },
     ]);
-    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
+    const columns = db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{ name: string }>;
     expect(columns.map((c) => c.name)).not.toContain("slug");
   });
 
   test("the rename carries NOT NULL and UNIQUE onto webhook_path (no table rebuild)", () => {
     const db = createPre0036Db();
     applyMigrationFile(db, "0036_app_identity.sql");
-    const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+    const cols = db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{
       name: string;
       notnull: number;
     }>;
@@ -1451,7 +1523,7 @@ describe("migrations/0036_app_identity.sql", () => {
 
   test("github_slug is a nullable TEXT cache with no unique index", () => {
     const db = createMigratedTestD1();
-    const cols = db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
+    const cols = db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{
       name: string;
       type: string;
       notnull: number;
@@ -1469,14 +1541,14 @@ describe("migrations/0036_app_identity.sql", () => {
     const db = createMigratedTestD1();
     insertApp(db, "app-1", "one", 3001);
     insertApp(db, "app-2", "two", 3002);
-    const nulls = db.raw.query("SELECT COUNT(*) AS n FROM review_bots WHERE github_slug IS NULL").get() as { n: number };
+    const nulls = db.raw.query("SELECT COUNT(*) AS n FROM github_apps WHERE github_slug IS NULL").get() as { n: number };
     expect(nulls.n).toBe(2);
 
     db.raw.prepare("UPDATE github_apps SET github_slug = 'acme-inspector' WHERE id = 'app-1'").run();
     expect(() =>
       db.raw.prepare("UPDATE github_apps SET github_slug = 'acme-inspector' WHERE id = 'app-2'").run(),
     ).not.toThrow();
-    const shared = db.raw.query("SELECT COUNT(*) AS n FROM review_bots WHERE github_slug = 'acme-inspector'").get() as { n: number };
+    const shared = db.raw.query("SELECT COUNT(*) AS n FROM github_apps WHERE github_slug = 'acme-inspector'").get() as { n: number };
     expect(shared.n).toBe(2);
   });
 });
@@ -1484,7 +1556,7 @@ describe("migrations/0036_app_identity.sql", () => {
 describe("migrations/0037_github_metadata_attempt.sql", () => {
   test("github_metadata_attempted_at is a nullable TEXT column with no default", () => {
     const db = createMigratedTestD1();
-    const cols = db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
+    const cols = db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{
       name: string;
       type: string;
       notnull: number;
@@ -1501,13 +1573,13 @@ describe("migrations/0037_github_metadata_attempt.sql", () => {
     const db = createMigratedTestD1();
     insertGithubAppRow(db, { id: "app-1", name: "attempt-app", githubAppId: 4001 });
     const before = db.raw
-      .query("SELECT github_metadata_attempted_at FROM review_bots WHERE id = 'app-1'")
+      .query("SELECT github_metadata_attempted_at FROM github_apps WHERE id = 'app-1'")
       .get() as { github_metadata_attempted_at: string | null };
     expect(before.github_metadata_attempted_at).toBeNull();
 
     db.raw.prepare("UPDATE github_apps SET github_metadata_attempted_at = datetime('now') WHERE id = 'app-1'").run();
     const after = db.raw
-      .query("SELECT github_metadata_attempted_at FROM review_bots WHERE id = 'app-1'")
+      .query("SELECT github_metadata_attempted_at FROM github_apps WHERE id = 'app-1'")
       .get() as { github_metadata_attempted_at: string };
     expect(after.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
@@ -1560,7 +1632,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
       .run("v1.primary.cGVtLTI=", "v1.primary.c2VjcmV0LTI=", "widgets-reviewer", "app-live-2");
     db.raw
       .prepare(
-        `INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-live-1', 'default')`,
+        `INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('app-live-1', 'default')`,
       )
       .run();
     for (const [id, installationId] of [
@@ -1655,7 +1727,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     ).toEqual(childrenBefore.deliveries);
     expect(db.raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
 
-    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
+    const columns = db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).not.toContain("webhook_path");
     expect(() =>
       insertGithubAppRow(db, { id: "app-dup", githubAppId: 1001 }),
@@ -1676,7 +1748,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     }
     insertGithubAppRow(db, { id: "app-keep", githubAppId: 2001, name: "Keep" });
     db.raw
-      .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-keep', 'default')")
+      .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('app-keep', 'default')")
       .run();
     const appsBefore = db.raw.query("SELECT id, github_app_id, name FROM github_apps ORDER BY id").all();
     const childrenBefore = db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all();
@@ -1695,7 +1767,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
       .all() as Array<{ name: string }>;
     expect(tables.map((table) => table.name)).not.toContain("github_apps_staging");
     expect(
-      (db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>).map((column) => column.name),
+      (db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{ name: string }>).map((column) => column.name),
     ).not.toContain("webhook_path");
     expect((db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
   });
@@ -1820,7 +1892,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       github_visibility: null,
     });
 
-    const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+    const cols = db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{
       name: string;
       type: string;
       notnull: number;
@@ -1903,6 +1975,7 @@ describe("migrations/0046_reviews_context_incomplete.sql", () => {
          VALUES ('r1', 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'old')`,
       )
       .run("a".repeat(40));
+  syncReviewBotColumn(db);
 
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0046_reviews_context_incomplete.sql"), "utf8"));
 
@@ -1937,6 +2010,7 @@ describe("migrations/0049_reviews_duration_ms.sql", () => {
          VALUES ('r1', 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'old')`,
       )
       .run("a".repeat(40));
+  syncReviewBotColumn(db);
 
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0049_reviews_duration_ms.sql"), "utf8"));
 
@@ -1968,7 +2042,7 @@ describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms)
          VALUES ('pub-1', ?, ?, ?, ?, ?, ?, 'review', 'applied', '{}', 1, 1)`,
       )
@@ -1977,7 +2051,7 @@ describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
       db.raw
         .prepare(
           `INSERT INTO review_findings
-             (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms)
            VALUES (?, ?, ?, ?, ?, ?, ?, '{}', 'pub-1', 'pub-1', ?, ?, 1, 1, ?, ?, ?)`,
@@ -2003,7 +2077,7 @@ describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_threads
-           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
             original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
          VALUES ('t-1', 'row-addressed', 'pub-1', ?, ?, ?, ?, ?, ?, 1, '{}', 'pending', 1000, 1000)`,
       )
@@ -2016,7 +2090,7 @@ describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
     const columns = (
       db.raw.query("PRAGMA index_info(idx_thread_pr_scope)").all() as Array<{ name: string }>
     ).map((c) => c.name);
-    expect(columns).toEqual(["bot_id", "installation_id", "owner", "repo", "pr_number", "resolution_state"]);
+    expect(columns).toEqual(["app_id", "installation_id", "owner", "repo", "pr_number", "resolution_state"]);
   });
 
   test("the selector's association probe rides the index instead of scanning review_threads", async () => {
@@ -2199,6 +2273,7 @@ describe("migrations/0050_reviews_round.sql", () => {
          VALUES ('r-1', 1, 'acme', 'widgets', 7, 'sha-1', 'comment', '2026-01-01 00:00:00')`,
       )
       .run();
+  syncReviewBotColumn(db);
 
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, ROUND_MIGRATION), "utf8"));
 
@@ -2404,7 +2479,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
     }
     insertGithubAppRow(db, { id: "app-1", name: "Acme Reviewer", githubAppId: 5001 });
     db.raw.run(
-      `INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-1', 'default');
+      `INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('app-1', 'default');
        INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
          VALUES ('inst-1', 'app-1', 123, 'acme', '2026-01-01 00:00:00');
        INSERT INTO app_owner_allowlist (app_id, owner_login, created_at)
@@ -2415,26 +2490,28 @@ describe("migrations/0056_review_bots_rename.sql", () => {
 
     const before = {
       bot: db.raw.query("SELECT * FROM github_apps").all(),
-      workspaces: db.raw.query("SELECT app_id AS bot_id, workspace_id FROM app_workspaces").all(),
+      workspaces: db.raw.query("SELECT app_id AS app_id, workspace_id FROM app_workspaces").all(),
       installations: db.raw
-        .query("SELECT id, app_id AS bot_id, installation_id, account_login, seen_at FROM app_installations")
+        .query("SELECT id, app_id AS app_id, installation_id, account_login, seen_at FROM app_installations")
         .all(),
       allowlist: db.raw.query("SELECT app_id, owner_login, created_at FROM app_owner_allowlist").all(),
-      reviewBotId: db.raw.query("SELECT app_id AS bot_id FROM reviews WHERE id = 'review-1'").get(),
+      reviewBotId: db.raw.query("SELECT app_id AS app_id FROM reviews WHERE id = 'review-1'").get(),
     };
     expect(before.bot).toHaveLength(1);
 
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0056_review_bots_rename.sql"), "utf8"));
 
     expect(db.raw.query("SELECT * FROM review_bots").all()).toEqual(before.bot);
-    expect(db.raw.query("SELECT bot_id, workspace_id FROM bot_workspaces").all()).toEqual(before.workspaces);
+    // After 0056 the ownership/installations tables are the bot-named era tables
+    // with bot_id keys — the snapshot aliases normalized those names already.
+    expect(db.raw.query("SELECT bot_id AS app_id, workspace_id FROM bot_workspaces").all()).toEqual(before.workspaces);
     expect(
-      db.raw.query("SELECT id, bot_id, installation_id, account_login, seen_at FROM bot_installations").all(),
+      db.raw.query("SELECT id, bot_id AS app_id, installation_id, account_login, seen_at FROM bot_installations").all(),
     ).toEqual(before.installations);
     expect(db.raw.query("SELECT app_id, owner_login, created_at FROM app_owner_allowlist").all()).toEqual(
       before.allowlist,
     );
-    expect(db.raw.query("SELECT bot_id FROM reviews WHERE id = 'review-1'").get()).toEqual(before.reviewBotId);
+    expect(db.raw.query("SELECT bot_id AS app_id FROM reviews WHERE id = 'review-1'").get()).toEqual(before.reviewBotId);
     expect(db.raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 });
@@ -2469,7 +2546,7 @@ describe("migrations/0057_review_targets.sql", () => {
   const TARGET_COLUMNS = [
     "id",
     "workspace_id",
-    "bot_id",
+    "app_id",
     "name",
     "review_enabled",
     "review_trigger_mode",
@@ -2527,7 +2604,7 @@ describe("migrations/0057_review_targets.sql", () => {
     db.raw
       .prepare(
         `UPDATE review_bots
-            SET review_enabled = ?, review_trigger_mode = ?, review_level = ?, check_min_score = ?,
+         SET review_enabled = ?, review_trigger_mode = ?, review_level = ?, check_min_score = ?,
                 check_pass_verdicts = ?, allowlist_enabled = ?, github_slug = ?, github_visibility = ?
           WHERE id = ?`,
       )
@@ -2535,13 +2612,13 @@ describe("migrations/0057_review_targets.sql", () => {
     db.raw
       .prepare(
         `UPDATE review_bots
-            SET review_enabled = ?, review_trigger_mode = ?, review_level = ?, check_min_score = ?,
+         SET review_enabled = ?, review_trigger_mode = ?, review_level = ?, check_min_score = ?,
                 check_pass_verdicts = ?, allowlist_enabled = ?, github_visibility = ?
           WHERE id = ?`,
       )
       .run(0, "manual", null, 90, '["ship it"]', 0, null, "bot-b");
 
-    db.raw.run(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-a', 'default'), ('bot-b', 'default');
+    db.raw.run(`INSERT OR REPLACE INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-a', 'default'), ('bot-b', 'default');
 
       INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at) VALUES
         ('inst-a-live', 'bot-a', 123, 'acme', '2026-01-01T00:00:00Z', NULL),
@@ -2591,16 +2668,16 @@ describe("migrations/0057_review_targets.sql", () => {
     const before = seedBeforeSplit(db);
     applySplit(db);
 
-    expect(db.raw.query("SELECT bot_id, COUNT(*) AS n FROM review_targets GROUP BY bot_id").all()).toEqual([
-      { bot_id: "bot-a", n: 1 },
-      { bot_id: "bot-b", n: 1 },
+    expect(db.raw.query("SELECT bot_id AS app_id, COUNT(*) AS n FROM review_targets GROUP BY bot_id").all()).toEqual([
+      { app_id: "bot-a", n: 1 },
+      { app_id: "bot-b", n: 1 },
     ]);
     expect(db.raw.query(`SELECT bot_id AS id, ${INHERITED} FROM review_targets ORDER BY bot_id`).all()).toEqual(
       before,
     );
-    expect(db.raw.query("SELECT bot_id, workspace_id FROM review_targets ORDER BY bot_id").all()).toEqual([
-      { bot_id: "bot-a", workspace_id: "default" },
-      { bot_id: "bot-b", workspace_id: "default" },
+    expect(db.raw.query("SELECT bot_id AS app_id, workspace_id FROM review_targets ORDER BY bot_id").all()).toEqual([
+      { app_id: "bot-a", workspace_id: "default" },
+      { app_id: "bot-b", workspace_id: "default" },
     ]);
   });
 
@@ -2617,9 +2694,9 @@ describe("migrations/0057_review_targets.sql", () => {
       { id: "bot-a", review_enabled: 1 },
       { id: "bot-b", review_enabled: 1 },
     ]);
-    expect(db.raw.query("SELECT bot_id, review_enabled FROM review_targets ORDER BY bot_id").all()).toEqual([
-      { bot_id: "bot-a", review_enabled: 1 },
-      { bot_id: "bot-b", review_enabled: 0 },
+    expect(db.raw.query("SELECT bot_id AS app_id, review_enabled FROM review_targets ORDER BY bot_id").all()).toEqual([
+      { app_id: "bot-a", review_enabled: 1 },
+      { app_id: "bot-b", review_enabled: 0 },
     ]);
   });
 
@@ -2628,10 +2705,10 @@ describe("migrations/0057_review_targets.sql", () => {
     seedBeforeSplit(db);
     applySplit(db);
 
-    expect(db.raw.query("SELECT bot_id, installation_id, account_login FROM review_targets ORDER BY bot_id").all()).toEqual(
+    expect(db.raw.query("SELECT bot_id AS app_id, installation_id, account_login FROM review_targets ORDER BY bot_id").all()).toEqual(
       [
-        { bot_id: "bot-a", installation_id: 123, account_login: "acme" },
-        { bot_id: "bot-b", installation_id: null, account_login: null },
+        { app_id: "bot-a", installation_id: 123, account_login: "acme" },
+        { app_id: "bot-b", installation_id: null, account_login: null },
       ],
     );
   });
@@ -2641,24 +2718,24 @@ describe("migrations/0057_review_targets.sql", () => {
     seedBeforeSplit(db);
     applySplit(db);
     const targets = Object.fromEntries(
-      (db.raw.query("SELECT bot_id, id FROM review_targets").all() as Array<{ bot_id: string; id: string }>).map(
-        (row) => [row.bot_id, row.id],
+      (db.raw.query("SELECT bot_id AS app_id, id FROM review_targets").all() as Array<{ app_id: string; id: string }>).map(
+        (row) => [row.app_id, row.id],
       ),
     );
 
-    expect(db.raw.query("SELECT id, bot_id, target_id FROM reviews ORDER BY id").all()).toEqual([
-      { id: "review-1", bot_id: "bot-a", target_id: targets["bot-a"] },
-      { id: "review-b", bot_id: "bot-b", target_id: targets["bot-b"] },
-      { id: "review-legacy", bot_id: null, target_id: null },
+    expect(db.raw.query("SELECT id, bot_id AS app_id, target_id FROM reviews ORDER BY id").all()).toEqual([
+      { id: "review-1", app_id: "bot-a", target_id: targets["bot-a"] },
+      { id: "review-b", app_id: "bot-b", target_id: targets["bot-b"] },
+      { id: "review-legacy", app_id: null, target_id: null },
     ]);
-    const ledger = db.raw.query("SELECT id, bot_id, target_id FROM pull_requests ORDER BY id").all() as Array<{
+    const ledger = db.raw.query("SELECT id, bot_id AS app_id, target_id FROM pull_requests ORDER BY id").all() as Array<{
       id: string;
-      bot_id: string;
+      app_id: string;
       target_id: string | null;
     }>;
     expect(ledger).toEqual([
-      { id: "pr-a", bot_id: "bot-a", target_id: targets["bot-a"]! },
-      { id: "pr-b", bot_id: "bot-b", target_id: targets["bot-b"]! },
+      { id: "pr-a", app_id: "bot-a", target_id: targets["bot-a"]! },
+      { id: "pr-b", app_id: "bot-b", target_id: targets["bot-b"]! },
     ]);
     expect(ledger.every((row) => row.target_id !== null)).toBe(true);
   });
@@ -2674,13 +2751,13 @@ describe("migrations/0057_review_targets.sql", () => {
     expect(
       db.raw
         .query(
-          `SELECT t.bot_id, a.owner_login, a.created_at
+          `SELECT t.bot_id AS app_id, a.owner_login, a.created_at
              FROM target_owner_allowlist a
              JOIN review_targets t ON t.id = a.target_id
             ORDER BY a.owner_login`,
         )
         .all(),
-    ).toEqual(before.map((row) => ({ bot_id: row.app_id, owner_login: row.owner_login, created_at: row.created_at })));
+    ).toEqual(before.map((row) => ({ app_id: row.app_id, owner_login: row.owner_login, created_at: row.created_at })));
     expect(schemaNames(db, "table")).not.toContain("app_owner_allowlist");
   });
 
@@ -2840,7 +2917,7 @@ describe("migrations/0057_review_targets.sql", () => {
     expect(() => applySplit(db)).toThrow(/guard_queued_claim_without_target/);
   });
 
-  test("creates idx_review_targets_bot_id ON review_targets(bot_id)", () => {
+  test("creates idx_review_targets_bot_id ON review_targets(app_id)", () => {
     const db = createMigratedTestD1();
     const index = db.raw
       .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_targets_bot_id'")
@@ -2850,13 +2927,13 @@ describe("migrations/0057_review_targets.sql", () => {
     const columns = db.raw.query("PRAGMA index_info(idx_review_targets_bot_id)").all() as Array<{
       name: string;
     }>;
-    expect(columns.map((c) => c.name)).toEqual(["bot_id"]);
+    expect(columns.map((c) => c.name)).toEqual(["app_id"]);
   });
 
   test("the per-bot target lookup uses the index, not a table scan (EXPLAIN QUERY PLAN)", () => {
     const db = createMigratedTestD1();
     const plan = db.raw
-      .query("EXPLAIN QUERY PLAN SELECT id FROM review_targets WHERE bot_id = 'bot-1'")
+      .query("EXPLAIN QUERY PLAN SELECT id FROM review_targets WHERE app_id = 'bot-1'")
       .all() as Array<{ detail: string }>;
     expect(plan.some((p) => p.detail.includes("USING INDEX idx_review_targets_bot_repo"))).toBe(true);
     expect(plan.some((p) => p.detail.includes("SCAN review_targets"))).toBe(false);
@@ -2872,13 +2949,18 @@ describe("migrations/0057_review_targets.sql", () => {
 
     db.raw
       .prepare(
-        `INSERT INTO review_bots (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
+        `INSERT INTO github_apps (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
          VALUES ('bot-fresh', 7001, 'Fresh', 'enc', 'enc', 'mallory', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
       )
       .run();
+    db.raw.run(
+      `INSERT OR IGNORE INTO app_workspaces (app_id, workspace_id) VALUES ('bot-fresh', 'default');
+       INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+         VALUES ('bot-fresh', 'default', 'Fresh', 1, datetime('now'), datetime('now'))`,
+    );
     db.raw
       .prepare(
-        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+        `INSERT INTO review_targets (id, workspace_id, app_id, name, created_by, created_at, updated_at)
          VALUES ('target-fresh', 'default', 'bot-fresh', 'Fresh', 'mallory', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
       )
       .run();
@@ -2934,7 +3016,7 @@ describe("migrations/0058_review_bot_scope.sql", () => {
   }
 
   function botColumns(db: TestD1): Array<{ name: string; notnull: number; dflt_value: unknown }> {
-    return db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
+    return db.raw.query(`PRAGMA table_info(${appTable(db)})`).all() as Array<{
       name: string;
       notnull: number;
       dflt_value: unknown;
@@ -2970,13 +3052,18 @@ describe("migrations/0058_review_bot_scope.sql", () => {
     const db = createMigratedTestD1();
     db.raw
       .prepare(
-        `INSERT INTO review_bots
+        `INSERT INTO github_apps
            (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
             status, created_at, updated_at)
          VALUES ('bot-scope-check', 9002, 'bot-scope-check', 'enc', 'enc', 'acme',
                  'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
       )
       .run();
+    db.raw.run(
+      `INSERT OR IGNORE INTO app_workspaces (app_id, workspace_id) VALUES ('bot-scope-check', 'default');
+       INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+         VALUES ('bot-scope-check', 'default', 'bot-scope-check', 1, datetime('now'), datetime('now'))`,
+    );
 
     expect(db.raw.query("SELECT scope, shared_at FROM review_bots WHERE id = 'bot-scope-check'").get()).toEqual({
       scope: "owned",
@@ -3073,7 +3160,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
       )
       .run();
-    db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-a', 'default')").run();
+    db.raw.prepare("INSERT OR REPLACE INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-a', 'default')").run();
     db.raw
       .prepare(
         `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
@@ -3243,7 +3330,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
         )
         .run();
       db.raw
-        .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')")
+        .prepare("INSERT OR REPLACE INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')")
         .run();
       db.raw
         .prepare(
@@ -3367,7 +3454,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
       )
       .run();
-    db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')").run();
+    db.raw.prepare("INSERT OR REPLACE INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')").run();
     db.raw
       .prepare(
         `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)

@@ -102,9 +102,9 @@ export type ReconcileTransport = {
 };
 
 /**
- * Exact `(bot_id, installation_id)` credential routing (spec §7.6): the
- * routing query binds BOTH durable ids through `bot_installations` into the
- * matching `review_bots` row. Missing mapping / soft-deleted / disabled →
+ * Exact `(app_id, installation_id)` credential routing (spec §7.6): the
+ * routing query binds BOTH durable ids through `github_app_installations` into the
+ * matching `github_apps` row. Missing mapping / soft-deleted / disabled →
  * `unavailable` (the reconciler suspends the pair durably); a decrypted PEM
  * builds THIS bot's commenter — the only credential source, never another
  * App's. `paused` rides the ok resolution (review_enabled = 0): the frozen
@@ -132,16 +132,16 @@ type RoutingRow = {
 
 async function routingRow(db: D1Like, appId: string, installationId: number): Promise<RoutingRow | null> {
   return db
-    // shortcut: tenant-bypass — reconciler credential routing by exact (bot_id,
+    // shortcut: tenant-bypass — reconciler credential routing by exact (app_id,
     // installation_id); returns no tenant-facing field. Upgrade: tenant-filter it
     // once reconciliation itself becomes workspace-scoped.
     .prepare(
       `SELECT ga.id AS id, ga.github_app_id AS github_app_id, ga.status AS status,
               ga.deleted_at AS deleted_at, ga.review_enabled AS review_enabled,
               ga.private_key_enc AS private_key_enc
-       FROM bot_installations ai
-       JOIN review_bots ga ON ga.id = ai.bot_id
-       WHERE ai.bot_id = ? AND ai.installation_id = ?`,
+       FROM github_app_installations ai
+       JOIN github_apps ga ON ga.id = ai.app_id
+       WHERE ai.app_id = ? AND ai.installation_id = ?`,
     )
     .bind(appId, installationId)
     .first<RoutingRow>();

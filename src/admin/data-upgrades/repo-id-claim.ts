@@ -11,7 +11,7 @@ import type {
 const TARGETS_PER_BATCH = 50;
 
 const UNCLAIMED_SQL = `
-  SELECT id, bot_id, repo_owner AS owner, repo_name AS repo
+  SELECT id, app_id, repo_owner AS owner, repo_name AS repo
     FROM review_targets
    WHERE deleted_at IS NULL AND repo_id IS NULL
      AND repo_owner IS NOT NULL AND repo_name IS NOT NULL
@@ -25,7 +25,7 @@ const UNCLAIMED_COUNT = `
 
 type UnclaimedRow = {
   id: string;
-  bot_id: string;
+  app_id: string;
   owner: string;
   repo: string;
 };
@@ -63,7 +63,7 @@ export const repoIdClaim: DataUpgradeItem = {
     for (const row of rows) {
       const outcome = await bindRepository(
         db,
-        { botId: row.bot_id, owner: row.owner, repo: row.repo },
+        { botId: row.app_id, owner: row.owner, repo: row.repo },
         context,
       );
       if (outcome === "bound") bound += 1;

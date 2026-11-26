@@ -8,7 +8,7 @@ const OPERATOR = "Support-Bot";
 
 function seedBotWorkspace(db: TestD1, botId: string, workspaceId = "default"): void {
   db.raw
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
     .run(botId, workspaceId);
 }
 
@@ -21,7 +21,7 @@ function seedInstallation(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
        VALUES (?, ?, ?, ?, '2026-08-01T00:00:00.000Z', ?)`,
     )
     .run(`inst-${botId}-${installationId}`, botId, installationId, accountLogin, removedAt);
@@ -34,7 +34,7 @@ function seedUnclaimedTarget(db: TestD1, botId: string, owner: string, repo: str
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+         (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
           check_min_score, created_by, created_at, updated_at)
        VALUES (?, 'default', ?, ?, NULL, ?, ?, 0, 'fixture', datetime('now'), datetime('now'))`,
     )

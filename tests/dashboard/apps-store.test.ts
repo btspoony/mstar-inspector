@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
-import { createReviewBotsStore, listBotScopes, setBotScope } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore, listBotScopes, setReviewBotScope } from "../../src/dashboard/apps-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { setOfficialWorkspace } from "../../src/dashboard/runtime-config-store";
 import type { TestD1 } from "../store/helpers";
@@ -12,15 +12,26 @@ function seedApp(
   id: string,
   options: { githubAppId: number; deleted?: boolean; name?: string },
 ): void {
+  // Post-split pair: the App row (credentials/metadata) and the bot row
+  // (review configuration). A soft-delete stamps BOTH — the invariant the
+  // migration backfills and softDeleteApp keeps.
+  const stamp = options.deleted ? "datetime('now')" : "NULL";
   db.raw
     .prepare(
-      `INSERT INTO review_bots
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
           status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active',
-               ${options.deleted ? "datetime('now')" : "NULL"}, datetime('now'), datetime('now'))`,
+               ${stamp}, datetime('now'), datetime('now'))`,
     )
     .run(id, options.githubAppId, options.name ?? id);
+  db.raw
+    .prepare(
+      `INSERT INTO review_bots
+         (id, workspace_id, name, multiplier, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, 1, ${stamp}, datetime('now'), datetime('now'))`,
+    )
+    .run(id, WS, options.name ?? id);
 }
 
 describe("app creation (D13)", () => {
@@ -44,6 +55,38 @@ describe("app creation (D13)", () => {
     expect(app?.workspace_id).toBe(WS);
     expect(app?.status).toBe("active");
     expect(await createTargetsStore(db).listLive(WS)).toEqual([]);
+  });
+
+  test("refuses an all-digits id — it could collide with a numeric GitHub App id at the route boundary (F1)", async () => {
+    const db = createMigratedTestD1();
+    await expect(
+      createReviewBotsStore(db).createApp({
+        id: "9201",
+        githubAppId: 5012,
+        githubSlug: null,
+        name: "app-numeric",
+        privateKeyEnc: "enc",
+        webhookSecretEnc: "enc",
+        createdBy: "acme",
+        workspaceId: WS,
+        maxApps: null,
+      }),
+    ).rejects.toThrow(/all-digits id/);
+    // Nothing was written: the refusal happens before any row exists.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number }).toEqual({ n: 0 });
+    // A uuid-shaped id (what migrated rows carry) passes the rule.
+    const created = await createReviewBotsStore(db).createApp({
+      id: "5f9c1a2e-uuid-shape",
+      githubAppId: 5013,
+      githubSlug: null,
+      name: "app-uuid",
+      privateKeyEnc: "enc",
+      webhookSecretEnc: "enc",
+      createdBy: "acme",
+      workspaceId: WS,
+      maxApps: null,
+    });
+    expect(created.id).toBe("5f9c1a2e-uuid-shape");
   });
 
   test("refuses a workspace that is not live", async () => {
@@ -161,11 +204,20 @@ function seedScopedBot(
   nextGithubAppId += 1;
   seedApp(db, id, { githubAppId: nextGithubAppId, deleted: options.deleted, name: options.name });
   if (options.workspaceId !== undefined) {
-    db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(id, options.workspaceId);
+    db.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)").run(id, options.workspaceId);
+    if (options.workspaceId !== WS) {
+      db.raw.prepare("UPDATE review_bots SET workspace_id = ? WHERE id = ?").run(options.workspaceId, id);
+    }
   }
   if (options.scope !== undefined) {
+    // Pre-split one scope row fed both columns; the migration backfilled them
+    // equal, so a fixture that means "this bot is shared" stamps the pair.
+    // The independent-switch behavior is covered in share-switches.test.ts.
     db.raw
       .prepare("UPDATE review_bots SET scope = ?, shared_at = ? WHERE id = ?")
+      .run(options.scope, options.sharedAt ?? null, id);
+    db.raw
+      .prepare("UPDATE github_apps SET scope = ?, shared_at = ? WHERE id = ?")
       .run(options.scope, options.sharedAt ?? null, id);
   }
 }
@@ -201,7 +253,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-share", { workspaceId: WS });
     seedOfficialWorkspace(db, WS);
 
-    const outcome = await setBotScope(db, {
+    const outcome = await setReviewBotScope(db, {
       botId: "bot-share",
       scope: "shared",
       actor: "operator",
@@ -228,7 +280,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-unshare", { workspaceId: WS, scope: "shared", sharedAt: NOW });
 
     for (const confirm of [undefined, false]) {
-      const refused = await setBotScope(db, {
+      const refused = await setReviewBotScope(db, {
         botId: "bot-unshare",
         scope: "owned",
         confirm,
@@ -240,7 +292,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     expect(storedScope(db, "bot-unshare")).toEqual({ scope: "shared", shared_at: NOW });
     expect(scopeAudits(db)).toEqual([]);
 
-    const accepted = await setBotScope(db, {
+    const accepted = await setReviewBotScope(db, {
       botId: "bot-unshare",
       scope: "owned",
       confirm: true,
@@ -269,10 +321,10 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedOfficialWorkspace(db, WS);
 
     expect(
-      await setBotScope(db, { botId: "bot-owned", scope: "owned", actor: "operator", now: LATER }),
+      await setReviewBotScope(db, { botId: "bot-owned", scope: "owned", actor: "operator", now: LATER }),
     ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
     expect(
-      await setBotScope(db, { botId: "bot-still-shared", scope: "shared", actor: "operator", now: LATER }),
+      await setReviewBotScope(db, { botId: "bot-still-shared", scope: "shared", actor: "operator", now: LATER }),
     ).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
 
     expect(storedScope(db, "bot-owned")).toEqual({ scope: "owned", shared_at: null });
@@ -287,12 +339,12 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-home", { workspaceId: WS });
 
     expect(
-      await setBotScope(db, { botId: "bot-home", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(db, { botId: "bot-home", scope: "shared", actor: "operator", now: NOW }),
     ).toEqual({ outcome: "outside_official_workspace" });
 
     seedOfficialWorkspace(db, WS);
     expect(
-      await setBotScope(db, { botId: "bot-elsewhere", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(db, { botId: "bot-elsewhere", scope: "shared", actor: "operator", now: NOW }),
     ).toEqual({ outcome: "outside_official_workspace" });
 
     expect(storedScope(db, "bot-home")).toEqual({ scope: "owned", shared_at: null });
@@ -307,7 +359,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedOfficialWorkspace(db, "other");
 
     expect(
-      await setBotScope(db, {
+      await setReviewBotScope(db, {
         botId: "bot-stale-share",
         scope: "owned",
         confirm: true,
@@ -324,9 +376,9 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-cycle", { workspaceId: WS });
     seedOfficialWorkspace(db, WS);
 
-    await setBotScope(db, { botId: "bot-cycle", scope: "shared", actor: "operator", now: NOW });
-    await setBotScope(db, { botId: "bot-cycle", scope: "owned", confirm: true, actor: "operator", now: LATER });
-    const reShared = await setBotScope(db, {
+    await setReviewBotScope(db, { botId: "bot-cycle", scope: "shared", actor: "operator", now: NOW });
+    await setReviewBotScope(db, { botId: "bot-cycle", scope: "owned", confirm: true, actor: "operator", now: LATER });
+    const reShared = await setReviewBotScope(db, {
       botId: "bot-cycle",
       scope: "shared",
       actor: "operator",
@@ -347,10 +399,10 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedOfficialWorkspace(db, WS);
 
     expect(
-      await setBotScope(db, { botId: "bot-absent", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(db, { botId: "bot-absent", scope: "shared", actor: "operator", now: NOW }),
     ).toEqual({ outcome: "bot_not_found" });
     expect(
-      await setBotScope(db, { botId: "bot-gone", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(db, { botId: "bot-gone", scope: "shared", actor: "operator", now: NOW }),
     ).toEqual({ outcome: "bot_not_found" });
     expect(scopeAudits(db)).toEqual([]);
   });
@@ -374,7 +426,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     };
 
     expect(
-      await setBotScope(racingDb, { botId: "bot-raced", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(racingDb, { botId: "bot-raced", scope: "shared", actor: "operator", now: NOW }),
     ).toEqual({ outcome: "bot_not_found" });
     expect(fired).toBe(true);
     expect(storedScope(db, "bot-raced")).toEqual({ scope: "owned", shared_at: null });
@@ -400,7 +452,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     };
 
     expect(
-      await setBotScope(racingDb, {
+      await setReviewBotScope(racingDb, {
         botId: "bot-stale-designation",
         scope: "shared",
         actor: "operator",
@@ -425,7 +477,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
         if (!fired) {
           fired = true;
           expect(
-            await setBotScope(db, {
+            await setReviewBotScope(db, {
               botId: "bot-double-share",
               scope: "shared",
               actor: "operator",
@@ -438,7 +490,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     };
 
     expect(
-      await setBotScope(racingDb, {
+      await setReviewBotScope(racingDb, {
         botId: "bot-double-share",
         scope: "shared",
         actor: "operator",
@@ -472,7 +524,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
         if (!fired) {
           fired = true;
           expect(
-            await setBotScope(db, {
+            await setReviewBotScope(db, {
               botId: "bot-double-revoke",
               scope: "owned",
               confirm: true,
@@ -486,7 +538,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     };
 
     expect(
-      await setBotScope(racingDb, {
+      await setReviewBotScope(racingDb, {
         botId: "bot-double-revoke",
         scope: "owned",
         confirm: true,
@@ -519,12 +571,12 @@ describe("bot scope transitions (contract § 7.1)", () => {
     expect(storedScope(db, "bot-orphan-share")).toEqual({ scope: "shared", shared_at: NOW });
 
     expect(
-      await setBotScope(db, { botId: "bot-new", scope: "shared", actor: "operator", now: LATER }),
+      await setReviewBotScope(db, { botId: "bot-new", scope: "shared", actor: "operator", now: LATER }),
     ).toEqual({ outcome: "outside_official_workspace" });
     expect(storedScope(db, "bot-new")).toEqual({ scope: "owned", shared_at: null });
 
     expect(
-      await setBotScope(db, {
+      await setReviewBotScope(db, {
         botId: "bot-orphan-share",
         scope: "owned",
         confirm: true,
@@ -560,7 +612,7 @@ function seedTargetIn(db: TestD1, botId: string, workspaceId: string, deleted = 
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, created_by, created_at, updated_at, deleted_at)
+         (id, workspace_id, app_id, name, created_by, created_at, updated_at, deleted_at)
        VALUES (?, ?, ?, ?, 'fixture', datetime('now'), datetime('now'),
                ${deleted ? "datetime('now')" : "NULL"})`,
     )
@@ -572,7 +624,7 @@ describe("shared bots a workspace may create a target on", () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-other");
     seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW, name: "Alpha" });
-    db.raw.prepare("UPDATE review_bots SET github_slug = 'alpha-app' WHERE id = 'bot-shared'").run();
+    db.raw.prepare("UPDATE github_apps SET github_slug = 'alpha-app' WHERE id = 'bot-shared'").run();
     seedTargetIn(db, "bot-shared", WS);
     seedTargetIn(db, "bot-shared", WS, true);
     seedTargetIn(db, "bot-shared", "ws-other");
@@ -599,10 +651,10 @@ describe("shared bots a workspace may create a target on", () => {
 
 
 function githubAppIdOf(db: TestD1, botId: string): number {
-  const row = db.raw.query("SELECT github_app_id AS id FROM review_bots WHERE id = ?").get(botId) as {
+  const row = db.raw.query("SELECT github_app_id AS id FROM github_apps WHERE id = ?").get(botId) as {
     id: number;
   } | null;
-  if (row === null) throw new Error(`no review_bots row ${botId}`);
+  if (row === null) throw new Error(`no github_apps row ${botId}`);
   return row.id;
 }
 
@@ -648,7 +700,7 @@ describe("the workspace-scoped App resolve", () => {
 function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
   db.raw
     .prepare(
-      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
        VALUES (?, ?, ?, NULL, '2026-01-01T00:00:00.000Z', ${removed ? "datetime('now')" : "NULL"})`,
     )
     .run(crypto.randomUUID(), botId, installationId);
@@ -688,14 +740,14 @@ describe("failure attribution follows the ledger head", () => {
     seedApp(db, "bot-fail", { githubAppId: 9901 });
     db.raw
       .prepare(
-        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+        `INSERT INTO review_targets (id, workspace_id, app_id, name, created_by, created_at, updated_at)
          VALUES ('t-fail', ?, 'bot-fail', 'widgets', 'fixture', datetime('now'), datetime('now'))`,
       )
       .run(WS);
     db.raw
       .prepare(
         `INSERT INTO pull_requests
-           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+           (id, app_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
          VALUES ('pr-7', 'bot-fail', 't-fail', 'acme', 'widgets', 7, 'PR', 'open', 'sha-now',
                  datetime('now'), datetime('now'))`,
       )

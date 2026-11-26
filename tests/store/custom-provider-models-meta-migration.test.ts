@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createTestD1, migrationNumber, migrationsAfter, type TestD1 } from "./helpers";
+import { syncSplitPair, createTestD1, migrationNumber, migrationsAfter, type TestD1 } from "./helpers";
 import { applyMigrations } from "../helpers/migration-shapes";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 
@@ -20,6 +20,9 @@ function seedApp(db: TestD1, id: string): void {
        VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, 7001, id);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
 }
 
 function seedDeclaration(db: TestD1, appId: string): void {

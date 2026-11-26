@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
-import { createTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createTestD1, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import {
   APP_CONFIG_BASE_MIGRATIONS,
   APP_CONFIG_MIGRATIONS,
@@ -194,9 +194,9 @@ function createPoolReadRaceD1(inner: AppConfigD1, race: () => Promise<void>): Ap
 
 async function seedApp(
   db: TestD1,
-  opts: { slug: string; createdBy: string; githubAppId?: number },
+  opts: { slug: string; createdBy: string; githubAppId?: number; id?: string },
 ): Promise<GithubAppRow> {
-  const id = crypto.randomUUID();
+  const id = opts.id ?? crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
   const row = await createReviewBotsStore(db).createApp({
     id,
@@ -233,8 +233,8 @@ function seedPrePoolApp(
   return { id };
 }
 
-function seedPreMigrationAppRow(db: DashboardD1, id: string, slug: string): void {
-  (db as unknown as { raw: { prepare(sql: string): { run(...params: unknown[]): unknown } } }).raw
+function seedPreMigrationAppRow(db: TestD1, id: string, slug: string): void {
+  db.raw
     .prepare(
       `INSERT INTO github_apps
          (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
@@ -242,6 +242,9 @@ function seedPreMigrationAppRow(db: DashboardD1, id: string, slug: string): void
        VALUES (?, ?, ?, 1001, ?, 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, id, slug, slug);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
 }
 
 async function seededWorld(): Promise<{ db: ReturnType<typeof createAppConfigD1>; app: GithubAppRow; otherApp: GithubAppRow }> {
@@ -264,7 +267,12 @@ async function seededWorld(): Promise<{ db: ReturnType<typeof createAppConfigD1>
        SELECT 'default', id, 'owner', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'mallory'`,
     )
     .run();
-  const app = await seedApp(db, { slug: "mallorys-app", createdBy: "mallory", githubAppId: 1001 });
+  const app = await seedApp(db, {
+    id: BOT_ID,
+    slug: "mallorys-app",
+    createdBy: "mallory",
+    githubAppId: 1001,
+  });
   const otherApp = await seedApp(db, { slug: "adas-app", createdBy: "ada", githubAppId: 1002 });
   return { db, app, otherApp };
 }
@@ -324,7 +332,10 @@ async function postFormEntries(
 
 
 const APP_ID = 1001;
-const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
+// The primary seeded App's row id — bot-config routes bind the row, not the
+// numeric GitHub App id.
+const BOT_ID = "bot-config-primary";
+const SETTINGS = `/dashboard/default/review-bots/${BOT_ID}/settings`;
 
 
 describe("migration 0006_app_provider_config.sql (on a seeded production-shaped DB)", () => {
@@ -2181,9 +2192,13 @@ describe("duplication locks", () => {
 
 
 describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => {
+  // The RETIRED spelling is the test subject — the live form route is
+  // `/review-bots/:botId/settings` and never redirects.
+  const RETIRED = `/dashboard/default/apps/${APP_ID}/settings`;
+
   test("HTML navigation GET answers one 302 to the app's settings tab (no shell read)", async () => {
     const { db } = await seededWorld();
-    const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
+    const res = await htmlGet(RETIRED, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}?tab=settings`);
     expect(await res.text()).not.toContain("window.__BOOT__");
@@ -2191,14 +2206,14 @@ describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => 
 
   test("the redirect is address-level: a non-HTML GET takes it too", async () => {
     const { db } = await seededWorld();
-    const res = await get(SETTINGS, "", makeEnv(db));
+    const res = await get(RETIRED, "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}?tab=settings`);
   });
 });
 
 describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
-  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+  const SETTINGS_API = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
   test("manage face: app.sandbox_image_id + sandbox_images ({ id, enabled } rows, enabled entries only)", async () => {
     const { db } = await seededWorld();
@@ -2297,7 +2312,7 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
 });
 
 describe("API settings face — several repositories under one App (targets_many)", () => {
-  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+  const SETTINGS_API = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
   test("two live targets: 200, targets_many true and no target_id (no single policy to name)", async () => {
     const { db, app } = await seededWorld();
@@ -2339,7 +2354,7 @@ describe("API settings face — several repositories under one App (targets_many
     seedTarget(db, app.id, { workspaceId: consumer, name: "two", repoId: 880002, repoName: "two" });
 
     const res = await get(
-      `/dashboard/${consumer}/api/apps/${APP_ID}/settings`,
+      `/dashboard/${consumer}/api/review-bots/${BOT_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
     );
@@ -2357,7 +2372,7 @@ describe("API settings face — several repositories under one App (targets_many
 });
 
 describe("review gate (payload and ops)", () => {
-  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+  const SETTINGS_API = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
   test("manager face: gate and visibility defaults; the member face carries neither", async () => {
     const { db } = await seededWorld();
@@ -2370,7 +2385,8 @@ describe("review gate (payload and ops)", () => {
     };
     expect(body.can_manage).toBe(true);
     expect(body.check_gate).toEqual({ min_score: 60, pass_verdicts: ["ship it"] });
-    expect(body.app.github_visibility).toBe("unknown");
+    // F2: App identity fields are null on the bot-config payload.
+    expect(body.app.github_visibility).toBeNull();
 
     const member = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
     const memberBody = (await member.json()) as Record<string, unknown> & { app: Record<string, unknown> };
@@ -2381,7 +2397,7 @@ describe("review gate (payload and ops)", () => {
 
   test("manager face: an unreadable stored gate serves check_gate null and keeps the rest of the payload", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, `UPDATE review_targets SET check_pass_verdicts = '["lgtm"]' WHERE bot_id = ?`, app.id);
+    rawRun(db, `UPDATE review_targets SET check_pass_verdicts = '["lgtm"]' WHERE app_id = ?`, app.id);
     const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -3012,7 +3028,7 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
 
 
 describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage probe)", () => {
-  const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
+  const USAGE = `/dashboard/default/api/review-bots/${BOT_ID}/keys/usage`;
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
 
   afterEach(() => {
@@ -3691,7 +3707,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       models_meta: meta,
       has_keys: true,
     });
-    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const payload = await get(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, await mallory(), makeEnv(db));
     expect(payload.status).toBe(200);
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; model_ids: string[] }>;
@@ -3720,7 +3736,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const [decl] = await configStore(db).listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["fresh-a", "fresh-b"]);
     expect(decl!.models_meta).toEqual(meta);
-    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const payload = await get(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; models_meta?: Record<string, unknown> }>;
     };
@@ -3767,7 +3783,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["fresh-a", "fresh-b"]);
     expect(decl!.models_meta).toEqual({ "fresh-a": { contextWindow: 200000 } });
-    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const payload = await get(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; models_meta?: Record<string, unknown> }>;
     };
@@ -3969,7 +3985,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(decl!.models_meta).toBeUndefined();
     expect(decl!.base_url).toBe(before[0]!.base_url);
     expect(decl!.has_keys).toBe(true);
-    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const payload = await get(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; model_ids: string[]; models_meta?: Record<string, unknown> }>;
     };

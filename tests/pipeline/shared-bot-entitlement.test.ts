@@ -10,7 +10,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { SharedBotRefusal } from "../../src/dashboard/entitlement";
 import { CHECK_SUMMARIES } from "../../src/pipeline/checks";
 import { handleReviewJob, type DeliveryRefusal, type HandlerDeps } from "../../src/worker/handlers";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const WS = "default";
 const APP_ID = "11111111-2222-3333-4444-555555555555";
@@ -45,24 +45,26 @@ function payload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    botRef: { appId: APP_ID },
+    botRef: { appId: APP_ID, botId: APP_ID },
     targetId: TARGET_ID,
     ...overrides,
   };
 }
 
 function seedReviewConfig(db: TestD1): void {
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
           status, deleted_at, created_at, updated_at)
        VALUES (?, ?, 'shared-bot-test', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(APP_ID, GITHUB_APP_ID);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
     .prepare(
-      `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+      `INSERT INTO review_targets (id, workspace_id, app_id, name, created_by, created_at, updated_at)
        VALUES (?, ?, ?, 'shared-bot-test', 'tester', datetime('now'), datetime('now'))`,
     )
     .run(TARGET_ID, WS, APP_ID);

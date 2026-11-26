@@ -16,6 +16,10 @@ export type UsageEventInput = {
   occurredAt: string;
   rp: number;
   source: UsageSource;
+  // The executing bot (`botRef.botId`). REQUIRED on every write: the column
+  // stays nullable for pre-split history, but no production row may be written
+  // unattributed — an unwired caller is a compile error, never a NULL.
+  botId: string;
 };
 
 /**
@@ -113,8 +117,8 @@ export async function sumMonthlyRp(
 export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source)
-       SELECT ?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?1), ?2, ?3, ?4, ?5, ?6
+      `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source, bot_id)
+       SELECT ?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?1), ?2, ?3, ?4, ?5, ?6, ?7
        WHERE NOT EXISTS (SELECT 1 FROM usage_events existing WHERE existing.execution_token = ?2)`,
     )
     .bind(
@@ -124,6 +128,7 @@ export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Prom
       input.occurredAt,
       input.rp,
       input.source,
+      input.botId,
     )
     .run();
 }

@@ -4,7 +4,7 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1 } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
 import type { Env } from "../../src/worker/env";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -117,16 +117,18 @@ async function seededWorld(): Promise<World> {
        VALUES (?, ?, ?, 'mallory', datetime('now'))`,
     )
     .run(OTHER_WS, OTHER_WS, OTHER_WS);
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+  db.raw.prepare(
+      `INSERT INTO github_apps (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
                                  created_by, status, scope, created_at, updated_at)
        VALUES ('bot-other', 'other-bot', 9502, 'other-bot', 'enc', 'enc', 'mallory',
                'active', 'owned', datetime('now'), datetime('now'))`,
     )
     .run();
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-other', ?)")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('bot-other', ?)")
     .run(OTHER_WS);
   seedTarget(db, "bot-other", {
     workspaceId: OTHER_WS,

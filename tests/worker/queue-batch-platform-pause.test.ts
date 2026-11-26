@@ -411,7 +411,7 @@ describe("the platform switch ends a queued batch visibly", () => {
     const db = await createSeededTestD1();
     openRouteGate(db);
     storeSwitch(db, 1);
-    db.raw.prepare("UPDATE review_bots SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const payload = makePayload();
     await attachRun(db, payload, "pause-delivery-4");
     const { batch, acks } = batchOf(payload);

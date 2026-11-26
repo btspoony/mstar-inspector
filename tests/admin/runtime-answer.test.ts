@@ -375,10 +375,13 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     seedBot(db, "bot-live-paused", 1);
     seedBot(db, "bot-live-running", 2);
     seedBot(db, "bot-deleted-paused", 3);
+    // App-level pause lives on github_apps post-split; the pair's soft-delete
+    // stamps both rows (the invariant the migration backfills).
     seed(
       db,
-      "UPDATE review_bots SET review_enabled = 0 WHERE id IN ('bot-live-paused', 'bot-deleted-paused')",
+      "UPDATE github_apps SET review_enabled = 0 WHERE id IN ('bot-live-paused', 'bot-deleted-paused')",
     );
+    seed(db, "UPDATE github_apps SET deleted_at = datetime('now') WHERE id = 'bot-deleted-paused'");
     seed(db, "UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'bot-deleted-paused'");
     // A per-repository pause answers a different question and is not this count.
     const target = seedTarget(db, "bot-live-running");

@@ -491,10 +491,10 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
       `per-App credential resolution failed: app ${botId} has no review target ${payload.targetId}`,
     );
   }
-  if (target.bot_id !== botId) {
+  if (target.app_id !== botId) {
     deps.appCommenters.delete(botId);
     throw new Error(
-      `per-App credential resolution failed: target ${target.id} belongs to bot ${target.bot_id}, not ${botId}`,
+      `per-App credential resolution failed: target ${target.id} belongs to app ${target.app_id}, not ${botId}`,
     );
   }
   if (row.review_enabled === 0) return { kind: "paused" };
@@ -535,7 +535,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
 type PrHeadAnswer = { headSha: string | null; headAt: string | null };
 
 async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): Promise<RunnerAppConfig> {
-  const botId = payload.botRef.appId;
+  const botId = payload.botRef.botId;
   try {
     const cfg = await createAppConfigStore(
       deps.env.DB,
@@ -552,7 +552,7 @@ async function resolveModelOverrides(
   payload: ReviewJobPayload,
   deps: ProcessDeps,
 ): Promise<Record<string, string> | undefined> {
-  const botId = payload.botRef.appId;
+  const botId = payload.botRef.botId;
   try {
     const overrides = await createAppConfigStore(
       deps.env.DB,
@@ -568,7 +568,7 @@ async function resolveCustomProviders(
   payload: ReviewJobPayload,
   deps: ProcessDeps,
 ): Promise<CustomProviderConsumerConfig[] | undefined> {
-  const botId = payload.botRef.appId;
+  const botId = payload.botRef.botId;
   try {
     const providers = await createAppConfigStore(
       deps.env.DB,
@@ -582,23 +582,25 @@ async function resolveCustomProviders(
 }
 
 async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
-  const botId = payload.botRef.appId;
+  const botId = payload.botRef.botId;
   try {
-    const row = await createReviewBotsStore(deps.env.DB).getAppById(botId);
-    if (row === null) {
-      throw new Error("app not found");
+    // The sandbox image is BOT configuration: it lives on the `review_bots`
+    // row, never on the App — the App's copy dropped with the entity split.
+    const imageId = await createReviewBotsStore(deps.env.DB).getSandboxImageId(botId);
+    if (imageId === null) {
+      throw new Error("bot not found");
     }
-    const image = getSandboxImage(row.sandbox_image_id);
+    const image = getSandboxImage(imageId);
     if (image === undefined) {
-      throw new Error(`unknown sandbox image id ${JSON.stringify(row.sandbox_image_id)}`);
+      throw new Error(`unknown sandbox image id ${JSON.stringify(imageId)}`);
     }
     if (!image.enabled) {
-      throw new Error(`sandbox image id ${JSON.stringify(row.sandbox_image_id)} is disabled`);
+      throw new Error(`sandbox image id ${JSON.stringify(imageId)} is disabled`);
     }
     return image;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`per-App sandbox image resolution failed: app ${botId}: ${detail}`);
+    throw new Error(`per-App sandbox image resolution failed: bot ${botId}: ${detail}`);
   }
 }
 
@@ -711,7 +713,7 @@ async function newerCommitHasJob(
     if (reviewed !== null) return true;
     const openRows = await deps.env.DB.prepare(
       `SELECT check_run_id, triggered_by, attempt_key FROM review_checks
-         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL`,
+         WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL`,
     )
       .bind(
         payload.botRef.appId,
@@ -915,7 +917,7 @@ export function createProcessDeps(
       getCheckGate: async (scope) => {
         const row = await env.DB.prepare(
           `SELECT * FROM review_targets
-            WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
+            WHERE app_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
               AND deleted_at IS NULL
             ORDER BY created_at, id LIMIT 1`,
         )
@@ -1408,14 +1410,18 @@ export async function ensureRunnerConfig(
   payload: ReviewJobPayload,
   deps: ProcessDeps,
 ): Promise<RunnerConfig> {
-  const cached = deps.runnerConfigs.get(payload.botRef.appId);
+  // Keyed appId:botId — the configuration belongs to the bot, the cache entry
+  // to the pair, so one App executing through several bots (the chain) never
+  // reads another bot's chain. In this release the two ids are equal.
+  const cacheKey = `${payload.botRef.appId}:${payload.botRef.botId}`;
+  const cached = deps.runnerConfigs.get(cacheKey);
   if (cached !== undefined) return cached;
   const appCfg = await resolveAppConfig(payload, deps);
   const modelOverrides = await resolveModelOverrides(payload, deps);
   const customProviders = await resolveCustomProviders(payload, deps);
-  assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.botRef.appId);
+  assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.botRef.botId);
   const config: RunnerConfig = { appCfg, modelOverrides, customProviders };
-  deps.runnerConfigs.set(payload.botRef.appId, config);
+  deps.runnerConfigs.set(cacheKey, config);
   return config;
 }
 
@@ -1803,8 +1809,14 @@ async function processMessage(
         "review route: no attempt starter is configured — the queue handler must pass the Workflow route",
       );
     }
-    const usageSource: AttemptRef["usageSource"] = resolution.scope === "shared" ? "shared" : "byok";
-    deps.runnerConfigs.set(payload.botRef.appId, { appCfg, modelOverrides, customProviders });
+    // The price source is the BOT's scope (ADR row: review_bots.scope), never
+    // the App's — installation sharing and capability sharing are different
+    // predicates. The executing bot is payload.botRef.botId, equal to the App
+    // id this release. Reads go through the store: tenant-facing modules hold
+    // no direct review_bots SQL (the read-face allowlist).
+    const botScope = await createReviewBotsStore(deps.env.DB).getBotScope(payload.botRef.botId);
+    const usageSource: AttemptRef["usageSource"] = botScope === "shared" ? "shared" : "byok";
+    deps.runnerConfigs.set(`${payload.botRef.appId}:${payload.botRef.botId}`, { appCfg, modelOverrides, customProviders });
     const handoff = await reserveAttemptHandoff(deps.env.DB, {
       deliveryKey,
       attemptId,

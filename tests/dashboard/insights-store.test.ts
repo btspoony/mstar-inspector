@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createInsightsStore } from "../../src/dashboard/insights-store";
 import { reviewedAt, mondayOf, dayGrid, weekGrid } from "../../src/dashboard/insights-dates";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, type TestD1, syncReviewBotColumn } from "../store/helpers";
 
 const FP_X = computeFindingFingerprint({
   mergeClass: "should-fix",
@@ -43,7 +43,7 @@ function seedTenant(db: TestD1, targetId: string, botId: string): void {
   const githubAppId = [...botId].reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) % 1_000_000, 7);
   db.raw
     .prepare(
-      `INSERT OR IGNORE INTO review_bots
+      `INSERT OR IGNORE INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, created_at, updated_at)
        VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -51,8 +51,17 @@ function seedTenant(db: TestD1, targetId: string, botId: string): void {
     )
     .run(botId, githubAppId, botId, now, now);
   db.raw
+    .prepare("INSERT OR IGNORE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
+    .run(botId, WORKSPACE);
+  db.raw
     .prepare(
-      `INSERT OR IGNORE INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+      `INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+       VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))`,
+    )
+    .run(botId, WORKSPACE, botId);
+  db.raw
+    .prepare(
+      `INSERT OR IGNORE INTO review_targets (id, workspace_id, app_id, name, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'fixture', ?, ?)`,
     )
     .run(targetId, WORKSPACE, botId, botId, now, now);
@@ -76,7 +85,7 @@ function insertReview(
   seedTenant(db, targetId ?? "target-legacy", `app-${targetId ?? "legacy"}`);
   db.raw
     .query(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id, target_id)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, app_id, target_id)
        VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', ?, ?, ?)`,
     )
     .run(
@@ -90,6 +99,7 @@ function insertReview(
       null,
       targetId,
     );
+  syncReviewBotColumn(db);
   for (const f of opts.findings) {
     db.raw
       .query(

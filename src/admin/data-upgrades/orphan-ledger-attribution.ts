@@ -10,33 +10,33 @@ const GROUPS_PER_BATCH = 20;
 
 const matchingTargets = (botId: string, owner: string, repo: string) => `
   SELECT t.id FROM review_targets t
-   WHERE t.bot_id = ${botId} AND t.deleted_at IS NULL
+   WHERE t.app_id = ${botId} AND t.deleted_at IS NULL
      AND t.repo_owner = ${owner} COLLATE NOCASE AND t.repo_name = ${repo} COLLATE NOCASE`;
 
 const groupStillUniform = (bot: string, owner: string, repo: string) => `
   NOT EXISTS (
-    WITH g(bot_id, installation_id) AS (
-      SELECT bot_id, NULL FROM pull_requests
+    WITH g(app_id, installation_id) AS (
+      SELECT app_id, NULL FROM pull_requests
        WHERE target_id IS NULL AND owner = ${owner} COLLATE NOCASE AND repo = ${repo} COLLATE NOCASE
       UNION ALL
-      SELECT bot_id, installation_id FROM reviews
+      SELECT app_id, installation_id FROM reviews
        WHERE target_id IS NULL AND owner = ${owner} COLLATE NOCASE AND repo = ${repo} COLLATE NOCASE
       UNION ALL
-      SELECT bot_id, installation_id FROM review_findings
+      SELECT app_id, installation_id FROM review_findings
        WHERE target_id IS NULL AND owner = ${owner} COLLATE NOCASE AND repo = ${repo} COLLATE NOCASE
       UNION ALL
       SELECT NULL, installation_id FROM review_failures
        WHERE target_id IS NULL AND owner = ${owner} COLLATE NOCASE AND repo = ${repo} COLLATE NOCASE),
     shape(other, unknown, known) AS (
-      SELECT SUM((g.bot_id IS NOT NULL AND g.bot_id <> ${bot})
-                  OR EXISTS (SELECT 1 FROM bot_installations i
-                              WHERE i.installation_id = g.installation_id AND i.bot_id <> ${bot})),
-             SUM(g.bot_id IS NULL
-                 AND NOT EXISTS (SELECT 1 FROM bot_installations i
+      SELECT SUM((g.app_id IS NOT NULL AND g.app_id <> ${bot})
+                  OR EXISTS (SELECT 1 FROM github_app_installations i
+                              WHERE i.installation_id = g.installation_id AND i.app_id <> ${bot})),
+             SUM(g.app_id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM github_app_installations i
                                   WHERE i.installation_id = g.installation_id)),
-             SUM(g.bot_id = ${bot}
-                 OR EXISTS (SELECT 1 FROM bot_installations i
-                             WHERE i.installation_id = g.installation_id AND i.bot_id = ${bot}))
+             SUM(g.app_id = ${bot}
+                 OR EXISTS (SELECT 1 FROM github_app_installations i
+                             WHERE i.installation_id = g.installation_id AND i.app_id = ${bot}))
         FROM g)
     SELECT 1 FROM shape WHERE other > 0 OR (unknown > 0 AND known > 0))`;
 
@@ -44,7 +44,7 @@ const groupStillUniform = (bot: string, owner: string, repo: string) => `
  * Every ledger row still holding no target, one row per ledger row, with the
  * bot it names itself and the group key it belongs to. `review_failures`
  * carries no bot of its own — it is attributed through `installation_id` alone.
- * `row_bot` is that resolution: the row's own `bot_id` when set, else the bot
+ * `row_bot` is that resolution: the row's own `app_id` when set, else the bot
  * its installation names (a removed installation row still resolves — it is
  * history, not absence).
  *
@@ -60,15 +60,15 @@ const groupStillUniform = (bot: string, owner: string, repo: string) => `
 const orphanRows = (after: string) => {
   const floor = ` AND lower(owner) || '/' || lower(repo) > ${after}`;
   return `
-  SELECT 'pull_requests' AS src, id, bot_id, NULL AS installation_id, owner, repo,
+  SELECT 'pull_requests' AS src, id, app_id, NULL AS installation_id, owner, repo,
          lower(owner) || '/' || lower(repo) AS group_key
     FROM pull_requests WHERE target_id IS NULL${floor}
   UNION ALL
-  SELECT 'reviews', id, bot_id, installation_id, owner, repo,
+  SELECT 'reviews', id, app_id, installation_id, owner, repo,
          lower(owner) || '/' || lower(repo)
     FROM reviews WHERE target_id IS NULL${floor}
   UNION ALL
-  SELECT 'review_findings', id, bot_id, installation_id, owner, repo,
+  SELECT 'review_findings', id, app_id, installation_id, owner, repo,
          lower(owner) || '/' || lower(repo)
     FROM review_findings WHERE target_id IS NULL${floor}
   UNION ALL
@@ -78,40 +78,40 @@ const orphanRows = (after: string) => {
 };
 
 const resolvedGroups = (after: string) => `
-  WITH orphan(src, id, bot_id, installation_id, owner, repo, group_key) AS (${orphanRows(after)}),
-  row_bot(src, id, bot_id) AS (
-    SELECT src, id, bot_id FROM orphan WHERE bot_id IS NOT NULL
+  WITH orphan(src, id, app_id, installation_id, owner, repo, group_key) AS (${orphanRows(after)}),
+  row_bot(src, id, app_id) AS (
+    SELECT src, id, app_id FROM orphan WHERE app_id IS NOT NULL
     UNION
-    SELECT o.src, o.id, i.bot_id FROM orphan o
-      JOIN bot_installations i ON i.installation_id = o.installation_id),
+    SELECT o.src, o.id, i.app_id FROM orphan o
+      JOIN github_app_installations i ON i.installation_id = o.installation_id),
   named(group_key, owner, repo) AS (
     SELECT group_key, MIN(owner), MIN(repo) FROM orphan
      GROUP BY group_key),
   claim(group_key, owner, repo, unknown, bots, candidate_bot) AS (
     SELECT n.group_key, n.owner, n.repo,
            SUM(NOT EXISTS (SELECT 1 FROM row_bot rb WHERE rb.src = o.src AND rb.id = o.id)),
-           COUNT(DISTINCT rb.bot_id), MIN(rb.bot_id)
+           COUNT(DISTINCT rb.app_id), MIN(rb.app_id)
       FROM named n
       JOIN orphan o ON o.group_key = n.group_key
       LEFT JOIN row_bot rb ON rb.src = o.src AND rb.id = o.id
      GROUP BY n.group_key, n.owner, n.repo),
-  only_bot(bot_id) AS (
-    SELECT CASE WHEN COUNT(DISTINCT bot_id) = 1 THEN MIN(bot_id) END FROM bot_workspaces),
-  attributed(group_key, owner, repo, bot_id) AS (
+  only_bot(app_id) AS (
+    SELECT CASE WHEN COUNT(DISTINCT app_id) = 1 THEN MIN(app_id) END FROM app_workspaces),
+  attributed(group_key, owner, repo, app_id) AS (
     SELECT c.group_key, c.owner, c.repo,
            CASE WHEN c.unknown = 0 AND c.bots = 1 THEN c.candidate_bot
-                WHEN c.bots = 0 THEN (SELECT bot_id FROM only_bot) END
+                WHEN c.bots = 0 THEN (SELECT app_id FROM only_bot) END
       FROM claim c),
-  resolved(group_key, owner, repo, bot_id, workspace_id, targets) AS (
-    SELECT a.group_key, a.owner, a.repo, a.bot_id,
-           (SELECT w.workspace_id FROM bot_workspaces w WHERE w.bot_id = a.bot_id),
-           (SELECT COUNT(*) FROM (${matchingTargets("a.bot_id", "a.owner", "a.repo")}))
+  resolved(group_key, owner, repo, app_id, workspace_id, targets) AS (
+    SELECT a.group_key, a.owner, a.repo, a.app_id,
+           (SELECT w.workspace_id FROM app_workspaces w WHERE w.app_id = a.app_id),
+           (SELECT COUNT(*) FROM (${matchingTargets("a.app_id", "a.owner", "a.repo")}))
       FROM attributed a)`;
 
 type ResolvedGroup = {
   owner: string;
   repo: string;
-  bot_id: string | null;
+  app_id: string | null;
   workspace_id: string | null;
   targets: number;
   sort_key: string;
@@ -131,11 +131,11 @@ const LEDGER_TABLES = ["pull_requests", "reviews", "review_findings", "review_fa
 
 const INSERT_TARGET = `
   INSERT INTO review_targets
-    (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+    (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
      follow_workspace_defaults, created_by, created_at, updated_at)
   SELECT ?4, w.workspace_id, ?1, ?5, NULL, ?2, ?3, 1, ?6, datetime('now'), datetime('now')
-    FROM bot_workspaces w
-   WHERE w.bot_id = ?1
+    FROM app_workspaces w
+   WHERE w.app_id = ?1
      AND NOT EXISTS (${matchingTargets("?1", "?2", "?3")})
      AND ${groupStillUniform("?1", "?2", "?3")}`;
 
@@ -151,7 +151,7 @@ async function countRows(db: DashboardD1, sql: string): Promise<number> {
 }
 
 const attributable = (alias: string) =>
-  `${alias}bot_id IS NOT NULL AND ${alias}workspace_id IS NOT NULL AND ${alias}targets <= 1`;
+  `${alias}app_id IS NOT NULL AND ${alias}workspace_id IS NOT NULL AND ${alias}targets <= 1`;
 
 type GroupWrite = { insert: number | null; updates: number[] };
 
@@ -164,7 +164,7 @@ async function planBatch(
   const read = await db
     .prepare(
       `${resolvedGroups("?1")}
-       SELECT owner, repo, bot_id, workspace_id, targets, group_key AS sort_key FROM resolved
+       SELECT owner, repo, app_id, workspace_id, targets, group_key AS sort_key FROM resolved
         ORDER BY sort_key LIMIT ?2`,
     )
     .bind(after, GROUPS_PER_BATCH)
@@ -182,9 +182,9 @@ async function planBatch(
   };
 
   for (const group of groups) {
-    if (group.bot_id === null || group.workspace_id === null || group.targets > 1) {
+    if (group.app_id === null || group.workspace_id === null || group.targets > 1) {
       plan.unattributable += 1;
-      if (group.bot_id !== null && group.workspace_id !== null) plan.ambiguous += 1;
+      if (group.app_id !== null && group.workspace_id !== null) plan.ambiguous += 1;
       continue;
     }
     const write: GroupWrite = { insert: null, updates: [] };
@@ -194,7 +194,7 @@ async function planBatch(
         db
           .prepare(INSERT_TARGET)
           .bind(
-            group.bot_id,
+            group.app_id,
             group.owner,
             group.repo,
             crypto.randomUUID(),
@@ -206,7 +206,7 @@ async function planBatch(
     for (const table of LEDGER_TABLES) {
       write.updates.push(plan.statements.length);
       plan.statements.push(
-        db.prepare(attributeGroup(table)).bind(group.bot_id, group.owner, group.repo),
+        db.prepare(attributeGroup(table)).bind(group.app_id, group.owner, group.repo),
       );
     }
     plan.writes.push(write);

@@ -1275,7 +1275,7 @@ export async function listUnpublishedLaunchSettlements(
                -- that differs from the payload) and the publication lane owns it. The
                -- tenant scope leads so the expression index (0101) seeks by prefix and
                -- an unrelated tenant's history is never touched.
-               p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
+               p.app_id = json_extract(h.payload_json, '$.botRef.appId')
                AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
                AND p.owner = json_extract(h.payload_json, '$.owner')
                AND p.repo = json_extract(h.payload_json, '$.repo')
@@ -1294,7 +1294,7 @@ export async function listUnpublishedLaunchSettlements(
                  json_extract(p.payload_json, '$.attemptId')
                ) IS NULL
                AND json_extract(h.payload_json, '$.head_sha') IS NOT NULL
-               AND p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
+               AND p.app_id = json_extract(h.payload_json, '$.botRef.appId')
                AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
                AND p.owner = json_extract(h.payload_json, '$.owner')
                AND p.repo = json_extract(h.payload_json, '$.repo')

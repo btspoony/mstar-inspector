@@ -165,8 +165,8 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       db.raw
         .prepare(
           lifecycle === "disabled"
-            ? `UPDATE review_bots SET status = 'disabled' WHERE id = ?`
-            : `UPDATE review_bots SET deleted_at = datetime('now') WHERE id = ?`,
+            ? `UPDATE github_apps SET status = 'disabled' WHERE id = ?`
+            : `UPDATE github_apps SET deleted_at = datetime('now') WHERE id = ?`,
         )
         .run("11111111-2222-3333-4444-555555555555");
 
@@ -204,7 +204,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("a wait-terminal row of a disabled App still takes the durable suspension", async () => {
     const db = seededDb();
     const { id } = await abandonedRow(db);
-    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(SCOPE.appId);
+    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(SCOPE.appId);
 
     const stub = stubFetch();
     let factoryCalls = 0;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1 } from "../store/helpers";
 import type { TestD1 } from "../store/helpers";
 import {
   checkGateOf,
@@ -26,15 +26,17 @@ function seedWorkspace(db: TestD1, id: string): void {
 }
 
 function seedBot(db: TestD1, botId: string, workspaceId = WS): void {
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
           status, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active', datetime('now'), datetime('now'))`,
     )
     .run(botId, botId.replace(/\D/g, "") || 1, botId);
-  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
+  db.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
 }
 
 function seedTarget(
@@ -58,7 +60,7 @@ function seedTarget(
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+         (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
           follow_workspace_defaults, review_enabled, review_trigger_mode, review_level,
           check_min_score, check_pass_verdicts, created_by, created_at, updated_at, deleted_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'acme',
@@ -198,7 +200,7 @@ describe("create (one repository, one workspace)", () => {
     if (result.outcome !== "created") throw new Error("unreachable");
     expect(result.target).toMatchObject({
       workspace_id: WS,
-      bot_id: "bot-create",
+      app_id: "bot-create",
       repo_id: 9100,
       repo_owner: "acme",
       repo_name: "widgets",

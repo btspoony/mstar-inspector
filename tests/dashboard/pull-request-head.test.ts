@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, syncSplitPair, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore, type UpsertPullRequestInput } from "../../src/dashboard/apps-store";
 
 const APP_ID = "app-pr-head";
@@ -7,15 +7,17 @@ const TARGET_ID = "target-app-pr-head";
 
 function seedApp(db: TestD1, id = APP_ID, githubAppId = 3001): void {
   const now = "2026-01-01T00:00:00.000Z";
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, created_at, updated_at)
        VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
                'octocat', 'active', ?, ?)`,
     )
     .run(id, githubAppId, id, now, now);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   seedTarget(db, id, { id: `target-${id}` });
 }
 

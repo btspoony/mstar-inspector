@@ -11,9 +11,14 @@ const locale = "en" as const;
 const WORKSPACE_REF = "acme";
 
 function registeredScopePath(appId: string): string {
-  const route = APP_ROUTES.find((row) => row.method === "patch" && row.path.endsWith("/bot/scope"));
-  if (route === undefined) throw new Error("no PATCH .../bot/scope route is registered");
-  return `/dashboard/${WORKSPACE_REF}${route.path.replace(":appId", appId)}`;
+  // The SPA posts the BOT share switch until apps-ia-split rewires it; this
+  // helper pins the route registration the same way as before — by lookup,
+  // not a hardcoded string — so a route-table drift fails loudly.
+  const route = APP_ROUTES.find(
+    (row) => row.method === "patch" && row.path === "/api/review-bots/:botId/scope",
+  );
+  if (route === undefined) throw new Error("no PATCH /api/review-bots/:botId/scope route is registered");
+  return `/dashboard/${WORKSPACE_REF}${route.path.replace(":botId", appId)}`;
 }
 
 function payload(overrides: Partial<BotSettingsPayload> = {}): BotSettingsPayload {

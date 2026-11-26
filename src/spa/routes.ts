@@ -63,7 +63,11 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
  * route to a workspace. ONE source for the SPA matcher below and the Worker's
  * route-family gate (`src/dashboard/index.ts`), which derives from it.
  */
-export const WORKSPACE_FAMILY_SEGMENTS = ["repos", "apps", "members", "settings", "api"] as const;
+// `review-bots` joined the family with the App/bot split (the bot-config form
+// POSTs live at /dashboard/<ref>/review-bots/:botId/settings): without it the
+// tenant classifier answered `other` for those paths, workspaceOnly fell
+// through, and every bot-config form POST landed in the 405 wildcard.
+export const WORKSPACE_FAMILY_SEGMENTS = ["repos", "apps", "members", "settings", "api", "review-bots"] as const;
 
 const WORKSPACE_REF_PATH = new RegExp(
   `^/dashboard/([^/]+)/(?:${WORKSPACE_FAMILY_SEGMENTS.join("|")})(?:/|$)`,

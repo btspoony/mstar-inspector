@@ -53,8 +53,7 @@ function seedWorkspace(db: TestD1, id: string, login: string, role = "owner"): v
 function seedReview(db: TestD1, id: string, targetId: string, botId: string, owner: string, repo: string, number: number): void {
   seed(
     db,
-    `INSERT INTO reviews
-       (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id, target_id)
+    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, app_id, target_id)
      VALUES (?, 1, ?, ?, ?, 'sha', datetime('now'), 'approved', 's', '{}', ?, ?)`,
     id,
     owner,
@@ -75,7 +74,7 @@ function seedPullRequest(
 ): void {
   seed(
     db,
-    `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, title, state)
+    `INSERT INTO pull_requests (id, app_id, target_id, owner, repo, pr_number, title, state)
      VALUES (?, ?, ?, ?, ?, ?, 'A change', 'open')`,
     crypto.randomUUID(),
     botId,

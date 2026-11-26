@@ -44,7 +44,7 @@ import {
   type PublicationSendGuard,
 } from "../../src/pipeline/comment";
 import { buildLineBatchMarker, lineMarker } from "../../src/pipeline/review-threads";
-import { createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../store/helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const GITHUB_APP_ID = 1001;
@@ -57,14 +57,16 @@ let CLOCK = T0;
 
 async function seededDb(): Promise<TestD1> {
   const db = createMigratedTestD1();
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, 'publication-lease-test', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(APP_ID, GITHUB_APP_ID);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   await mapAppToDefaultWorkspace(db, APP_ID);
   return db;
 }

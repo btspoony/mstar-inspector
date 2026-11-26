@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { insertSupportGrant } from "../../src/dashboard/operator-store";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, syncSplitPair, type TestD1 } from "../store/helpers";
 
 const { default: worker } = await import("../../src/worker/index");
 
@@ -89,6 +89,8 @@ function seedMembership(
 }
 
 const ACME_APP_ID = 5001;
+// The seeded row id of the same App (bot-config routes bind this).
+const ACME_BOT_ID = "app-acme";
 const OTHER_APP_ID = 5002;
 const ORPHAN_APP_ID = 5003;
 const GONE_APP_ID = 5004;
@@ -103,7 +105,7 @@ function seedApp(
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO review_bots
+    `INSERT INTO github_apps
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -116,7 +118,10 @@ function seedApp(
     now,
   );
   if (workspaceId !== null) {
-    seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+    seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+    // The bot row follows its mapping (same-id invariant); bot-keyed FKs need
+    // it before any bot_model_config/bot_provider_keys seed.
+    syncSplitPair(db);
     seedTarget(db, id, { id: `target-${id}`, workspaceId });
   }
 }
@@ -149,13 +154,17 @@ type ListBody = { viewer: { login: string }; apps: Array<{ github_app_id: number
 
 function appSnapshot(db: TestD1, appId = "app-acme") {
   return {
+    // 0116 moved sandbox_image_id to the BOT row; everything else stays App-side.
     app: db.raw
-      .query(`SELECT status, sandbox_image_id, deleted_at, updated_at FROM review_bots WHERE id = ?`)
+      .query(
+        `SELECT g.status, g.deleted_at, g.updated_at, r.sandbox_image_id
+           FROM github_apps g JOIN review_bots r ON r.id = g.id WHERE g.id = ?`,
+      )
       .get(appId),
     target: db.raw
       .query(
         `SELECT review_enabled, review_trigger_mode, review_level, check_min_score
-           FROM review_targets WHERE bot_id = ?`,
+           FROM review_targets WHERE app_id = ?`,
       )
       .get(appId),
     config: db.raw.query("SELECT model_chain FROM bot_model_config WHERE bot_id = ?").get(appId) ?? null,
@@ -167,18 +176,18 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
 const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string; ownerStatus?: number }> = [
   { route: `/apps/${ACME_APP_ID}/disable`, ownerStatus: 200 },
   { route: `/apps/${ACME_APP_ID}/enable`, ownerStatus: 200 },
-  { route: `/apps/${ACME_APP_ID}/settings`, body: "op=save-chain&model_chain=", ownerStatus: 200 },
+  { route: `/review-bots/${ACME_BOT_ID}/settings`, body: "op=save-chain&model_chain=", ownerStatus: 200 },
   {
-    route: `/apps/${ACME_APP_ID}/settings`,
+    route: `/review-bots/${ACME_BOT_ID}/settings`,
     body: "op=save-sandbox-image&sandbox_image_id=omp",
     ownerStatus: 200,
   },
   {
-    route: `/apps/${ACME_APP_ID}/settings/key/delete`,
+    route: `/review-bots/${ACME_BOT_ID}/settings/key/delete`,
     body: "provider=anthropic&key_id=seeded-key",
     ownerStatus: 200,
   },
-  { route: `/api/apps/${ACME_APP_ID}/keys/verify`, body: "provider=anthropic&key=sk-not-a-real-key" },
+  { route: `/api/review-bots/${ACME_BOT_ID}/keys/verify`, body: "provider=anthropic&key=sk-not-a-real-key" },
   { route: `/api/apps/${ACME_APP_ID}/refresh-metadata` },
   { route: `/apps/${ACME_APP_ID}/delete`, ownerStatus: 200 },
 ];
@@ -318,7 +327,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     const live = db.raw
       .query(
         `SELECT (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = 'ws-gone') AS members,
-                (SELECT COUNT(*) FROM bot_workspaces WHERE workspace_id = 'ws-gone') AS apps`,
+                (SELECT COUNT(*) FROM app_workspaces WHERE workspace_id = 'ws-gone') AS apps`,
       )
       .get() as { members: number; apps: number };
     expect(live).toEqual({ members: 1, apps: 1 });

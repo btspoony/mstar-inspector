@@ -116,7 +116,7 @@ describe("the maintenance replay route", () => {
         head_sha: null,
         action: "maintenance_replay",
         triggered_by: "pull_request",
-        botRef: { appId: BOT_ID },
+        botRef: { appId: BOT_ID, botId: BOT_ID },
         targetId: TARGET_ID,
       },
     ]);

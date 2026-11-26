@@ -24,7 +24,7 @@ function payloadFor(attemptId: string): ReviewJobPayload {
     head_sha: attemptId.padEnd(40, "a"),
     action: "opened",
     triggered_by: "pull_request",
-    botRef: { appId: BOT_ID },
+    botRef: { appId: BOT_ID, botId: BOT_ID },
     targetId: TARGET_ID,
   };
 }

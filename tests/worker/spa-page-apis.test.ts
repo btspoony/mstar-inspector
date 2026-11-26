@@ -92,7 +92,7 @@ describe("versioned provider catalog", () => {
 
   test("only a matching version is immutable; unversioned/stale reads revalidate with ETag", async () => {
     const env = makeEnv(await seededWorld());
-    const settingsResponse = await get("/dashboard/default/api/apps/1001/settings", "octocat", env);
+    const settingsResponse = await get("/dashboard/default/api/review-bots/app-mallory/settings", "octocat", env);
     const settings = await settingsResponse.json() as { provider_catalog_version: string };
     const response = await get(path, "hubot", env);
     expect(response.headers.get("cache-control")).toBe("private, no-cache");
@@ -128,8 +128,8 @@ test("concurrent settings reads log the first section's error even when a later 
     return new Proxy(statement, {
       get(target, property) {
         if (property === "bind") return (...args: unknown[]) => wrap(target.bind(...args), sql);
-        if (property === "all" && sql.includes("SELECT installation_id, account_login, seen_at FROM bot_installations")) {
-          return async () => { await held; throw new TypeError("earlier installation failure"); };
+        if (property === "all" && sql.includes("FROM webhook_deliveries")) {
+          return async () => { await held; throw new TypeError("earlier delivery-summary failure"); };
         }
         if (property === "all" && sql.includes("SELECT * FROM bot_provider_keys WHERE bot_id")) {
           return async () => { keyStarted(); throw new SecretboxKeyError("later key failure"); };
@@ -141,7 +141,7 @@ test("concurrent settings reads log the first section's error even when a later 
   }
   const warnings = spyOn(console, "warn").mockImplementation(() => {});
   try {
-    const pending = get("/dashboard/default/api/apps/1001/settings", "octocat", makeEnv({
+    const pending = get("/dashboard/default/api/review-bots/app-mallory/settings", "octocat", makeEnv({
       prepare: (sql: string) => wrap(db.prepare(sql), sql), batch: db.batch.bind(db),
     }));
     await laterStarted;
@@ -206,7 +206,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     const db = await seededWorld();
     const env = makeEnv(db);
 
-    const owner = await get("/dashboard/default/api/apps/1001/settings", "octocat", env);
+    const owner = await get("/dashboard/default/api/review-bots/app-mallory/settings", "octocat", env);
     expect(owner.status).toBe(200);
     const body = (await owner.json()) as {
       can_manage: boolean;
@@ -214,7 +214,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       targets_many: boolean;
       target_id?: string;
       app: {
-        github_app_id: number;
+        github_app_id: number | null;
         github_slug: string | null;
         id: string;
         review_enabled?: boolean;
@@ -229,8 +229,10 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       providers?: unknown;
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
-    expect(body.app.github_app_id).toBe(1001);
-    expect(body.app.github_slug).toBe("mstar-inspector-mallory");
+    // F2: App identity is null on the bot-config payload; the ROW id is the
+    // thing the route binds.
+    expect(body.app.github_app_id).toBeNull();
+    expect(body.app.github_slug).toBeNull();
     expect(body.app.id).toBe("app-mallory");
     expect(body.workspace_id).toBe("default");
     expect(body.targets_many).toBe(false);
@@ -250,7 +252,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(body.provider_eligibility["omp"]).toBeUndefined();
     expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
-    const other = await get("/dashboard/default/api/apps/1001/settings", "mallory", env);
+    const other = await get("/dashboard/default/api/review-bots/app-mallory/settings", "mallory", env);
     expect(other.status).toBe(200);
     const otherBody = (await other.json()) as {
       can_manage: boolean;
@@ -268,8 +270,8 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       sandbox_images?: unknown;
     };
     expect(otherBody.can_manage).toBe(false);
-    expect(otherBody.app.github_app_id).toBe(1001);
-    expect(otherBody.app.github_slug).toBe("mstar-inspector-mallory");
+    expect(otherBody.app.github_app_id).toBeNull();
+    expect(otherBody.app.github_slug).toBeNull();
     expect(Object.keys(otherBody).sort()).toEqual([
       "app",
       "blocked",
@@ -305,11 +307,11 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(otherBody.sandbox_images).toBeUndefined();
     expect(other.headers.get("cache-control")).toBe("private, no-store");
 
-    const missing = await get("/dashboard/default/api/apps/9999/settings", "octocat", env);
+    const missing = await get("/dashboard/default/api/review-bots/9999/settings", "octocat", env);
     expect(missing.status).toBe(404);
 
     for (const alias of ["0x3e9", "1.001e3", "1e3", "+1001"]) {
-      const res = await get(`/dashboard/default/api/apps/${alias}/settings`, "octocat", env);
+      const res = await get(`/dashboard/default/api/review-bots/${alias}/settings`, "octocat", env);
       expect(res.status, alias).toBe(404);
     }
   });
@@ -318,7 +320,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     const db = await seededWorld();
     const env = makeEnv(db);
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/default/apps/1001/settings", {
+      new Request("https://worker.local/dashboard/default/review-bots/app-mallory/settings", {
         method: "POST",
         headers: {
           Cookie: `${SESSION_COOKIE}=${await cookie("hubot")}`,

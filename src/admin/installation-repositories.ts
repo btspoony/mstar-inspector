@@ -29,7 +29,7 @@ export function createRepoLookup(
         // id to mint an installation token and returns no identity, ownership or
         // response field. upgrade: tenant-filter it once the data-upgrade runner
         // becomes workspace-scoped.
-        .prepare("SELECT github_app_id, private_key_enc FROM review_bots WHERE id = ?1")
+        .prepare("SELECT github_app_id, private_key_enc FROM github_apps WHERE id = ?1")
         .bind(botId)
         .first<{ github_app_id: number; private_key_enc: string }>();
       if (row !== null) {

@@ -23,6 +23,7 @@ import {
 import { createConsumerHarness, loadConsumer, makePayload } from "../helpers/consumer-harness";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import type { TestD1 } from "../store/helpers";
+import { syncReviewBotColumn } from "../store/helpers";
 
 const { createReviewConsumer } = await loadConsumer();
 
@@ -62,8 +63,8 @@ function seedReview(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, context_incomplete, reviewed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, context_incomplete, reviewed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?,?, ?, ?)`,
     )
     .run(
       crypto.randomUUID(),
@@ -77,6 +78,7 @@ function seedReview(
       contextIncomplete ? 1 : 0,
       reviewedAt,
     );
+  syncReviewBotColumn(db);
 }
 
 const ROUND_IDENTITY: {
@@ -249,19 +251,19 @@ describe("incremental review rounds: the compare gate", () => {
 
     const rows = db.raw
       .query(
-        "SELECT bot_id, installation_id, owner, repo, pr_number FROM reviews WHERE head_sha IN (?, ?) ORDER BY reviewed_at",
+        "SELECT app_id, installation_id, owner, repo, pr_number FROM reviews WHERE head_sha IN (?, ?) ORDER BY reviewed_at",
       )
       .all(PREVIOUS_SHA, otherAppHead) as Array<Record<string, string | number>>;
     expect(rows).toEqual([
       {
-        bot_id: ROUND_IDENTITY.appId,
+        app_id: ROUND_IDENTITY.appId,
         installation_id: ROUND_IDENTITY.installationId,
         owner: ROUND_IDENTITY.owner,
         repo: ROUND_IDENTITY.repo,
         pr_number: ROUND_IDENTITY.prNumber,
       },
       {
-        bot_id: TEST_OTHER_APP_ID,
+        app_id: TEST_OTHER_APP_ID,
         installation_id: ROUND_IDENTITY.installationId,
         owner: ROUND_IDENTITY.owner,
         repo: ROUND_IDENTITY.repo,

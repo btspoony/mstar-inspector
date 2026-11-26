@@ -656,7 +656,7 @@ async function applyPendingLifecycleJournals(
   const rows = await db
     .prepare(
       `SELECT id FROM review_publications
-       WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND phase = 'confirmed' AND recovery_state = 'pending'
        ORDER BY created_ms, id LIMIT 10`,
     )
@@ -2345,10 +2345,13 @@ function requireCommenter(deps: ProcessDeps, payload: ReviewJobPayload): ReviewC
 }
 
 function requireRunnerConfig(deps: ProcessDeps, payload: ReviewJobPayload): RunnerConfig {
-  const config = deps.runnerConfigs.get(payload.botRef.appId);
+  // The key is appId:botId — see the writer in consumer.ts: the configuration
+  // belongs to the bot, and one App executing through several bots never reads
+  // another bot's chain.
+  const config = deps.runnerConfigs.get(`${payload.botRef.appId}:${payload.botRef.botId}`);
   if (config === undefined) {
     throw new Error(
-      `review attempt: no runner config is registered for app ${payload.botRef.appId} — the host resolves the App's AI config before it runs an attempt step`,
+      `review attempt: no runner config is registered for app ${payload.botRef.appId} bot ${payload.botRef.botId} — the host resolves the bot's AI config before it runs an attempt step`,
     );
   }
   return config;
@@ -3029,6 +3032,7 @@ async function preparePhase(
       occurredAt: usageOccurredAt,
       rp: rpFor(level, usageSource, await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso)),
       source: usageSource,
+      botId: payload.botRef.botId,
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -4349,7 +4353,7 @@ async function collectPhase(
     const knownRows = await deps.env.DB
       .prepare(
         `SELECT id, finding_id FROM review_findings
-         WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
            AND finding_id IN (${findingIdPlaceholders})`,
       )
       .bind(
