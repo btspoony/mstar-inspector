@@ -8,6 +8,7 @@ import type { VerifiedModels } from "./app-config-store";
  */
 export const THINKING_LEVELS: Record<string, true> = {
   auto: true,
+  inherit: true,
   off: true,
   minimal: true,
   low: true,
@@ -16,22 +17,30 @@ export const THINKING_LEVELS: Record<string, true> = {
   xhigh: true,
   max: true,
 };
+// shortcut: exact level names only — the SDK also accepts an unambiguous
+// abbreviation (`:med`, `:xhi`); this validator does not, upgrade if a
+// hand-written abbreviated selector must pass membership.
 
 /**
  * Split one selector into provider + model. The tail after the LAST `:` is
- * dropped only when it is a known thinking level (THINKING_LEVELS); any other
- * tail stays part of the model id, so provider ids that embed a colon
- * (`ollama-cloud/deepseek-v4.1-flash:1017`, `qwen3:32b`) compare literally.
- * A selector without `/` has no provider prefix — membership cannot apply.
+ * dropped from `model` only when it is a known thinking level
+ * (THINKING_LEVELS); any other tail stays part of the model id, so provider
+ * ids that embed a colon (`ollama-cloud/deepseek-v4.1-flash:1017`,
+ * `qwen3:32b`) compare literally. `literal` is the id exactly as written —
+ * membership tries it before `model`, because real ids can end in a level
+ * name (`glm-4.7:max`). A selector without `/` has no provider prefix —
+ * membership cannot apply.
  */
-export function selectorBase(selector: string): { provider: string; model: string; base: string } | null {
+export function selectorBase(
+  selector: string,
+): { provider: string; literal: string; model: string; base: string } | null {
   const slash = selector.indexOf("/");
   if (slash <= 0) return null;
   const provider = selector.slice(0, slash);
-  const rest = selector.slice(slash + 1);
-  const colon = rest.lastIndexOf(":");
-  const model = colon !== -1 && THINKING_LEVELS[rest.slice(colon + 1)] === true ? rest.slice(0, colon) : rest;
-  return { provider, model, base: `${provider}/${model}` };
+  const literal = selector.slice(slash + 1);
+  const colon = literal.lastIndexOf(":");
+  const model = colon !== -1 && THINKING_LEVELS[literal.slice(colon + 1)] === true ? literal.slice(0, colon) : literal;
+  return { provider, literal, model, base: `${provider}/${model}` };
 }
 
 export type ModelOptionSource = "verified" | "probe" | "custom";
@@ -88,13 +97,15 @@ export function composeModelOptions(
  * Membership layer for save-chain / save-roles (spec §6.3). Syntax
  * (`parseModelChain`) is the caller's job. Per selector:
  *   (a) built-in provider with a non-empty verified cache → must hit a
- *       cached model id (a trailing `:<thinking-level>` is tolerated via
- *       selectorBase; any other colon tail is part of the id)
+ *       cached model id: the literal id first, then the base with a trailing
+ *       `:<thinking-level>` removed (selectorBase). A real id may end in a
+ *       level name (`glm-4.7:max`), so the literal always gets its chance.
  *   (b) probe-only (cache row, empty models) OR no cache row → syntax only
- *   (c) custom provider → must hit the declaration's model_ids, and the
- *       declaration must still hold a key (a drained pool makes its whole
- *       model vocabulary unusable — the same state a missing key would put a
- *       built-in provider in, so "in the declaration" alone is not enough)
+ *   (c) custom provider → same literal-then-base order against the
+ *       declaration's model_ids, and the declaration must still hold a key
+ *       (a drained pool makes its whole model vocabulary unusable — the same
+ *       state a missing key would put a built-in provider in, so "in the
+ *       declaration" alone is not enough)
  * Returns the first failing selector, or null when every selector passes.
  */
 export function findFailingSelector(
@@ -107,13 +118,15 @@ export function findFailingSelector(
   for (const selector of selectors) {
     const parsed = selectorBase(selector);
     if (parsed === null) continue;
+    const { literal, model } = parsed;
+    const holds = (ids: readonly string[]): boolean => ids.includes(literal) || (model !== literal && ids.includes(model));
     const customDecl = customById.get(parsed.provider);
     if (customDecl) {
-      if (!customDecl.has_keys || !customDecl.model_ids.includes(parsed.model)) return selector;
+      if (!customDecl.has_keys || !holds(customDecl.model_ids)) return selector;
       continue;
     }
     const cache = cacheByProvider.get(parsed.provider);
-    if (cache && cache.models.length > 0 && !cache.models.includes(parsed.model)) {
+    if (cache && cache.models.length > 0 && !holds(cache.models)) {
       return selector;
     }
   }

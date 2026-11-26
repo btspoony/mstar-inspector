@@ -167,6 +167,7 @@ describe("selector membership helpers (spec §6.3)", () => {
   test("selectorBase strips a known thinking level and requires a provider prefix", () => {
     expect(selectorBase("anthropic/claude-sonnet-4-6:high")).toEqual({
       provider: "anthropic",
+      literal: "claude-sonnet-4-6:high",
       model: "claude-sonnet-4-6",
       base: "anthropic/claude-sonnet-4-6",
     });
@@ -176,10 +177,17 @@ describe("selector membership helpers (spec §6.3)", () => {
   test("selectorBase keeps a colon-embedded model id literal", () => {
     expect(selectorBase("ollama-cloud/deepseek-v4.1-flash:1017")).toEqual({
       provider: "ollama-cloud",
+      literal: "deepseek-v4.1-flash:1017",
       model: "deepseek-v4.1-flash:1017",
       base: "ollama-cloud/deepseek-v4.1-flash:1017",
     });
     expect(selectorBase("my-custom/qwen3:32b")?.model).toBe("qwen3:32b");
+    expect(selectorBase("ollama-cloud/deepseek-v4.1-flash:1017:high")).toEqual({
+      provider: "ollama-cloud",
+      literal: "deepseek-v4.1-flash:1017:high",
+      model: "deepseek-v4.1-flash:1017",
+      base: "ollama-cloud/deepseek-v4.1-flash:1017",
+    });
   });
 
   test("dashboard THINKING_LEVELS cannot drift from the runner vocabulary", () => {
@@ -221,8 +229,16 @@ describe("selector membership helpers (spec §6.3)", () => {
     const verified = [{ provider: "ollama-cloud", models: ["deepseek-v4.1-flash:1017"], fetched_at: "now" }];
     expect(findFailingSelector(["ollama-cloud/deepseek-v4.1-flash:1017"], verified, [])).toBeNull();
     expect(findFailingSelector(["ollama-cloud/deepseek-v4.1-flash"], verified, [])).toBe("ollama-cloud/deepseek-v4.1-flash");
+    expect(findFailingSelector(["ollama-cloud/deepseek-v4.1-flash:1017:high"], verified, [])).toBeNull();
     const custom = [{ provider_id: "my-custom", model_ids: ["qwen3:32b"], has_keys: true }];
     expect(findFailingSelector(["my-custom/qwen3:32b"], [], custom)).toBeNull();
+  });
+
+  test("a literal id ending in a thinking level wins over the stripped base", () => {
+    const verified = [{ provider: "openrouter", models: ["glm-4.7:max"], fetched_at: "now" }];
+    expect(findFailingSelector(["openrouter/glm-4.7:max"], verified, [])).toBeNull();
+    const custom = [{ provider_id: "my-custom", model_ids: ["glm-4.7:max"], has_keys: true }];
+    expect(findFailingSelector(["my-custom/glm-4.7:max"], [], custom)).toBeNull();
   });
 
   test("a KEYLESS custom declaration is offered nothing and rejected everywhere — an unknown provider still stays syntax-only", () => {
