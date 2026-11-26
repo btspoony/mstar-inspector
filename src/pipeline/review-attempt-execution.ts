@@ -2753,8 +2753,9 @@ export function internalFailureCheckText(input: {
 }): string {
   const phaseClause = `internal error in phase ${input.phase} (stage ${input.stage})`;
   // The sentence must reflect what actually happened: when the failure-store
-  // insert itself failed, nothing is recorded, and claiming otherwise sends
-  // the operator hunting for a row that does not exist.
+  // insert itself failed, the row is missing but the step's own log already
+  // carries the detail, so the text points there rather than at a row that
+  // does not exist.
   const recordClause = input.recorded
     ? "the detail is recorded with the failure, not published here"
     : "the failure row could not be written — the detail survives only in this step's log";
