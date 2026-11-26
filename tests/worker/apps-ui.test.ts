@@ -746,6 +746,8 @@ describe("a target on a shared bot is visible to the workspace that created it",
       scope?: "owned" | "shared";
       targetInDefault?: boolean;
       targetReviewEnabled?: number;
+      /** False models an App this workspace holds NO relation to (D43). */
+      installedInDefault?: boolean;
     } = {},
   ): void {
     db.raw
@@ -774,6 +776,22 @@ describe("a target on a shared bot is visible to the workspace that created it",
     db.raw
       .prepare("UPDATE review_bots SET scope = ?, shared_at = datetime('now') WHERE id = ?")
       .run(opts.scope ?? "shared", id);
+    // D43: a workspace lists an App because it holds its install state — what a
+    // bind writes. The target below is a repository under that install.
+    if (opts.installedInDefault !== false) {
+      db.raw
+        .prepare(
+          `INSERT OR IGNORE INTO app_installations (github_app_id, workspace_id, created_at)
+           VALUES (?, 'default', datetime('now'))`,
+        )
+        .run(id);
+      db.raw
+        .prepare(
+          `INSERT OR IGNORE INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+           VALUES (?, 'default', 1, ?)`,
+        )
+        .run(id, id);
+    }
     if (opts.targetInDefault !== false) {
       db.raw
         .prepare(
@@ -830,8 +848,19 @@ describe("a target on a shared bot is visible to the workspace that created it",
 
   test("a bot the workspace holds no target on stays invisible", async () => {
     const db = await seededWorld();
-    seedPlatformBot(db, { id: "app-shared-unused", githubAppId: 1098, targetInDefault: false });
-    seedPlatformBot(db, { id: "app-foreign-owned", githubAppId: 1097, scope: "owned", targetInDefault: false });
+    seedPlatformBot(db, {
+      id: "app-shared-unused",
+      githubAppId: 1098,
+      targetInDefault: false,
+      installedInDefault: false,
+    });
+    seedPlatformBot(db, {
+      id: "app-foreign-owned",
+      githubAppId: 1097,
+      scope: "owned",
+      targetInDefault: false,
+      installedInDefault: false,
+    });
 
     const rows = await listAppsOn(db);
     expect(rows.map((row) => row.github_app_id).sort()).toEqual([MALLORY_APP_ID, ADA_APP_ID]);
@@ -1385,6 +1414,7 @@ describe("the install state's read faces (D43, D35)", () => {
         available: true,
         multiplier: 1,
         month_used_rp: 0,
+        monthly_rp: null,
       },
     ]);
   });
@@ -1413,6 +1443,7 @@ describe("the install state's read faces (D43, D35)", () => {
         available: true,
         multiplier: 1,
         month_used_rp: 0,
+        monthly_rp: null,
       },
     ]);
   });
@@ -1437,4 +1468,79 @@ describe("the install state's read faces (D43, D35)", () => {
       db.raw.query("SELECT COUNT(*) AS n FROM app_installations WHERE github_app_id = ?").get(appRow.id),
     ).toEqual({ n: 1 });
   });
+});
+
+describe("F1/F3/F4 — the list reads the install state, the chain reaches every face", () => {
+  const DETAIL = (githubAppId: number) => `/dashboard/default/api/apps/${githubAppId}`;
+
+  test("an owned App with no installation is installed and listed", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const appRow = db.raw
+      .query("SELECT id FROM github_apps WHERE github_app_id = ?")
+      .get(MALLORY_APP_ID) as { id: string };
+    // `createApp` wrote the install state; the physical installation is absent.
+    db.raw.run(`DELETE FROM github_app_installations WHERE app_id = '${appRow.id}'`);
+    db.raw.run(`DELETE FROM review_targets WHERE app_id = '${appRow.id}'`);
+
+    const body = (await (await get("/dashboard/default/api/apps", cookie, makeEnv(db))).json()) as {
+      apps: Array<{ github_app_id: number; owned: boolean; installed: boolean }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === MALLORY_APP_ID)!;
+    expect(row.owned).toBe(true);
+    // D43 cutover: the install state decides, not the target or the installation.
+    expect(row.installed).toBe(true);
+  });
+
+  test("a live target alone does not put an App on the list", async () => {
+    const db = await seededWorld();
+    // A shared App provided by another workspace, which THIS workspace holds a
+    // target on but no install state for: a target is a repository under an
+    // installation, so D43 says only the state puts the App on the list.
+    db.raw.run(
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-provider', 'ws-provider', 'Provider', NULL, datetime('now'));
+       INSERT INTO github_apps
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, scope, shared_at, created_at, updated_at)
+       VALUES ('app-provider', 'provider-app', 1999, 'Provider App', 'enc', 'enc',
+               'hubot', 'active', 'shared', datetime('now'), datetime('now'), datetime('now'));
+       INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-provider', 'ws-provider');
+       INSERT INTO review_bots (id, workspace_id, name, scope, multiplier, created_at, updated_at)
+       VALUES ('app-provider', 'ws-provider', 'Provider App', 'shared', 1, datetime('now'), datetime('now'));
+       INSERT INTO review_targets (id, workspace_id, app_id, name, created_by, created_at, updated_at)
+       VALUES ('target-provider', 'default', 'app-provider', 'acme/widgets', 'hubot', datetime('now'), datetime('now'));`,
+    );
+
+    const rows = (await (await get(
+      "/dashboard/default/api/apps",
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+    )).json()) as { apps: Array<{ github_app_id: number }> };
+    expect(rows.apps.some((app) => app.github_app_id === 1999)).toBe(false);
+    // The target is still there — it is what the install state is an aggregate
+    // OVER, not what decides membership.
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n FROM review_targets WHERE app_id = 'app-provider'").get(),
+    ).toEqual({ n: 1 });
+  });
+
+  test("a member's App detail carries the chain", async () => {
+    const db = await seededWorld();
+    const appRow = db.raw
+      .query("SELECT id FROM github_apps WHERE github_app_id = ?")
+      .get(MALLORY_APP_ID) as { id: string };
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("hubot")}`;
+
+    const body = (await (await get(DETAIL(MALLORY_APP_ID), cookie, makeEnv(db))).json()) as {
+      can_manage: boolean;
+      chain: Array<{ position: number; bot_id: string }>;
+    };
+    expect(body.can_manage).toBe(false);
+    expect(body.chain).toEqual([expect.objectContaining({ position: 1, bot_id: appRow.id })]);
+  });
+
+  // F4's redirect target is pinned end to end in
+  // `tests/worker/shared-installation-binding.test.ts` ("binding needs the
+  // user's own token …"), where the OAuth callback really redirects.
 });

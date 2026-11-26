@@ -52,6 +52,36 @@ const identityPayload = {
   app: IDENTITY_APP,
 };
 
+/** The blocked manager face: this workspace's target on another workspace's bot. */
+function blockedPayload(): SettingsBlockedPayload {
+  return {
+    can_manage: true,
+    blocked: true,
+    blocked_reason: "bot_not_shared",
+    workspace_id: managePayload.workspace_id,
+    target_id: managePayload.target_id,
+    app: {
+      github_app_id: managePayload.app.github_app_id,
+      id: managePayload.app.id,
+      status: managePayload.app.status,
+      created_by: managePayload.app.created_by,
+      review_enabled: managePayload.app.review_enabled,
+      review_trigger_mode: managePayload.app.review_trigger_mode,
+      review_level: managePayload.app.review_level,
+      default_review_level: managePayload.app.default_review_level,
+      scope: "owned",
+      github_name: managePayload.app.github_name,
+      github_slug: managePayload.app.github_slug,
+      github_description: managePayload.app.github_description,
+      github_html_url: managePayload.app.github_html_url,
+      github_avatar_url: managePayload.app.github_avatar_url,
+      github_visibility: managePayload.app.github_visibility,
+    },
+    installation: null,
+    check_gate: managePayload.check_gate,
+  };
+}
+
 const BOOT = { locale: "en" as const, login: "mallory", name: null };
 
 /** One chain row with the fields the panel renders; callers override the ones under test. */
@@ -64,6 +94,7 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
     available: true,
     multiplier: 1,
     month_used_rp: 0,
+    monthly_rp: null,
     ...overrides,
   };
 }
@@ -886,32 +917,6 @@ describe("install entry (static SSR)", () => {
 });
 
 describe("Blocked and pending installations (static SSR)", () => {
-  const blockedPayload = (): SettingsBlockedPayload => ({
-    can_manage: true,
-    blocked: true,
-    blocked_reason: "bot_not_shared",
-    workspace_id: managePayload.workspace_id,
-    target_id: managePayload.target_id,
-    app: {
-      github_app_id: managePayload.app.github_app_id,
-      id: managePayload.app.id,
-      status: managePayload.app.status,
-      created_by: managePayload.app.created_by,
-      review_enabled: managePayload.app.review_enabled,
-      review_trigger_mode: managePayload.app.review_trigger_mode,
-      review_level: managePayload.app.review_level,
-      default_review_level: managePayload.app.default_review_level,
-      scope: "owned",
-      github_name: managePayload.app.github_name,
-      github_slug: managePayload.app.github_slug,
-      github_description: managePayload.app.github_description,
-      github_html_url: managePayload.app.github_html_url,
-      github_avatar_url: managePayload.app.github_avatar_url,
-      github_visibility: managePayload.app.github_visibility,
-    },
-    installation: null,
-    check_gate: managePayload.check_gate,
-  });
 
   const sharedPayload = (): SettingsManagePayload => ({
     ...managePayload,
@@ -1243,9 +1248,27 @@ describe("the bots tab renders the ordered chain read-only (D29, D35)", () => {
   });
 
   test("an empty chain names the next step instead of rendering a blank table", async () => {
-    const markup = renderDetail({ ...managePayload, chain: [] }, "bots");
+    // F3/F4: with an installation bound, an empty chain is the honest "nothing
+    // mounted" answer — not the pending-bind copy, which says no chain can
+    // exist yet.
+    const markup = renderDetail(
+      {
+        ...managePayload,
+        chain: [],
+        installations: [{ installation_id: 1, account_login: "acme", seen_at: new Date().toISOString() }],
+      },
+      "bots",
+    );
     expect(markup).toContain(t("en", "apps.chain.empty"));
+    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
     expect(await chainRows(markup)).toEqual([]);
+  });
+
+  test("with nothing bound the bots tab says the chain appears after a bind", async () => {
+    // F4: the pending copy is selected by the REAL binding state, not `blocked`.
+    const unbound = renderDetail({ ...managePayload, chain: [], installations: [], blocked: false }, "bots");
+    expect(unbound).toContain(t("en", "apps.chain.pendingBind"));
+    expect(unbound).not.toContain(t("en", "apps.chain.empty"));
   });
 
   test("a bot its owner stopped sharing renders as a skipped row", async () => {
@@ -1262,5 +1285,74 @@ describe("the bots tab renders the ordered chain read-only (D29, D35)", () => {
     );
     expect(markup).toContain(`href="${apiBase()}/bots/bot-a"`);
     expect(markup).toContain(t("en", "appDetail.metricMountedBots"));
+  });
+});
+
+describe("F3/F5 — the chain reaches members, blocked managers, and states its ceiling", () => {
+  const chainRows = async (markup: string): Promise<string[][]> =>
+    withMarkup(markup, (container) => {
+      const table = [...container.querySelectorAll("table")].find((node) =>
+        (node.querySelector("thead")?.textContent ?? "").includes(t("en", "apps.chain.columnPosition")),
+      );
+      if (table === undefined) return [];
+      return [...table.querySelectorAll("tbody tr")].map((row) =>
+        [...row.querySelectorAll("td")].map((cell) => (cell.textContent ?? "").trim()),
+      );
+    });
+
+  test("a member's identity-only face renders the read-only chain", async () => {
+    const markup = renderDetail(
+      {
+        ...identityPayload,
+        chain: [chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5 })],
+      },
+    );
+    expect(markup).toContain(t("en", "apps.chain.title"));
+    expect((await chainRows(markup)).map((cells) => cells[0])).toEqual(["1"]);
+  });
+
+  test("a blocked manager keeps the chain and its unavailable row", async () => {
+    const markup = renderDetail(
+      {
+        ...blockedPayload(),
+        chain: [chainRow({ position: 1, bot_id: "bot-a", owned: false, available: false })],
+      } as SettingsBlockedPayload,
+      "bots",
+    );
+    expect(markup).toContain(t("en", "apps.chain.rowUnavailable"));
+    // The blocked face renders the skipped row, never the pending-bind sentence.
+    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
+  });
+
+  test("a blocked manager with no chain at all gets the empty-chain answer", async () => {
+    const markup = renderDetail(
+      {
+        ...blockedPayload(),
+        chain: [],
+        installations: [{ installation_id: 1, account_login: "acme", seen_at: new Date().toISOString() }],
+      } as SettingsBlockedPayload,
+      "bots",
+    );
+    expect(markup).toContain(t("en", "apps.chain.empty"));
+    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
+  });
+
+  test("each row states its real ceiling: owned unlimited, shared cap, shared uncapped", async () => {
+    const markup = renderDetail(
+      {
+        ...managePayload,
+        chain: [
+          chainRow({ position: 1, bot_id: "bot-own", owned: true, month_used_rp: 40, monthly_rp: 500 }),
+          chainRow({ position: 2, bot_id: "bot-capped", owned: false, month_used_rp: 1240, monthly_rp: 2000 }),
+          chainRow({ position: 3, bot_id: "bot-free", owned: false, month_used_rp: 10, monthly_rp: null }),
+        ],
+      },
+      "bots",
+    );
+    const rows = await chainRows(markup);
+
+    expect(rows[0]![4]).toContain(t("en", "bots.monthOwn", { used: 40 }));
+    expect(rows[1]![4]).toContain(t("en", "bots.monthLimit", { used: 1240, limit: 2000 }));
+    expect(rows[2]![4]).toContain(t("en", "bots.monthNoCeiling", { used: 10 }));
   });
 });

@@ -445,3 +445,182 @@ describe("the chain read batches its spend", () => {
     db.raw.close();
   });
 });
+
+describe("F1 — membership is the install state (D43 cutover)", () => {
+  test("an owned App with no physical installation is installed", async () => {
+    const db = createMigratedTestD1();
+    const store = createReviewBotsStore(db);
+    await store.createApp({
+      id: "app-owned",
+      githubAppId: 9500,
+      githubSlug: null,
+      name: "app-owned",
+      privateKeyEnc: "enc",
+      webhookSecretEnc: "enc",
+      createdBy: "acme",
+      workspaceId: OWNER,
+      maxApps: null,
+    });
+
+    // No installation row exists, and the App is still the workspace's install.
+    expect(count(db, "github_app_installations")).toBe(0);
+    expect(await store.listInstalledBotIds(OWNER)).toEqual(["app-owned"]);
+  });
+
+  test("a live target with no install state is NOT installed", async () => {
+    // The reverse direction: a target is a repository under an installation, so
+    // it cannot be the membership authority.
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER);
+    seedApp(db, "app-targeted", { workspaceId: OTHER, scope: "shared" });
+    db.raw.run(
+      `INSERT INTO review_targets (id, workspace_id, app_id, name, created_by, created_at, updated_at)
+       VALUES ('t1', '${OWNER}', 'app-targeted', 'acme/widgets', 'fixture', '${TS}', '${TS}')`,
+    );
+
+    expect(await createReviewBotsStore(db).listInstalledBotIds(OWNER)).toEqual([]);
+  });
+
+  test("a bound installation with no install state is NOT installed", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER);
+    seedApp(db, "app-bound", { workspaceId: OTHER, scope: "shared" });
+    seedInstallation(db, { appId: "app-bound", installationId: 901, bound: OWNER });
+
+    expect(await createReviewBotsStore(db).listInstalledBotIds(OWNER)).toEqual([]);
+  });
+
+  test("a retired workspace and a retired App contribute no membership", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-live", { workspaceId: OWNER });
+    seedApp(db, "app-dead", { workspaceId: OWNER });
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-live', '${OWNER}', '${TS}'), ('app-dead', '${OWNER}', '${TS}');
+       UPDATE github_apps SET deleted_at = '2026-02-01T00:00:00.000Z' WHERE id = 'app-dead';`,
+    );
+
+    expect(await createReviewBotsStore(db).listInstalledBotIds(OWNER)).toEqual(["app-live"]);
+  });
+});
+
+describe("F2 — a revived installation recreates its state and chain", () => {
+  /** A shared App owned elsewhere, installed by CONSUMER and then fully uninstalled. */
+  async function sweptWorld(): Promise<{ db: TestD1; ownerChain: string }> {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, CONSUMER);
+    seedWorkspace(db, OTHER);
+    seedApp(db, "app-shared", { workspaceId: OTHER, scope: "shared" });
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-shared', '${OTHER}', '${TS}'),
+                ('app-shared', '${CONSUMER}', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-shared', '${OTHER}', 1, 'app-shared'),
+                ('app-shared', '${CONSUMER}', 1, 'app-shared');`,
+    );
+    seedInstallation(db, { appId: "app-shared", installationId: 1501, bound: CONSUMER });
+    await createReviewBotsStore(db).markInstallationRemoved("app-shared", 1501);
+    expect(count(db, "app_installations", `WHERE workspace_id = '${CONSUMER}'`)).toBe(0);
+    return { db, ownerChain: "app-shared" };
+  }
+
+  test("the authoritative upsert restores the state and copies the owner's chain in one batch", async () => {
+    const { db, ownerChain } = await sweptWorld();
+
+    await createReviewBotsStore(db).upsertInstallation({
+      appId: "app-shared",
+      installationId: 1501,
+      accountLogin: "acme",
+      authoritative: true,
+    });
+
+    expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
+      { github_app_id: "app-shared", workspace_id: CONSUMER },
+    ]);
+    expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
+      { github_app_id: "app-shared", workspace_id: CONSUMER, position: 1, bot_id: ownerChain },
+    ]);
+    db.raw.close();
+  });
+
+  test("a second authoritative upsert of the live row rewrites nothing", async () => {
+    const { db } = await sweptWorld();
+    const store = createReviewBotsStore(db);
+    const input = { appId: "app-shared", installationId: 1501, accountLogin: "acme", authoritative: true };
+
+    await store.upsertInstallation(input);
+    const afterRevival = { states: states(db), chain: chain(db) };
+    await store.upsertInstallation(input);
+
+    expect({ states: states(db), chain: chain(db) }).toEqual(afterRevival);
+    db.raw.close();
+  });
+
+  test("an INFERRED upsert of a removed row writes no state", async () => {
+    const { db } = await sweptWorld();
+
+    await createReviewBotsStore(db).upsertInstallation({
+      appId: "app-shared",
+      installationId: 1501,
+      accountLogin: "acme",
+      authoritative: false,
+    });
+
+    // An inferred upsert never clears `removed_at`, so the row is not revived and
+    // grants no install state.
+    expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([]);
+    db.raw.close();
+  });
+
+  test("reconcile restores a state GitHub reports live again", async () => {
+    const { db } = await sweptWorld();
+    const store = createReviewBotsStore(db);
+    await Bun.sleep(2);
+    const observedAt = await store.currentTimestamp();
+
+    // A later page: nothing removed any more except the revival candidate.
+    db.raw.run(
+      `UPDATE github_app_installations
+          SET removed_at = '2026-01-01T00:00:00.000Z'
+        WHERE app_id = 'app-shared' AND installation_id = 1501`,
+    );
+    await store.reconcileInstallations("app-shared", [1501], observedAt);
+
+    expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
+      { github_app_id: "app-shared", workspace_id: CONSUMER },
+    ]);
+    expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toHaveLength(1);
+    db.raw.close();
+  });
+
+  test("a revived row for an App the workspace owns never duplicates the state", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-own", { workspaceId: OWNER, scope: "shared" });
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-own', '${OWNER}', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-own', '${OWNER}', 1, 'app-own');`,
+    );
+    seedInstallation(db, {
+      appId: "app-own",
+      installationId: 1601,
+      bound: OWNER,
+      removed: true,
+    });
+
+    await createReviewBotsStore(db).upsertInstallation({
+      appId: "app-own",
+      installationId: 1601,
+      accountLogin: "acme",
+      authoritative: true,
+    });
+
+    expect(states(db)).toEqual([{ github_app_id: "app-own", workspace_id: OWNER }]);
+    expect(chain(db)).toEqual([
+      { github_app_id: "app-own", workspace_id: OWNER, position: 1, bot_id: "app-own" },
+    ]);
+    db.raw.close();
+  });
+});

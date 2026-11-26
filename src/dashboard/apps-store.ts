@@ -448,6 +448,71 @@ function countOf(result: AppsStoreBatchResult): number {
 }
 
 /**
+ * The install state for `(appId, workspaceId)`, written only when the App and
+ * the workspace are live and no state exists yet. `guard` is the writer's own
+ * precondition on the batch: the bind passes `changes() > 0` (only a bind that
+ * actually wrote may install), and the revival path passes the live-installation
+ * existence check. `createApp` passes none — a cap refusal leaves no App row,
+ * so this statement finds nothing to select. `NOT EXISTS` makes a repeat a
+ * fixed point rather than a second row.
+ */
+function installStateInsert(
+  db: AppsStoreD1,
+  appId: string,
+  workspaceId: string,
+  guard: string,
+): AppsStoreStatement {
+  return db
+    .prepare(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+       SELECT g.id, ?2, datetime('now')
+         FROM github_apps g
+        WHERE g.id = ?1 AND g.deleted_at IS NULL${guard}
+          AND EXISTS (SELECT 1 FROM workspaces ws
+                       WHERE ws.id = ?2 AND ws.deleted_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM app_installations a
+                           WHERE a.github_app_id = g.id AND a.workspace_id = ?2)`,
+    )
+    .bind(appId, workspaceId);
+}
+
+/** The revival precondition: the App has a live bound installation for this workspace. */
+const LIVE_INSTALLATION_GUARD = `
+          AND EXISTS (SELECT 1 FROM github_app_installations i
+                       WHERE i.app_id = g.id AND i.bound_workspace_id = ?2
+                         AND i.removed_at IS NULL)`;
+
+/** The bind precondition: the batch's own UPDATE wrote the binding. */
+const BIND_WROTE_GUARD = " AND changes() > 0";
+
+/**
+ * The initial chain of the state the PREVIOUS statement created: a copy of the
+ * App owner's chain on that App, keeping only rows whose bot this workspace may
+ * mount (shared, or its own), positions preserved (D35). `changes()` is that
+ * statement's own count, so the copy happens exactly once — on creation — and a
+ * chain that already exists is never rewritten.
+ */
+function installChainCopy(
+  db: AppsStoreD1,
+  appId: string,
+  workspaceId: string,
+): AppsStoreStatement {
+  return db
+    .prepare(
+      `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+       SELECT oc.github_app_id, ?2, oc.position, oc.bot_id
+         FROM app_install_bots oc
+         JOIN app_workspaces aw ON aw.app_id = oc.github_app_id
+         JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
+        WHERE oc.github_app_id = ?1
+          AND oc.workspace_id = aw.workspace_id
+          AND changes() > 0
+          AND (rb.scope = 'shared' OR rb.workspace_id = ?2)`,
+    )
+    .bind(appId, workspaceId);
+}
+
+/**
  * The install state and its chain, removed when the workspace no longer holds
  * ANY installation of the App and does not own it (D35, ADR § install state):
  * removing one of several installations keeps both, and a reinstall takes a
@@ -823,21 +888,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           .bind(id, input.workspaceId),
         // The owner's install state: an App this workspace created is an App it
         // installs, with zero physical installations (D35, ADR § install
-        // state). `EXISTS app_workspaces` is what a cap refusal leaves absent,
-        // so a refused creation writes no state; `NOT EXISTS` keeps a retry a
-        // fixed point.
-        db
-          .prepare(
-            `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
-             SELECT g.id, ?2, datetime('now')
-               FROM github_apps g
-              WHERE g.id = ?1
-                AND EXISTS (SELECT 1 FROM app_workspaces w
-                             WHERE w.app_id = g.id AND w.workspace_id = ?2)
-                AND NOT EXISTS (SELECT 1 FROM app_installations a
-                                 WHERE a.github_app_id = g.id AND a.workspace_id = ?2)`,
-          )
-          .bind(id, input.workspaceId),
+        // state). A cap refusal leaves the ownership row absent, and this insert
+        // selects through it, so nothing is written for a refused creation.
+        installStateInsert(
+          db,
+          id,
+          input.workspaceId,
+          " AND EXISTS (SELECT 1 FROM app_workspaces w WHERE w.app_id = g.id AND w.workspace_id = ?2)",
+        ),
         // …and its first chain row, naming the bot this batch created — the
         // same id. The App's chain is never empty at creation, so a delivery
         // resolves a bot from the first moment (D35).
@@ -847,6 +905,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
              SELECT a.github_app_id, a.workspace_id, 1, a.github_app_id
                FROM app_installations a
               WHERE a.github_app_id = ?1 AND a.workspace_id = ?2
+                AND changes() > 0
                 AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
                                  WHERE ib.github_app_id = a.github_app_id
                                    AND ib.workspace_id = a.workspace_id)`,
@@ -1104,10 +1163,34 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
     async upsertInstallation(input: UpsertInstallationInput): Promise<void> {
       const sql = input.authoritative ? UPSERT_INSTALLATION_SQL.authoritative : UPSERT_INSTALLATION_SQL.inferred;
-      await db
+      const upsert = db
         .prepare(sql)
-        .bind(crypto.randomUUID(), input.appId, input.installationId, input.accountLogin ?? null)
-        .run();
+        .bind(crypto.randomUUID(), input.appId, input.installationId, input.accountLogin ?? null);
+      // Only the AUTHORITATIVE upsert clears `removed_at`, so only it can revive
+      // a swept install state. The bound workspace is the one the bind proved;
+      // an unbound row has no workspace and gives none a state (0104).
+      const bound = input.authoritative
+        ? await db
+            .prepare(
+              `SELECT bound_workspace_id AS workspace_id FROM github_app_installations
+                WHERE app_id = ? AND installation_id = ? AND removed_at IS NOT NULL
+                  AND bound_workspace_id IS NOT NULL`,
+            )
+            .bind(input.appId, input.installationId)
+            .first<{ workspace_id: string }>()
+        : null;
+      if (bound === null) {
+        await upsert.run();
+        return;
+      }
+      // The same batch restores both halves of the aggregate the sweep removed:
+      // the state (guarded on a live installation, so it is idempotent) and a
+      // fresh copy of the App owner's chain, read by its own insert's changes().
+      await db.batch([
+        upsert,
+        installStateInsert(db, input.appId, bound.workspace_id, LIVE_INSTALLATION_GUARD),
+        installChainCopy(db, input.appId, bound.workspace_id),
+      ]);
     },
 
     async listInstallations(appId: string): Promise<AppInstallationRow[]> {
@@ -1175,39 +1258,12 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           .bind(appId, installationId, workspaceId),
         // The workspace's install state, written in the same batch as the
         // ownership proof: this bind is its first installation of the App. A
-        // refused bind (changes() = 0) writes none, and a later bind by a
-        // workspace that already holds the state writes none either.
-        db
-          .prepare(
-            `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
-             SELECT g.id, ?2, datetime('now')
-               FROM github_apps g
-              WHERE g.id = ?1 AND changes() > 0
-                AND g.deleted_at IS NULL
-                AND EXISTS (SELECT 1 FROM workspaces ws
-                             WHERE ws.id = ?2 AND ws.deleted_at IS NULL)
-                AND NOT EXISTS (SELECT 1 FROM app_installations a
-                                 WHERE a.github_app_id = g.id AND a.workspace_id = ?2)`,
-          )
-          .bind(appId, workspaceId),
+        // refused bind (an UPDATE that matched nothing) writes none, and a later
+        // bind by a workspace that already holds the state writes none either.
+        installStateInsert(db, appId, workspaceId, BIND_WROTE_GUARD),
         // …and its chain: the App owner's chain on this App, keeping only rows
-        // whose bot this workspace may mount (shared, or its own), positions
-        // preserved (D35). `changes()` is the state insert's own count, so the
-        // copy happens exactly once — when this batch created the state — and a
-        // chain that already exists is never rewritten.
-        db
-          .prepare(
-            `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
-             SELECT oc.github_app_id, ?2, oc.position, oc.bot_id
-               FROM app_install_bots oc
-               JOIN app_workspaces aw ON aw.app_id = oc.github_app_id
-               JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
-              WHERE oc.github_app_id = ?1
-                AND oc.workspace_id = aw.workspace_id
-                AND changes() > 0
-                AND (rb.scope = 'shared' OR rb.workspace_id = ?2)`,
-          )
-          .bind(appId, workspaceId),
+        // whose bot this workspace may mount, positions preserved (D35).
+        installChainCopy(db, appId, workspaceId),
       ]);
       if (res!.meta.changes > 0) return "bound";
       const row = await db
@@ -1261,27 +1317,22 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * F1/D43 (install-state-chain owns the `app_installations` cutover): the
-     * installed set derived from relations that EXIST today — a live
-     * `review_targets.app_id` row for this workspace, or (for the workspace's
-     * own App) a `github_app_installations` row bound to it. An owned App with
-     * neither relation is NOT installed; it belongs to `created`.
+     * D43 (cutover DONE here): the installed set IS `app_installations` — one
+     * row per workspace's install of one App, written by `createApp`, the first
+     * bind, the revival path and the backfill. Targets and physical
+     * installations no longer decide membership: a target belongs to an
+     * installation, never the other way round. Joined to the live App, so a
+     * retired App contributes nothing.
      */
     async listInstalledBotIds(workspaceId: string): Promise<string[]> {
       const res = await db
         .prepare(
-          `SELECT DISTINCT t.app_id AS bot_id
-             FROM review_targets t
-             JOIN github_apps g ON g.id = t.app_id AND g.deleted_at IS NULL
-            WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL
-            UNION
-           SELECT DISTINCT i.app_id AS bot_id
-             FROM github_app_installations i
-             JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
-            WHERE i.removed_at IS NULL AND i.bound_workspace_id = ?1
-              AND (g.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM app_workspaces w
-                               WHERE w.app_id = g.id AND w.workspace_id = ?1))`,
+          `SELECT s.github_app_id AS bot_id
+             FROM app_installations s
+             JOIN github_apps g ON g.id = s.github_app_id AND g.deleted_at IS NULL
+             JOIN workspaces ws ON ws.id = s.workspace_id AND ws.deleted_at IS NULL
+            WHERE s.workspace_id = ?1
+            ORDER BY s.github_app_id`,
         )
         .bind(workspaceId)
         .all<{ bot_id: string }>();
@@ -1508,6 +1559,25 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       observedAt: string,
     ): Promise<void> {
       const snapshot = JSON.stringify({ ids: liveInstallationIds, observedAt });
+      // Rows this pass will clear: a previously removed installation GitHub
+      // now reports live again. Each bound workspace among them lost its state
+      // to the sweep, so each gets it back with a fresh owner-chain copy — in the
+      // SAME batch, after the clear and before the sweep.
+      const revived = await db
+        .prepare(
+          `WITH snapshot(body) AS (SELECT ?)
+           SELECT DISTINCT bound_workspace_id AS workspace_id
+             FROM github_app_installations
+            WHERE app_id = ?2
+              AND removed_at IS NOT NULL
+              AND removed_at < (SELECT json_extract(body, '$.observedAt') FROM snapshot)
+              AND bound_workspace_id IS NOT NULL
+              AND installation_id IN (
+                SELECT value FROM json_each((SELECT body FROM snapshot), '$.ids')
+              )`,
+        )
+        .bind(snapshot, appId)
+        .all<{ workspace_id: string }>();
       await db.batch([
         db
           .prepare(
@@ -1533,6 +1603,10 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                )`,
           )
           .bind(snapshot, appId),
+        ...revived.results.flatMap((row) => [
+          installStateInsert(db, appId, row.workspace_id, LIVE_INSTALLATION_GUARD),
+          installChainCopy(db, appId, row.workspace_id),
+        ]),
         ...installStateSweep(db, appId),
       ]);
     },

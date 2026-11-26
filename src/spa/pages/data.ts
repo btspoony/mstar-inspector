@@ -186,7 +186,8 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     typeof value.can_manage === "boolean" &&
     isBotScope(value.scope) &&
     typeof value.multiplier === "number" &&
-    typeof value.month_used_rp === "number"
+    typeof value.month_used_rp === "number" &&
+    (value.monthly_rp === null || typeof value.monthly_rp === "number")
   );
 }
 
@@ -561,10 +562,20 @@ export type AppChainEntry = {
   available: boolean;
   multiplier: number;
   month_used_rp: number;
+  /** The bot's own monthly cap; `null` = no cap of its own. */
+  monthly_rp: number | null;
 };
 
-/** The App faces that carry the chain. Absent = not served on that face. */
-export type AppChain = { chain?: AppChainEntry[] };
+/**
+ * The install-state slice every App face carries: the workspace's own live
+ * installations of this App and its ordered chain. `installations` is how the
+ * page tells "nothing is bound yet, so no chain can exist" from "a chain exists
+ * and some of its rows are unavailable" — `blocked` says neither.
+ */
+export type AppChain = {
+  chain?: AppChainEntry[];
+  installations?: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+};
 
 function isAppChainEntry(value: unknown): value is AppChainEntry {
   return (
@@ -578,7 +589,8 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.owned === "boolean" &&
     typeof value.available === "boolean" &&
     typeof value.multiplier === "number" &&
-    typeof value.month_used_rp === "number"
+    typeof value.month_used_rp === "number" &&
+    (value.monthly_rp === null || typeof value.monthly_rp === "number")
   );
 }
 

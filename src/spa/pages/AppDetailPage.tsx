@@ -372,7 +372,13 @@ export function AppChainSection({
       align: "right",
       cell: (row) => (
         <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
-          {t(locale, "bots.monthNoCeiling", { used: row.month_used_rp })}
+          {/* F5: an owned bot pays this workspace's own keys, so it has no
+              ceiling; a shared bot with a cap states it; without one, none. */}
+          {row.owned
+            ? t(locale, "bots.monthOwn", { used: row.month_used_rp })
+            : row.monthly_rp === null
+              ? t(locale, "bots.monthNoCeiling", { used: row.month_used_rp })
+              : t(locale, "bots.monthLimit", { used: row.month_used_rp, limit: row.monthly_rp })}
         </span>
       ),
     },
@@ -611,6 +617,8 @@ export function AppDetailView({
         <TargetHeader locale={locale} appId={appId} payload={payload} />
         {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
         <SettingsView locale={locale} payload={payload} />
+        {/* F3: the chain is what the App mounts, readable by every member. */}
+        <AppChainSection locale={locale} chain={payload.chain ?? []} />
       </div>
     );
   }
@@ -674,10 +682,14 @@ export function AppDetailView({
         </TabsContent>
         <TabsContent value="bots">
           <div className="flex flex-col">
-            {bot === null ? (
+            {/* F4: the copy follows the REAL binding state, not `blocked`. No
+                installation this workspace bound means the chain cannot exist
+                yet; once something is bound, an empty chain is the honest
+                "nothing mounted" answer and unavailable rows render skipped. */}
+            {(payload.chain ?? []).length === 0 && (payload.installations ?? []).length === 0 ? (
               <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.pendingBind")}</p>
             ) : (
-              <AppChainSection locale={locale} chain={bot.chain ?? []} />
+              <AppChainSection locale={locale} chain={payload.chain ?? []} />
             )}
           </div>
         </TabsContent>
