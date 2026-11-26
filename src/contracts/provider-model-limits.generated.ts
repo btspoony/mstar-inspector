@@ -3,13 +3,13 @@
  * provider catalog. DO NOT EDIT BY HAND — regenerate with
  * `bun run scripts/generate-provider-catalog.ts`.
  *
- * Source: `scripts/provider-catalog/inputs/models.dev-2026-11-25.json` (fetched
- * 2026-11-25 from https://models.dev/api.json; each model carries
+ * Source: `scripts/provider-catalog/inputs/models.dev-2026-11-26.json` (fetched
+ * 2026-11-26 from https://models.dev/api.json; each model carries
  * `limit: { context, output }`). Only providers and model ids that the
  * generated provider catalog lists are carried here — the table exists to fill
  * an operator's blank size fields, not to mirror the whole directory.
  *
- * Coverage: 326 of 334 catalog providers, 9893 model entries. The omitted
+ * Coverage: 326 of 334 catalog providers, 9751 model entries. The omitted
  * 8 providers carry no models.dev model row at all (their
  * vocabulary comes from the vendored omp provider snapshot, or the row is
  * local-only metadata), so the table states no number for them instead of
@@ -24,7 +24,7 @@
 export type ModelLimit = { contextWindow: number; maxTokens: number };
 
 /** The snapshot date the table was generated from (shown as the value's source). */
-export const MODEL_LIMITS_SNAPSHOT = "2026-11-25";
+export const MODEL_LIMITS_SNAPSHOT = "2026-11-26";
 
 /** provider id → model id → sizes. */
 export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, ModelLimit>>>> = Object.freeze({
@@ -573,10 +573,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
-    "claude-mythos-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
     "claude-opus-4-5": {
       "contextWindow": 200000,
       "maxTokens": 64000
@@ -621,10 +617,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 256000,
       "maxTokens": 256000
     },
-    "codex-mini": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
     "cohere-command-a": {
       "contextWindow": 131072,
       "maxTokens": 8192
@@ -660,6 +652,34 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "deepseek-v4.1-flash": {
       "contextWindow": 1000000,
       "maxTokens": 128000
+    },
+    "fw-deepseek-v4.1-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "fw-glm-5.3": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "fw-glm-5.3-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "fw-kimi-k3": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "fw-kimi-k3.1-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "fw-nemotron-3-ultra-nvfp4": {
+      "contextWindow": 262144,
+      "maxTokens": 128000
+    },
+    "fw-nemotron-lightning-3.5-30b-a3b": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
     },
     "gpt-3.5-turbo-0125": {
       "contextWindow": 16384,
@@ -810,16 +830,20 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 128000
     },
     "gpt-chat-latest": {
-      "contextWindow": 400000,
+      "contextWindow": 128000,
       "maxTokens": 128000
+    },
+    "gpt-oss-120b": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
     },
     "grok-4-1-fast-non-reasoning": {
       "contextWindow": 128000,
-      "maxTokens": 8192
+      "maxTokens": 128000
     },
     "grok-4-1-fast-reasoning": {
       "contextWindow": 128000,
-      "maxTokens": 8192
+      "maxTokens": 128000
     },
     "grok-4-20-non-reasoning": {
       "contextWindow": 262000,
@@ -849,9 +873,13 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262144,
       "maxTokens": 262144
     },
+    "kimi-k3.1-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 262144
+    },
     "llama-3.3-70b-instruct": {
       "contextWindow": 128000,
-      "maxTokens": 32768
+      "maxTokens": 8192
     },
     "llama-4-maverick-17b-128e-instruct-fp8": {
       "contextWindow": 1000000,
@@ -877,45 +905,25 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 200000,
       "maxTokens": 16384
     },
-    "o1": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o3": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o3-mini": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o4-mini": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
     "phi-4": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
+      "contextWindow": 16384,
+      "maxTokens": 16384
     },
     "phi-4-mini": {
-      "contextWindow": 128000,
+      "contextWindow": 131072,
       "maxTokens": 4096
     },
     "phi-4-mini-reasoning": {
       "contextWindow": 128000,
-      "maxTokens": 4096
+      "maxTokens": 128000
     },
     "phi-4-multimodal": {
-      "contextWindow": 128000,
+      "contextWindow": 131072,
       "maxTokens": 4096
     },
     "phi-4-reasoning": {
-      "contextWindow": 32000,
-      "maxTokens": 4096
-    },
-    "phi-4-reasoning-plus": {
-      "contextWindow": 32000,
-      "maxTokens": 4096
+      "contextWindow": 32768,
+      "maxTokens": 32768
     },
     "text-embedding-3-large": {
       "contextWindow": 8192,
@@ -1371,7 +1379,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "google/gemma-3-27b-it": {
       "contextWindow": 131072,
-      "maxTokens": 16384
+      "maxTokens": 131072
     },
     "google/gemma-3-4b-it": {
       "contextWindow": 131072,
@@ -2107,7 +2115,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.5-397b-a17b": {
       "contextWindow": 262144,
-      "maxTokens": 81920
+      "maxTokens": 65536
     },
     "qwen/qwen3.5-9b": {
       "contextWindow": 262144,
@@ -2159,7 +2167,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.8-27b": {
       "contextWindow": 1024000,
-      "maxTokens": 131072
+      "maxTokens": 32768
     },
     "qwen/qwen3.8-flash": {
       "contextWindow": 1000000,
@@ -2309,17 +2317,9 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 524288,
       "maxTokens": 262144
     },
-    "unbiased/pareto-26.10": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "unbiased/pareto-26.10-preview": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "unbiased/pareto-26.9": {
-      "contextWindow": 262144,
-      "maxTokens": 131072
+    "tngtech/deepseek-r1t2-chimera": {
+      "contextWindow": 131072,
+      "maxTokens": 32768
     },
     "undi95/remm-slerp-l2-13b": {
       "contextWindow": 6144,
@@ -2475,7 +2475,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "~deepseek/deepseek-pro-latest": {
       "contextWindow": 1048576,
-      "maxTokens": 393216
+      "maxTokens": 943718
     },
     "~deepseek/deepseek-v4-flash-latest": {
       "contextWindow": 1048576,
@@ -2512,10 +2512,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "~openai/gpt-terra-latest": {
       "contextWindow": 1050000,
       "maxTokens": 128000
-    },
-    "~unbiased/pareto-latest": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
     },
     "~x-ai/grok-latest": {
       "contextWindow": 500000,
@@ -2921,7 +2917,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "google/gemma-3-27b-it": {
       "contextWindow": 131072,
-      "maxTokens": 16384
+      "maxTokens": 117964
     },
     "google/gemma-3-4b-it": {
       "contextWindow": 131072,
@@ -2954,10 +2950,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "ibm-granite/granite-4.2-8b": {
       "contextWindow": 131072,
       "maxTokens": 117964
-    },
-    "inception/mercury-3": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
     },
     "inclusionai/ling-3.0-flash": {
       "contextWindow": 262144,
@@ -3745,7 +3737,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "particle/particle-1": {
       "contextWindow": 1048576,
-      "maxTokens": 131072
+      "maxTokens": 1048576
     },
     "perceptron/perceptron-mk1": {
       "contextWindow": 32768,
@@ -3881,7 +3873,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.5-397b-a17b": {
       "contextWindow": 262144,
-      "maxTokens": 81920
+      "maxTokens": 235929
     },
     "qwen/qwen3.5-9b": {
       "contextWindow": 262144,
@@ -3941,7 +3933,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.8-27b": {
       "contextWindow": 262144,
-      "maxTokens": 131072
+      "maxTokens": 235929
     },
     "qwen/qwen3.8-flash": {
       "contextWindow": 1000000,
@@ -3981,7 +3973,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "reflection/beam-1.0-501b-a23b": {
       "contextWindow": 1048576,
-      "maxTokens": 131072
+      "maxTokens": 943718
     },
     "reflection/beam-free": {
       "contextWindow": 1048576,
@@ -4127,17 +4119,9 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 524288,
       "maxTokens": 262144
     },
-    "unbiased/pareto-26.10": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "unbiased/pareto-26.10-preview": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "unbiased/pareto-26.9": {
-      "contextWindow": 262144,
-      "maxTokens": 131072
+    "tngtech/deepseek-r1t2-chimera": {
+      "contextWindow": 131072,
+      "maxTokens": 32768
     },
     "undi95/remm-slerp-l2-13b": {
       "contextWindow": 6144,
@@ -4229,7 +4213,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "z-ai/glm-4.5-air": {
       "contextWindow": 131072,
-      "maxTokens": 117964
+      "maxTokens": 98304
     },
     "z-ai/glm-4.5v": {
       "contextWindow": 65536,
@@ -4284,8 +4268,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 262144
     },
     "z-ai/glm-5.3-flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 943718
+      "contextWindow": 1048575,
+      "maxTokens": 943717
     },
     "z-ai/glm-5.3-flashx": {
       "contextWindow": 1048576,
@@ -4325,7 +4309,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "~deepseek/deepseek-pro-latest": {
       "contextWindow": 1048576,
-      "maxTokens": 393216
+      "maxTokens": 943718
     },
     "~deepseek/deepseek-v4-flash-latest": {
       "contextWindow": 1048576,
@@ -4362,10 +4346,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "~openai/gpt-terra-latest": {
       "contextWindow": 1050000,
       "maxTokens": 128000
-    },
-    "~unbiased/pareto-latest": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
     },
     "~x-ai/grok-latest": {
       "contextWindow": 500000,
@@ -4479,6 +4459,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     }
   },
   "zai": {
+    "glm-4-32b-0414-128k": {
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
     "glm-4.5": {
       "contextWindow": 131072,
       "maxTokens": 98304
@@ -5197,6 +5181,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262000,
       "maxTokens": 66000
     },
+    "seaglass-alpha-free": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
     "space-bunny-free": {
       "contextWindow": 1048576,
       "maxTokens": 524288
@@ -5233,7 +5221,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "alibaba/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "alibaba/qwen3.8-max": {
       "contextWindow": 1000000,
@@ -5399,6 +5387,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 1048576
     },
+    "moonshotai/kimi-k3.1-pro-highspeed": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
     "openai/gpt-4.1": {
       "contextWindow": 1047576,
       "maxTokens": 32768
@@ -5510,6 +5502,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "openai/o4-mini": {
       "contextWindow": 200000,
       "maxTokens": 100000
+    },
+    "particle/particle-1": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
     },
     "reflection-ai/beam-1.0-501b-a23b": {
       "contextWindow": 262144,
@@ -5673,21 +5669,9 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 131000,
       "maxTokens": 16384
     },
-    "@cf/qwen/qwen3-30b-a3b-fp8": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
     "@cf/qwen/qwen2.5-coder-32b-instruct": {
       "contextWindow": 32768,
       "maxTokens": 32768
-    },
-    "@cf/deepseek-ai/deepseek-v4-flash-0731": {
-      "contextWindow": 1048576,
-      "maxTokens": 1048576
-    },
-    "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b": {
-      "contextWindow": 80000,
-      "maxTokens": 80000
     },
     "@cf/google/gemma-4-26b-a4b-it": {
       "contextWindow": 256000,
@@ -6197,7 +6181,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen3.8-flash": {
       "contextWindow": 1000000,
@@ -6805,7 +6789,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "doubao-seed-2.0-lite": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "doubao-seed-2.1-pro": {
       "contextWindow": 1024000,
@@ -7383,7 +7367,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "grok-4-fast-non-reasoning": {
       "contextWindow": 2000000,
-      "maxTokens": 2000000
+      "maxTokens": 30000
     },
     "grok-4.3": {
       "contextWindow": 1000000,
@@ -7575,7 +7559,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3.7-plus": {
       "contextWindow": 991000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen3.8-2.4t-a95b": {
       "contextWindow": 262000,
@@ -7646,10 +7630,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "alibaba/qwen-plus": {
       "contextWindow": 131000,
       "maxTokens": 16384
-    },
-    "alibaba/qwen3-coder-480b-a35b-instruct": {
-      "contextWindow": 262000,
-      "maxTokens": 65536
     },
     "alibaba/qwen3-next-80b-a3b-instruct": {
       "contextWindow": 129024,
@@ -7916,10 +7896,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 102400
     },
     "mistralai/mistral-large-2407": {
-      "contextWindow": 131072,
-      "maxTokens": 104857
-    },
-    "mistralai/mistral-medium-3": {
       "contextWindow": 131072,
       "maxTokens": 104857
     },
@@ -8460,8 +8436,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 512
     },
     "qwen-vl-ocr": {
-      "contextWindow": 34096,
-      "maxTokens": 4096
+      "contextWindow": 38192,
+      "maxTokens": 8192
     },
     "qwen3-asr-flash": {
       "contextWindow": 53248,
@@ -8787,7 +8763,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen3.8-flash": {
       "contextWindow": 1000000,
@@ -8853,7 +8829,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     }
   },
   "alibaba-coding-plan-cn": {
@@ -8883,7 +8859,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     }
   },
   "alibaba-token-plan": {
@@ -9143,10 +9119,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 300000,
       "maxTokens": 10000
     },
-    "apac.anthropic.claude-sonnet-4-20250514-v1:0": {
-      "contextWindow": 200000,
-      "maxTokens": 64000
-    },
     "au.anthropic.claude-haiku-4-5-20251001-v1:0": {
       "contextWindow": 200000,
       "maxTokens": 64000
@@ -9195,6 +9167,14 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 300000,
       "maxTokens": 10000
     },
+    "ca.anthropic.claude-haiku-5-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "ca.anthropic.claude-sonnet-5-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
     "deepseek.r1-v1:0": {
       "contextWindow": 128000,
       "maxTokens": 32768
@@ -9222,10 +9202,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "eu.amazon.nova-pro-v1:0": {
       "contextWindow": 300000,
       "maxTokens": 10000
-    },
-    "eu.anthropic.claude-fable-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
     },
     "eu.anthropic.claude-haiku-4-5-20251001-v1:0": {
       "contextWindow": 200000,
@@ -9258,10 +9234,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "eu.anthropic.claude-opus-5-5": {
       "contextWindow": 1000000,
       "maxTokens": 128000
-    },
-    "eu.anthropic.claude-sonnet-4-20250514-v1:0": {
-      "contextWindow": 200000,
-      "maxTokens": 64000
     },
     "eu.anthropic.claude-sonnet-4-5-20250929-v1:0": {
       "contextWindow": 200000,
@@ -9330,10 +9302,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "global.anthropic.claude-opus-5-5": {
       "contextWindow": 1000000,
       "maxTokens": 128000
-    },
-    "global.anthropic.claude-sonnet-4-20250514-v1:0": {
-      "contextWindow": 200000,
-      "maxTokens": 64000
     },
     "global.anthropic.claude-sonnet-4-5-20250929-v1:0": {
       "contextWindow": 200000,
@@ -9447,6 +9415,14 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
+    "in.moonshotai.kimi-k3": {
+      "contextWindow": 1048576,
+      "maxTokens": 128000
+    },
+    "in.moonshotai.kimi-k3.1": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
     "in.openai.gpt-5.6-luna": {
       "contextWindow": 1050000,
       "maxTokens": 128000
@@ -9475,10 +9451,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
-    "jp.anthropic.claude-opus-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
     "jp.anthropic.claude-opus-5-5": {
       "contextWindow": 1000000,
       "maxTokens": 128000
@@ -9488,10 +9460,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 64000
     },
     "jp.anthropic.claude-sonnet-4-6": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "jp.anthropic.claude-sonnet-5": {
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
@@ -9588,11 +9556,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 131072
     },
     "openai.gpt-5.4": {
-      "contextWindow": 1000000,
+      "contextWindow": 1050000,
       "maxTokens": 128000
     },
     "openai.gpt-5.5": {
-      "contextWindow": 1000000,
+      "contextWindow": 1050000,
       "maxTokens": 128000
     },
     "openai.gpt-5.6-luna": {
@@ -9707,10 +9675,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 128000,
       "maxTokens": 10000
     },
-    "us.amazon.nova-premier-v1:0": {
-      "contextWindow": 1000000,
-      "maxTokens": 10000
-    },
     "us.amazon.nova-pro-v1:0": {
       "contextWindow": 300000,
       "maxTokens": 10000
@@ -9762,10 +9726,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "us.anthropic.claude-opus-5-5": {
       "contextWindow": 1000000,
       "maxTokens": 128000
-    },
-    "us.anthropic.claude-sonnet-4-20250514-v1:0": {
-      "contextWindow": 200000,
-      "maxTokens": 64000
     },
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0": {
       "contextWindow": 200000,
@@ -9914,7 +9874,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
   },
   "ambient": {
     "ambient/large": {
-      "contextWindow": 202752,
+      "contextWindow": 1048576,
       "maxTokens": 202752
     },
     "ambient/small": {
@@ -9924,6 +9884,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "deepseek/deepseek-v4.1-flash-1017": {
       "contextWindow": 1048576,
       "maxTokens": 384000
+    },
+    "google/gemma-4-26b-a4b-it": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
     },
     "minimax/minimax-m3": {
       "contextWindow": 131072,
@@ -10337,10 +10301,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
-    "claude-mythos-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
     "claude-opus-4-5": {
       "contextWindow": 200000,
       "maxTokens": 64000
@@ -10385,10 +10345,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 256000,
       "maxTokens": 256000
     },
-    "codex-mini": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
     "cohere-command-a": {
       "contextWindow": 131072,
       "maxTokens": 8192
@@ -10424,6 +10380,34 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "deepseek-v4.1-flash": {
       "contextWindow": 1000000,
       "maxTokens": 128000
+    },
+    "fw-deepseek-v4.1-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "fw-glm-5.3": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "fw-glm-5.3-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "fw-kimi-k3": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "fw-kimi-k3.1-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "fw-nemotron-3-ultra-nvfp4": {
+      "contextWindow": 262144,
+      "maxTokens": 128000
+    },
+    "fw-nemotron-lightning-3.5-30b-a3b": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
     },
     "gpt-3.5-turbo-0125": {
       "contextWindow": 16384,
@@ -10574,16 +10558,20 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 128000
     },
     "gpt-chat-latest": {
-      "contextWindow": 400000,
+      "contextWindow": 128000,
       "maxTokens": 128000
+    },
+    "gpt-oss-120b": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
     },
     "grok-4-1-fast-non-reasoning": {
       "contextWindow": 128000,
-      "maxTokens": 8192
+      "maxTokens": 128000
     },
     "grok-4-1-fast-reasoning": {
       "contextWindow": 128000,
-      "maxTokens": 8192
+      "maxTokens": 128000
     },
     "grok-4-20-non-reasoning": {
       "contextWindow": 262000,
@@ -10613,9 +10601,13 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262144,
       "maxTokens": 262144
     },
+    "kimi-k3.1-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 262144
+    },
     "llama-3.3-70b-instruct": {
       "contextWindow": 128000,
-      "maxTokens": 32768
+      "maxTokens": 8192
     },
     "llama-4-maverick-17b-128e-instruct-fp8": {
       "contextWindow": 1000000,
@@ -10641,45 +10633,25 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 200000,
       "maxTokens": 16384
     },
-    "o1": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o3": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o3-mini": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o4-mini": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
     "phi-4": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
+      "contextWindow": 16384,
+      "maxTokens": 16384
     },
     "phi-4-mini": {
-      "contextWindow": 128000,
+      "contextWindow": 131072,
       "maxTokens": 4096
     },
     "phi-4-mini-reasoning": {
       "contextWindow": 128000,
-      "maxTokens": 4096
+      "maxTokens": 128000
     },
     "phi-4-multimodal": {
-      "contextWindow": 128000,
+      "contextWindow": 131072,
       "maxTokens": 4096
     },
     "phi-4-reasoning": {
-      "contextWindow": 32000,
-      "maxTokens": 4096
-    },
-    "phi-4-reasoning-plus": {
-      "contextWindow": 32000,
-      "maxTokens": 4096
+      "contextWindow": 32768,
+      "maxTokens": 32768
     },
     "text-embedding-3-large": {
       "contextWindow": 8192,
@@ -11433,7 +11405,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "cline-pass/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "cline-pass/qwen3.8-max": {
       "contextWindow": 1000000,
@@ -11780,6 +11752,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 131072
     },
     "glm-5.3-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "glm-5.3-flashx-legal": {
       "contextWindow": 1000000,
       "maxTokens": 131072
     },
@@ -12189,7 +12165,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen3.8-2.4t-a95b": {
       "contextWindow": 262144,
@@ -13859,1561 +13835,1033 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     }
   },
   "edenai": {
-    "amazon/amazon.nova-lite-v1:0": {
-      "contextWindow": 300000,
-      "maxTokens": 10000
-    },
-    "amazon/amazon.nova-lite-v1:0@us": {
-      "contextWindow": 300000,
-      "maxTokens": 10000
-    },
-    "amazon/amazon.nova-micro-v1:0": {
-      "contextWindow": 128000,
-      "maxTokens": 10000
-    },
-    "amazon/amazon.nova-micro-v1:0@us": {
-      "contextWindow": 128000,
-      "maxTokens": 10000
-    },
-    "amazon/amazon.nova-pro-v1:0": {
-      "contextWindow": 300000,
-      "maxTokens": 10000
-    },
-    "amazon/amazon.nova-pro-v1:0@us": {
-      "contextWindow": 300000,
-      "maxTokens": 10000
-    },
-    "amazon/google.gemma-3-12b-it": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "amazon/google.gemma-3-12b-it@us": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "amazon/google.gemma-3-27b-it": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "amazon/google.gemma-3-27b-it@us": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "amazon/google.gemma-3-4b-it": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "amazon/google.gemma-3-4b-it@us": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "amazon/mistral.pixtral-large-2502-v1:0": {
-      "contextWindow": 128000,
-      "maxTokens": 8192
-    },
-    "amazon/mistral.pixtral-large-2502-v1:0@us": {
-      "contextWindow": 128000,
-      "maxTokens": 8192
-    },
-    "amazon/mistral.voxtral-mini-3b-2507": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
-    "amazon/mistral.voxtral-mini-3b-2507@us": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
-    "amazon/mistral.voxtral-small-24b-2507": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
-    "amazon/mistral.voxtral-small-24b-2507@us": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
-    "amazon/moonshot.kimi-k2-thinking": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "amazon/moonshotai.kimi-k2.5": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "amazon/openai.gpt-oss-safeguard-20b": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "amazon/openai.gpt-oss-safeguard-20b@us": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "amazon/qwen.qwen3-coder-next": {
-      "contextWindow": 262144,
-      "maxTokens": 65536
-    },
-    "amazon/writer.palmyra-vision-7b": {
-      "contextWindow": 4096,
-      "maxTokens": 4096
-    },
-    "amazon/zai.glm-4.7-flash": {
-      "contextWindow": 203000,
-      "maxTokens": 131072
-    },
-    "amazon/zai.glm-4.7-flash@us": {
-      "contextWindow": 203000,
-      "maxTokens": 131072
-    },
-    "anthropic/claude-fable-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-fable-5-1": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-fable-5-2": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-fable-latest": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-haiku-5-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-haiku-latest": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-opus-4-5": {
-      "contextWindow": 200000,
-      "maxTokens": 64000
-    },
-    "anthropic/claude-opus-4-5-20251101": {
-      "contextWindow": 200000,
-      "maxTokens": 64000
-    },
-    "anthropic/claude-opus-4-6": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-opus-4-7": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-opus-4-8": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-opus-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-opus-5-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-opus-latest": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-sonnet-4-6": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-sonnet-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-sonnet-5-5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "anthropic/claude-sonnet-latest": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "arkanecloud/Qwen/Qwen3-235B-A22B-Instruct-2507": {
-      "contextWindow": 262000,
-      "maxTokens": 16384
-    },
-    "arkanecloud/deepseek-ai/DeepSeek-V4-Flash-0731": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "arkanecloud/deepseek-ai/DeepSeek-V4.1-Flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "arkanecloud/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "arkanecloud/ministral-14b": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
-    "arkanecloud/nvidia/nemotron-3-ultra-550b-a55b": {
-      "contextWindow": 512288,
-      "maxTokens": 128000
-    },
-    "arkanecloud/openai/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "azure/gpt-4.1-nano": {
-      "contextWindow": 1047576,
-      "maxTokens": 32768
-    },
-    "azure/gpt-4.1-nano@eu": {
-      "contextWindow": 1047576,
-      "maxTokens": 32768
-    },
-    "azure/gpt-4.1-nano@us": {
-      "contextWindow": 1047576,
-      "maxTokens": 32768
-    },
-    "azure/gpt-5.1-codex": {
-      "contextWindow": 272000,
-      "maxTokens": 128000
-    },
-    "azure/gpt-5.1-codex-max": {
-      "contextWindow": 272000,
-      "maxTokens": 128000
-    },
-    "azure/gpt-5.1-codex-mini": {
-      "contextWindow": 272000,
-      "maxTokens": 128000
-    },
-    "azure/gpt-5.2-codex": {
-      "contextWindow": 272000,
-      "maxTokens": 128000
-    },
-    "cerebras/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 40960
-    },
-    "cloudflare/@cf/aisingapore/gemma-sea-lion-v4-27b-it": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "cloudflare/@cf/deepseek-ai/deepseek-v4.1-flash-1017": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "cloudflare/@cf/meta/llama-3.2-3b-instruct": {
-      "contextWindow": 80000,
-      "maxTokens": 80000
-    },
-    "cloudflare/@cf/meta/llama-guard-3-8b": {
-      "contextWindow": 131072,
-      "maxTokens": 4096
-    },
-    "cloudflare/@cf/mistralai/mistral-small-3.1-24b-instruct": {
-      "contextWindow": 128000,
-      "maxTokens": 102400
-    },
-    "cloudflare/@cf/openai/gpt-oss-120b": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
-    "cloudflare/@cf/openai/gpt-oss-20b": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
-    "cloudflare/@cf/qwen/qwen2.5-coder-32b-instruct": {
-      "contextWindow": 32768,
-      "maxTokens": 8192
-    },
-    "cloudflare/@cf/thinkingmachines/inkling-2-small": {
+    "beam": {
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "cloudflare/@cf/zai-org/glm-4.7-flash": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "cohere/c4ai-aya-expanse-32b": {
+    "c4ai-aya-expanse-32b": {
       "contextWindow": 128000,
       "maxTokens": 4000
     },
-    "cohere/command-a-03-2025": {
+    "claude-fable-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-fable-5-2": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-fable-5.1": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-haiku-5.5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-4.5": {
+      "contextWindow": 200000,
+      "maxTokens": 64000
+    },
+    "claude-opus-4.6": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-4.7": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-4.8": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-5.5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-sonnet-4.6": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-sonnet-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-sonnet-5.5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "codestral-2508": {
+      "contextWindow": 256000,
+      "maxTokens": 8192
+    },
+    "codestral-latest": {
+      "contextWindow": 256000,
+      "maxTokens": 4096
+    },
+    "command-a-03-2025": {
       "contextWindow": 288000,
       "maxTokens": 8000
     },
-    "cohere/command-a-translate-08-2025": {
+    "command-a-translate-08-2025": {
       "contextWindow": 8992,
       "maxTokens": 8000
     },
-    "cohere/command-a-vision-07-2025": {
+    "command-a-vision-07-2025": {
       "contextWindow": 128000,
       "maxTokens": 8000
     },
-    "cohere/command-r-08-2024": {
+    "command-r-08-2024": {
       "contextWindow": 128000,
       "maxTokens": 4000
     },
-    "cohere/command-r-plus-08-2024": {
+    "command-r-plus-08-2024": {
       "contextWindow": 128000,
       "maxTokens": 4000
     },
-    "cohere/command-r7b-12-2024": {
+    "command-r7b-12-2024": {
       "contextWindow": 132000,
       "maxTokens": 4000
     },
-    "databricks/databricks-gpt-oss-120b": {
+    "deep-research-max-preview-04-2026": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "deep-research-preview-04-2026": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "deepseek-chat": {
       "contextWindow": 131072,
-      "maxTokens": 25000
-    },
-    "databricks/databricks-gpt-oss-120b@eu": {
-      "contextWindow": 131072,
-      "maxTokens": 25000
-    },
-    "databricks/databricks-gpt-oss-20b": {
-      "contextWindow": 131072,
-      "maxTokens": 25000
-    },
-    "databricks/databricks-gpt-oss-20b@eu": {
-      "contextWindow": 131072,
-      "maxTokens": 25000
-    },
-    "databricks/databricks-qwen3-next-80b-a3b-instruct": {
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "databricks/databricks-qwen3-next-80b-a3b-instruct@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "deepinfra/ByteDance/Seed-2.0-code": {
-      "contextWindow": 256000,
       "maxTokens": 131072
     },
-    "deepinfra/Gryphe/MythoMax-L2-13b": {
-      "contextWindow": 4096,
-      "maxTokens": 3200
-    },
-    "deepinfra/NousResearch/Hermes-3-Llama-3.1-405B": {
-      "contextWindow": 131072,
-      "maxTokens": 16384
-    },
-    "deepinfra/NousResearch/Hermes-3-Llama-3.1-70B": {
-      "contextWindow": 131072,
-      "maxTokens": 16384
-    },
-    "deepinfra/Qwen/Qwen2.5-7B-Instruct": {
-      "contextWindow": 32768,
-      "maxTokens": 8192
-    },
-    "deepinfra/Qwen/Qwen3-235B-A22B-Instruct-2507": {
-      "contextWindow": 262144,
-      "maxTokens": 16384
-    },
-    "deepinfra/Qwen/Qwen3-235B-A22B-Thinking-2507": {
-      "contextWindow": 262144,
-      "maxTokens": 81920
-    },
-    "deepinfra/Qwen/Qwen3-Coder-480B-A35B-Instruct": {
-      "contextWindow": 262144,
-      "maxTokens": 65536
-    },
-    "deepinfra/Qwen/Qwen3-Max": {
-      "contextWindow": 256000,
-      "maxTokens": 65536
-    },
-    "deepinfra/Qwen/Qwen3-Next-80B-A3B-Instruct": {
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "deepinfra/Qwen/Qwen3-VL-235B-A22B-Instruct": {
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct": {
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "deepinfra/deepseek-ai/DeepSeek-R1": {
+    "deepseek-r1": {
       "contextWindow": 163840,
       "maxTokens": 32768
     },
-    "deepinfra/deepseek-ai/DeepSeek-R1-0528": {
-      "contextWindow": 163840,
-      "maxTokens": 32768
-    },
-    "deepinfra/deepseek-ai/DeepSeek-V3": {
-      "contextWindow": 163840,
-      "maxTokens": 8192
-    },
-    "deepinfra/deepseek-ai/DeepSeek-V3-0324": {
-      "contextWindow": 163840,
-      "maxTokens": 163840
-    },
-    "deepinfra/deepseek-ai/DeepSeek-V4-Flash-0731": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "deepinfra/deepseek-ai/DeepSeek-V4-Pro-0813": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "deepinfra/google/gemma-3-12b-it": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "deepinfra/google/gemma-3-27b-it": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "deepinfra/google/gemma-3-4b-it": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "deepinfra/ibm-granite/granite-4.2-8b": {
-      "contextWindow": 131072,
-      "maxTokens": 117964
-    },
-    "deepinfra/meta-llama/Llama-3.2-11B-Vision-Instruct": {
-      "contextWindow": 131072,
-      "maxTokens": 4096
-    },
-    "deepinfra/meta-llama/Llama-3.2-3B-Instruct": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "deepinfra/meta-llama/Llama-3.3-70B-Instruct": {
-      "contextWindow": 131072,
-      "maxTokens": 4096
-    },
-    "deepinfra/meta-llama/Llama-Guard-3-8B": {
-      "contextWindow": 131072,
-      "maxTokens": 4096
-    },
-    "deepinfra/meta-llama/Llama-Guard-4-12B": {
-      "contextWindow": 163840,
-      "maxTokens": 163840
-    },
-    "deepinfra/meta-models/Muse-Glimmer-30B": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "deepinfra/microsoft/WizardLM-2-8x22B": {
-      "contextWindow": 65536,
-      "maxTokens": 8000
-    },
-    "deepinfra/mistralai/Mistral-Small-24B-Instruct-2501": {
-      "contextWindow": 32768,
-      "maxTokens": 16384
-    },
-    "deepinfra/mistralai/Mixtral-8x7B-Instruct-v0.1": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
-    "deepinfra/moonshotai/Kimi-K2-Instruct": {
-      "contextWindow": 131072,
-      "maxTokens": 32768
-    },
-    "deepinfra/moonshotai/Kimi-K2.5": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "deepinfra/nemotron-3-super-120b-a12b": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "deepinfra/nemotron-3-ultra-550b-a55b": {
-      "contextWindow": 262144,
-      "maxTokens": 128000
-    },
-    "deepinfra/nvidia/Llama-3.1-Nemotron-70B-Instruct": {
-      "contextWindow": 131072,
-      "maxTokens": 8192
-    },
-    "deepinfra/nvidia/Nemotron-3-Nano-30B-A3B": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "deepinfra/openai/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 16384
-    },
-    "deepinfra/openai/gpt-oss-20b": {
-      "contextWindow": 131072,
-      "maxTokens": 16384
-    },
-    "deepinfra/stepfun-ai/Step-3.5-Flash": {
-      "contextWindow": 262144,
-      "maxTokens": 256000
-    },
-    "deepinfra/stepfun-ai/Step-3.7-Flash": {
-      "contextWindow": 262144,
-      "maxTokens": 256000
-    },
-    "deepinfra/stepfun-ai/Step-5-Preview": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "deepinfra/tencent/Hy3": {
-      "contextWindow": 262144,
-      "maxTokens": 128000
-    },
-    "deepinfra/tencent/Hy4": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "deepinfra/tencent/Hy4-preview": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "deepinfra/thinkingmachines/Inkling": {
-      "contextWindow": 524288,
-      "maxTokens": 524288
-    },
-    "deepinfra/thinkingmachines/Inkling-2-Mini": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "deepinfra/thinkingmachines/Inkling-2-Small": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "deepinfra/thinkingmachines/Inkling-Small": {
-      "contextWindow": 524288,
-      "maxTokens": 524288
-    },
-    "deepinfra/zai-org/GLM-4.7-Flash": {
-      "contextWindow": 202752,
-      "maxTokens": 131072
-    },
-    "deepseek/deepseek-chat": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "deepseek/deepseek-v4-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "deepseek/deepseek-v4-flash-vision-exp": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "deepseek/deepseek-v4-pro": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "fireworks_ai/accounts/fireworks/models/ember-1": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "fireworks_ai/accounts/fireworks/models/inkling": {
-      "contextWindow": 1048576,
-      "maxTokens": 1048576
-    },
-    "fireworks_ai/accounts/fireworks/models/muse-spark-open": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "flexai/DeepSeek-V4-Flash-0731": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "flexai/DeepSeek-V4-Flash-0731@eu": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "flexai/DeepSeek-V4.1-Flash-1017": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "flexai/Muse-Glimmer-30B": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "flexai/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "flexai/gpt-oss-20b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "flexai/gpt-oss-20b@eu": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "google/deep-research-max-preview-04-2026": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/deep-research-preview-04-2026": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-2.5-flash-image": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
-    "google/gemini-3-flash-preview": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3-pro-image": {
-      "contextWindow": 65536,
-      "maxTokens": 32768
-    },
-    "google/gemini-3-pro-image-preview": {
-      "contextWindow": 65536,
-      "maxTokens": 32768
-    },
-    "google/gemini-3.1-flash-image": {
-      "contextWindow": 65536,
-      "maxTokens": 32768
-    },
-    "google/gemini-3.1-flash-image-preview": {
-      "contextWindow": 65536,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.1-flash-lite": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.1-flash-lite-image": {
-      "contextWindow": 65536,
-      "maxTokens": 4096
-    },
-    "google/gemini-3.1-flash-lite-preview": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.1-pro-preview": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.1-pro-preview-customtools": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.5-flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.5-flash-lite": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.6-flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.7-flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-3.8-flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-4-argon": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-4-carbon": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-4-hydrogen": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-4-neon": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-flash-latest": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-nano-banana-2.1": {
-      "contextWindow": 65536,
-      "maxTokens": 32768
-    },
-    "google/gemini-pro-latest": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "google/gemini-robotics-er-2-preview": {
-      "contextWindow": 131072,
-      "maxTokens": 65536
-    },
-    "greenference/gpt-oss-20b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "greenpt/deepseek-v4-flash-0731": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "greenpt/deepseek-v4.1-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "greenpt/gpt-oss-120b": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "greenpt/llama-3.3-70b-instruct": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
-    },
-    "greenpt/qwen3-235b-a22b-instruct-2507": {
-      "contextWindow": 250000,
-      "maxTokens": 16384
-    },
-    "groq/meta-llama/llama-prompt-guard-2-22m": {
-      "contextWindow": 512,
-      "maxTokens": 512
-    },
-    "groq/meta-llama/llama-prompt-guard-2-86m": {
-      "contextWindow": 512,
-      "maxTokens": 512
-    },
-    "groq/openai/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 65536
-    },
-    "groq/openai/gpt-oss-20b": {
-      "contextWindow": 131072,
-      "maxTokens": 65536
-    },
-    "groq/openai/gpt-oss-safeguard-20b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "infomaniak/mistralai/Ministral-3-14B-Instruct-2512": {
-      "contextWindow": 100000,
-      "maxTokens": 100000
-    },
-    "ionos/Qwen/Qwen3-Coder-Next": {
-      "contextWindow": 128000,
-      "maxTokens": 65536
-    },
-    "ionos/meta-llama/Llama-3.3-70B-Instruct": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
-    },
-    "ionos/openai/gpt-oss-120b": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "meta/muse-spark-1.1": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "meta/muse-spark-1.2": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "meta/muse-spark-1.3": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "meta/muse-wonder-1.0": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "microsoft/gpt-4": {
-      "contextWindow": 8191,
-      "maxTokens": 8191
-    },
-    "microsoft/o3-mini": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "minimax/MiniMax-M2": {
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/MiniMax-M2.1": {
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/MiniMax-M2.5": {
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/MiniMax-M2.7": {
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/MiniMax-M3": {
-      "contextWindow": 524288,
-      "maxTokens": 512000
-    },
-    "minimax/MiniMax-M3.1-Flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 512000
-    },
-    "mistral/codestral-2508": {
-      "contextWindow": 256000,
-      "maxTokens": 8192
-    },
-    "mistral/codestral-2508@eu": {
-      "contextWindow": 256000,
-      "maxTokens": 8192
-    },
-    "mistral/codestral-latest": {
-      "contextWindow": 256000,
-      "maxTokens": 4096
-    },
-    "mistral/codestral-latest@eu": {
-      "contextWindow": 256000,
-      "maxTokens": 4096
-    },
-    "mistral/devstral-2512": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/devstral-2512@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/devstral-medium-latest": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/devstral-medium-latest@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/magistral-medium-latest": {
-      "contextWindow": 262144,
-      "maxTokens": 16384
-    },
-    "mistral/magistral-medium-latest@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 16384
-    },
-    "mistral/ministral-14b-2512": {
-      "contextWindow": 262144,
-      "maxTokens": 209715
-    },
-    "mistral/ministral-14b-2512@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 209715
-    },
-    "mistral/ministral-3b-2512": {
-      "contextWindow": 131072,
-      "maxTokens": 104857
-    },
-    "mistral/ministral-3b-2512@eu": {
-      "contextWindow": 131072,
-      "maxTokens": 104857
-    },
-    "mistral/ministral-8b-2512": {
-      "contextWindow": 262144,
-      "maxTokens": 209715
-    },
-    "mistral/ministral-8b-2512@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 209715
-    },
-    "mistral/mistral-large-2407": {
-      "contextWindow": 131072,
-      "maxTokens": 104857
-    },
-    "mistral/mistral-large-2407@eu": {
-      "contextWindow": 131072,
-      "maxTokens": 104857
-    },
-    "mistral/mistral-large-2512": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-large-2512@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-large-4@eu": {
-      "contextWindow": 524288,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-large-latest": {
-      "contextWindow": 1048576,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-large-latest@eu": {
-      "contextWindow": 1048576,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-medium-2604": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-medium-2604@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-medium-3": {
-      "contextWindow": 262144,
-      "maxTokens": 104857
-    },
-    "mistral/mistral-medium-3-5": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-medium-3-5@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-medium-3@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 104857
-    },
-    "mistral/mistral-medium-latest": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-medium-latest@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "mistral/mistral-small-2603": {
-      "contextWindow": 262144,
-      "maxTokens": 256000
-    },
-    "mistral/mistral-small-2603@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 256000
-    },
-    "mistral/mistral-small-latest": {
-      "contextWindow": 262144,
-      "maxTokens": 256000
-    },
-    "mistral/mistral-small-latest@eu": {
-      "contextWindow": 262144,
-      "maxTokens": 256000
-    },
-    "mistral/voxtral-small-latest": {
-      "contextWindow": 32768,
-      "maxTokens": 32000
-    },
-    "mistral/voxtral-small-latest@eu": {
-      "contextWindow": 32768,
-      "maxTokens": 32000
-    },
-    "moonshot/kimi-k2.6": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "moonshot/kimi-k2.7-code": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "moonshot/kimi-k2.7-code-highspeed": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "moonshot/kimi-k3": {
-      "contextWindow": 1048576,
-      "maxTokens": 1048576
-    },
-    "moonshot/kimi-k3.1-pro": {
-      "contextWindow": 1048576,
-      "maxTokens": 1048576
-    },
-    "nebius/Qwen/Qwen3-235B-A22B-Instruct-2507": {
-      "contextWindow": 262144,
-      "maxTokens": 16384
-    },
-    "nebius/Qwen/Qwen3-30B-A3B-Instruct-2507": {
-      "contextWindow": 262144,
-      "maxTokens": 16384
-    },
-    "nebius/deepseek-ai/DeepSeek-V4-Pro-0813": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "nebius/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "nebius/google/gemma-3-27b-it": {
-      "contextWindow": 110000,
-      "maxTokens": 110000
-    },
-    "nebius/meta-models/muse-spark-open": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "nebius/nvidia/Nemotron-3-Ultra-550b-a55b": {
-      "contextWindow": 1048576,
-      "maxTokens": 128000
-    },
-    "nebius/nvidia/nemotron-3-super-120b-a12b": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "nebius/openai/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 8192
-    },
-    "nebius/thinkingmachines/Inkling-2-Small": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "openai/gpt-4.1": {
-      "contextWindow": 1047576,
-      "maxTokens": 32768
-    },
-    "openai/gpt-4.1-mini": {
-      "contextWindow": 1047576,
-      "maxTokens": 32768
-    },
-    "openai/gpt-4o": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
-    "openai/gpt-4o-2024-08-06": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
-    "openai/gpt-4o-2024-11-20": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
-    "openai/gpt-4o-mini": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
-    "openai/gpt-5": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5-mini": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5-nano": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5-pro": {
-      "contextWindow": 400000,
-      "maxTokens": 272000
-    },
-    "openai/gpt-5-search-api": {
-      "contextWindow": 272000,
-      "maxTokens": 100000
-    },
-    "openai/gpt-5.1": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.2": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.2-pro": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.3-codex": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.4": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.4-mini": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.4-nano": {
-      "contextWindow": 400000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.4-pro": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.5": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.5-pro": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.6-luna": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.6-sol": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-5.6-terra": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-6-astra": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-6-luna": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-6-sol": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-6.1-sol": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-6.1-terra": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-6.2-astra": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-6.2-sol": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-latest": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-mini-latest": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/gpt-pro-latest": {
-      "contextWindow": 1050000,
-      "maxTokens": 128000
-    },
-    "openai/o3": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "openai/o3-pro": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "ovhcloud/DeepSeek-V4.1-Flash-1017": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "ovhcloud/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "ovhcloud/gpt-oss-20b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "perplexityai/sonar": {
-      "contextWindow": 127072,
-      "maxTokens": 4096
-    },
-    "perplexityai/sonar-deep-research": {
-      "contextWindow": 128000,
-      "maxTokens": 32768
-    },
-    "perplexityai/sonar-pro": {
-      "contextWindow": 200000,
-      "maxTokens": 8192
-    },
-    "perplexityai/sonar-reasoning-pro": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
-    },
-    "qwen/deepseek-v4-flash-0731": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "qwen/deepseek-v4-pro-0813": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "qwen/deepseek-v4.1-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "qwen/deepseek-v4.1-flash-1017": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "qwen/qwen-max": {
-      "contextWindow": 32768,
-      "maxTokens": 8192
-    },
-    "qwen/qwen-mt-plus": {
-      "contextWindow": 4096,
-      "maxTokens": 4096
-    },
-    "qwen/qwen3-coder-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 65536
-    },
-    "qwen/qwen3.8-2.4t-a95b": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
-    "qwen/qwen3.8-27b": {
-      "contextWindow": 1000000,
-      "maxTokens": 32768
-    },
-    "qwen/qwen3.8-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
-    "qwen/qwen3.8-max": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
-    "qwen/qwen3.8-max-0902": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
-    "qwen/qwen3.8-omni-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
-    "qwen/qwen4-max": {
-      "contextWindow": 1000000,
-      "maxTokens": 262144
-    },
-    "scaleway/deepseek-v4-flash-0731": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "scaleway/deepseek-v4.1-flash": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "scaleway/deepseek-v4.1-flash-1017": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "scaleway/gemma-3-27b-it": {
-      "contextWindow": 40000,
-      "maxTokens": 40000
-    },
-    "scaleway/gpt-oss-120b": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "scaleway/llama-3.3-70b-instruct": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
-    },
-    "scaleway/qwen3-235b-a22b-instruct-2507": {
-      "contextWindow": 250000,
-      "maxTokens": 16384
-    },
-    "scaleway/qwen3-coder-30b-a3b-instruct": {
-      "contextWindow": 128000,
-      "maxTokens": 65536
-    },
-    "sference/deepseek-ai/DeepSeek-V4-Flash-0731": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "sference/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "tencent/deepseek-v4-pro-0813": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "tencent/deepseek-v4.1-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "tencent/deepseek-v4.1-flash-1017": {
-      "contextWindow": 1000000,
-      "maxTokens": 384000
-    },
-    "tencent/hy3": {
-      "contextWindow": 256000,
-      "maxTokens": 128000
-    },
-    "tencent/hy4": {
-      "contextWindow": 1000000,
-      "maxTokens": 65536
-    },
-    "tencent/hy4-preview": {
-      "contextWindow": 1000000,
-      "maxTokens": 65536
-    },
-    "tencent/step-5-preview": {
-      "contextWindow": 1000000,
-      "maxTokens": 65536
-    },
-    "tensorx/deepseek/deepseek-r1-0528": {
+    "deepseek-r1-0528": {
       "contextWindow": 164000,
       "maxTokens": 32768
     },
-    "tensorx/deepseek/deepseek-v4-flash-0731": {
+    "deepseek-v3": {
+      "contextWindow": 163840,
+      "maxTokens": 8192
+    },
+    "deepseek-v3-0324": {
+      "contextWindow": 163840,
+      "maxTokens": 163840
+    },
+    "deepseek-v4-flash": {
       "contextWindow": 1048576,
       "maxTokens": 384000
     },
-    "tensorx/deepseek/deepseek-v4-pro-0813": {
+    "deepseek-v4-flash-0731": {
       "contextWindow": 1048576,
       "maxTokens": 384000
     },
-    "tensorx/deepseek/deepseek-v4.1-flash": {
+    "deepseek-v4-flash-vision-exp": {
       "contextWindow": 1048576,
       "maxTokens": 384000
     },
-    "tensorx/deepseek/deepseek-v4.1-flash-1017": {
+    "deepseek-v4-pro": {
       "contextWindow": 1048576,
       "maxTokens": 384000
     },
-    "tensorx/moonshotai/kimi-k2.5": {
+    "deepseek-v4-pro-0813": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "deepseek-v4.1-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "deepseek-v4.1-flash-1017": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "devstral-2512": {
       "contextWindow": 262144,
       "maxTokens": 262144
     },
-    "together_ai/deepseek-ai/DeepSeek-V4-Pro-0813": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
+    "devstral-medium-latest": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
     },
-    "together_ai/deepseek-ai/DeepSeek-V4.1-Flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "together_ai/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
-      "contextWindow": 1048576,
-      "maxTokens": 384000
-    },
-    "together_ai/meta-models/Muse-Glimmer-30B": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "together_ai/openai/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "together_ai/reflection/Beam-1.0-501B-A23B": {
+    "ember-1": {
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "together_ai/tencent/Hy4": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "together_ai/thinkingmachines/Inkling": {
-      "contextWindow": 524288,
-      "maxTokens": 524288
-    },
-    "together_ai/thinkingmachines/Inkling-2-Small": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "tsystems/gpt-oss-120b": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "vertex/gemini-2.5-flash-image": {
+    "gemini-2.5-flash-image": {
       "contextWindow": 32768,
       "maxTokens": 32768
     },
-    "vertex/gemini-3-flash-preview": {
+    "gemini-3-flash-preview": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3-pro-image": {
+    "gemini-3-pro-image": {
       "contextWindow": 65536,
       "maxTokens": 32768
     },
-    "vertex/gemini-3.1-flash-image": {
+    "gemini-3-pro-image-preview": {
+      "contextWindow": 65536,
+      "maxTokens": 32768
+    },
+    "gemini-3.1-flash-image": {
       "contextWindow": 131072,
       "maxTokens": 32768
     },
-    "vertex/gemini-3.1-flash-lite": {
+    "gemini-3.1-flash-image-preview": {
+      "contextWindow": 65536,
+      "maxTokens": 65536
+    },
+    "gemini-3.1-flash-lite": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.1-flash-lite-image": {
+    "gemini-3.1-flash-lite-image": {
       "contextWindow": 65536,
       "maxTokens": 4096
     },
-    "vertex/gemini-3.1-flash-lite@eu": {
+    "gemini-3.1-flash-lite-preview": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.1-flash-lite@us": {
+    "gemini-3.1-pro-preview": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.1-pro-preview": {
+    "gemini-3.1-pro-preview-customtools": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.5-flash": {
+    "gemini-3.5-flash": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.5-flash-lite": {
+    "gemini-3.5-flash-lite": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.5-flash-lite@eu": {
+    "gemini-3.6-flash": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.5-flash-lite@us": {
+    "gemini-3.7-flash": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.5-flash@eu": {
+    "gemini-3.8-flash": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.5-flash@us": {
+    "gemini-4-argon": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.6-flash": {
+    "gemini-4-carbon": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.6-flash@eu": {
+    "gemini-4-hydrogen": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.6-flash@us": {
+    "gemini-4-neon": {
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.7-flash": {
-      "contextWindow": 1048576,
+    "gemini-nano-banana-2.1": {
+      "contextWindow": 65536,
+      "maxTokens": 32768
+    },
+    "gemini-robotics-er-2-preview": {
+      "contextWindow": 131072,
       "maxTokens": 65536
     },
-    "vertex/gemini-3.7-flash@eu": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
+    "gemma-3-12b-it": {
+      "contextWindow": 131072,
+      "maxTokens": 128000
     },
-    "vertex/gemini-3.7-flash@us": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
+    "gemma-3-27b-it": {
+      "contextWindow": 131072,
+      "maxTokens": 128000
     },
-    "vertex/gemini-3.8-flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
+    "gemma-3-4b-it": {
+      "contextWindow": 131072,
+      "maxTokens": 128000
     },
-    "vertex/gemini-3.8-flash@eu": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
+    "gemma-sea-lion-v4-27b-it": {
+      "contextWindow": 128000,
+      "maxTokens": 128000
     },
-    "vertex/gemini-3.8-flash@us": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
+    "glm-4.6": {
+      "contextWindow": 202752,
+      "maxTokens": 131072
     },
-    "vertex/gemini-flash-latest": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "vertex/gemini-nano-banana-2.1": {
+    "glm-4.6v": {
       "contextWindow": 131072,
       "maxTokens": 32768
     },
-    "xai/grok-4-fast-non-reasoning": {
+    "glm-4.7": {
+      "contextWindow": 203000,
+      "maxTokens": 131072
+    },
+    "glm-4.7-flash": {
+      "contextWindow": 203000,
+      "maxTokens": 131072
+    },
+    "glm-5": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "glm-5-turbo": {
+      "contextWindow": 202752,
+      "maxTokens": 131072
+    },
+    "glm-5.1": {
+      "contextWindow": 202752,
+      "maxTokens": 131072
+    },
+    "glm-5.2": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "glm-5.3": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "glm-5.3-fast": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "glm-5.3-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "glm-5.3-flashx-legal": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "glm-5v-turbo": {
+      "contextWindow": 202752,
+      "maxTokens": 131072
+    },
+    "gpt-3.5-turbo": {
+      "contextWindow": 4097,
+      "maxTokens": 4096
+    },
+    "gpt-4": {
+      "contextWindow": 8191,
+      "maxTokens": 8191
+    },
+    "gpt-4.1": {
+      "contextWindow": 1047576,
+      "maxTokens": 32768
+    },
+    "gpt-4.1-mini": {
+      "contextWindow": 1047576,
+      "maxTokens": 32768
+    },
+    "gpt-4.1-nano": {
+      "contextWindow": 1047576,
+      "maxTokens": 32768
+    },
+    "gpt-4o": {
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
+    "gpt-4o-2024-08-06": {
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
+    "gpt-4o-2024-11-20": {
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
+    "gpt-4o-mini": {
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
+    "gpt-5": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5-mini": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5-nano": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5-pro": {
+      "contextWindow": 400000,
+      "maxTokens": 272000
+    },
+    "gpt-5-search-api": {
+      "contextWindow": 272000,
+      "maxTokens": 100000
+    },
+    "gpt-5.1": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.1-codex": {
+      "contextWindow": 272000,
+      "maxTokens": 128000
+    },
+    "gpt-5.1-codex-max": {
+      "contextWindow": 272000,
+      "maxTokens": 128000
+    },
+    "gpt-5.1-codex-mini": {
+      "contextWindow": 272000,
+      "maxTokens": 128000
+    },
+    "gpt-5.2": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.2-codex": {
+      "contextWindow": 272000,
+      "maxTokens": 128000
+    },
+    "gpt-5.2-pro": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.3-codex": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.4": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-5.4-mini": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.4-nano": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.4-pro": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-5.5": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-5.5-pro": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-5.6-luna": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-5.6-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-5.6-terra": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6-astra": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6-astra-healthcare": {
+      "contextWindow": 922000,
+      "maxTokens": 128000
+    },
+    "gpt-6-luna": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6.1-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6.1-sol-healthcare": {
+      "contextWindow": 922000,
+      "maxTokens": 128000
+    },
+    "gpt-6.1-terra": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6.2-astra": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6.2-astra-healthcare": {
+      "contextWindow": 922000,
+      "maxTokens": 128000
+    },
+    "gpt-6.2-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6.2-sol-healthcare": {
+      "contextWindow": 922000,
+      "maxTokens": 128000
+    },
+    "gpt-oss-120b": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
+    },
+    "gpt-oss-20b": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
+    },
+    "gpt-oss-safeguard-20b": {
+      "contextWindow": 131072,
+      "maxTokens": 128000
+    },
+    "granite-4.2-8b": {
+      "contextWindow": 131072,
+      "maxTokens": 117964
+    },
+    "grok-4-fast-non-reasoning": {
       "contextWindow": 2000000,
-      "maxTokens": 2000000
+      "maxTokens": 30000
     },
-    "xai/grok-4.20-0309-non-reasoning": {
+    "grok-4.20-0309-non-reasoning": {
       "contextWindow": 1000000,
       "maxTokens": 30000
     },
-    "xai/grok-4.20-0309-reasoning": {
+    "grok-4.20-0309-reasoning": {
       "contextWindow": 1000000,
       "maxTokens": 30000
     },
-    "xai/grok-4.20-multi-agent-0309": {
+    "grok-4.20-multi-agent-0309": {
       "contextWindow": 1000000,
       "maxTokens": 30000
     },
-    "xai/grok-4.3": {
+    "grok-4.3": {
       "contextWindow": 1000000,
       "maxTokens": 30000
     },
-    "xai/grok-4.5": {
+    "grok-4.5": {
       "contextWindow": 500000,
       "maxTokens": 500000
     },
-    "xai/grok-4.6": {
+    "grok-4.6": {
       "contextWindow": 500000,
       "maxTokens": 500000
     },
-    "xai/grok-4.7": {
-      "contextWindow": 500000,
+    "grok-4.7": {
+      "contextWindow": 524288,
       "maxTokens": 500000
     },
-    "xai/grok-latest": {
-      "contextWindow": 500000,
-      "maxTokens": 500000
+    "hermes-3-llama-3.1-405b": {
+      "contextWindow": 131072,
+      "maxTokens": 16384
     },
-    "zai/glm-4.6": {
-      "contextWindow": 202752,
+    "hermes-3-llama-3.1-70b": {
+      "contextWindow": 131072,
+      "maxTokens": 16384
+    },
+    "hy3": {
+      "contextWindow": 262144,
+      "maxTokens": 128000
+    },
+    "hy4": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "hy4-preview": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "inkling": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "inkling-2-mini": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "inkling-2-small": {
+      "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "zai/glm-4.6v": {
+    "inkling-small": {
+      "contextWindow": 524288,
+      "maxTokens": 524288
+    },
+    "kimi-k2-instruct": {
       "contextWindow": 131072,
       "maxTokens": 32768
     },
-    "zai/glm-4.7": {
-      "contextWindow": 202752,
+    "kimi-k2-thinking": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "kimi-k2.5": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "kimi-k2.6": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "kimi-k2.7-code": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "kimi-k2.7-code-highspeed": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "kimi-k3": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "kimi-k3-fast": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "kimi-k3.1-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "kimi-k3.1-pro-highspeed": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "llama-3.1-70b-instruct": {
+      "contextWindow": 131072,
+      "maxTokens": 4096
+    },
+    "llama-3.1-8b-instruct": {
+      "contextWindow": 131072,
+      "maxTokens": 4096
+    },
+    "llama-3.1-nemotron-70b-instruct": {
+      "contextWindow": 131072,
+      "maxTokens": 8192
+    },
+    "llama-3.2-11b-vision-instruct": {
+      "contextWindow": 131072,
+      "maxTokens": 4096
+    },
+    "llama-3.2-3b-instruct": {
+      "contextWindow": 131072,
       "maxTokens": 131072
     },
-    "zai/glm-5": {
-      "contextWindow": 202752,
+    "llama-3.3-70b-instruct": {
+      "contextWindow": 131072,
+      "maxTokens": 4096
+    },
+    "llama-guard-3-8b": {
+      "contextWindow": 131072,
+      "maxTokens": 4096
+    },
+    "llama-guard-4-12b": {
+      "contextWindow": 163840,
+      "maxTokens": 163840
+    },
+    "llama-prompt-guard-2-22m": {
+      "contextWindow": 512,
+      "maxTokens": 512
+    },
+    "llama-prompt-guard-2-86m": {
+      "contextWindow": 512,
+      "maxTokens": 512
+    },
+    "magistral-medium-latest": {
+      "contextWindow": 262144,
+      "maxTokens": 16384
+    },
+    "minimax-m2": {
+      "contextWindow": 1000000,
       "maxTokens": 131072
     },
-    "zai/glm-5-turbo": {
-      "contextWindow": 202752,
+    "minimax-m2.1": {
+      "contextWindow": 204800,
       "maxTokens": 131072
     },
-    "zai/glm-5.1": {
-      "contextWindow": 202752,
+    "minimax-m2.5": {
+      "contextWindow": 1000000,
       "maxTokens": 131072
     },
-    "zai/glm-5.2": {
+    "minimax-m2.7": {
+      "contextWindow": 204800,
+      "maxTokens": 131072
+    },
+    "minimax-m3": {
+      "contextWindow": 1048576,
+      "maxTokens": 512000
+    },
+    "minimax-m3.1-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 512000
+    },
+    "ministral-14b": {
+      "contextWindow": 32768,
+      "maxTokens": 32768
+    },
+    "ministral-14b-2512": {
+      "contextWindow": 262144,
+      "maxTokens": 209715
+    },
+    "ministral-3-14b-instruct-2512": {
+      "contextWindow": 100000,
+      "maxTokens": 100000
+    },
+    "ministral-3b-2512": {
+      "contextWindow": 131072,
+      "maxTokens": 104857
+    },
+    "ministral-8b-2512": {
+      "contextWindow": 262144,
+      "maxTokens": 209715
+    },
+    "mistral-large-2407": {
+      "contextWindow": 131072,
+      "maxTokens": 104857
+    },
+    "mistral-large-2512": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "mistral-large-4": {
+      "contextWindow": 1048576,
+      "maxTokens": 262144
+    },
+    "mistral-large-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 262144
+    },
+    "mistral-medium-2604": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "mistral-medium-3": {
+      "contextWindow": 262144,
+      "maxTokens": 104857
+    },
+    "mistral-medium-3.5": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "mistral-medium-latest": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "mistral-small-24b-instruct-2501": {
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
+    "mistral-small-2603": {
+      "contextWindow": 262144,
+      "maxTokens": 256000
+    },
+    "mistral-small-3.1-24b-instruct": {
+      "contextWindow": 128000,
+      "maxTokens": 102400
+    },
+    "mistral-small-latest": {
+      "contextWindow": 262144,
+      "maxTokens": 256000
+    },
+    "mixtral-8x7b-instruct-v0.1": {
+      "contextWindow": 32768,
+      "maxTokens": 32768
+    },
+    "muse-glimmer-30b": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
+    },
+    "muse-spark-1.1": {
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "zai/glm-5.3": {
+    "muse-spark-1.2": {
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "zai/glm-5.3-flash": {
+    "muse-spark-1.3": {
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "zai/glm-5.3-flashx-legal": {
+    "muse-spark-open": {
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "zai/glm-5v-turbo": {
-      "contextWindow": 202752,
+    "muse-wonder-1.0": {
+      "contextWindow": 1048576,
       "maxTokens": 131072
+    },
+    "mythomax-l2-13b": {
+      "contextWindow": 4096,
+      "maxTokens": 3200
+    },
+    "nemotron-3-nano-30b-a3b": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "nemotron-3-super-120b-a12b": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "nemotron-3-ultra-550b-a55b": {
+      "contextWindow": 1048576,
+      "maxTokens": 128000
+    },
+    "nova-lite": {
+      "contextWindow": 300000,
+      "maxTokens": 10000
+    },
+    "nova-micro": {
+      "contextWindow": 128000,
+      "maxTokens": 10000
+    },
+    "nova-pro": {
+      "contextWindow": 300000,
+      "maxTokens": 10000
+    },
+    "o3": {
+      "contextWindow": 200000,
+      "maxTokens": 100000
+    },
+    "o3-mini": {
+      "contextWindow": 200000,
+      "maxTokens": 100000
+    },
+    "o3-pro": {
+      "contextWindow": 200000,
+      "maxTokens": 100000
+    },
+    "palmyra-vision-7b": {
+      "contextWindow": 4096,
+      "maxTokens": 4096
+    },
+    "pixtral-large-2502": {
+      "contextWindow": 128000,
+      "maxTokens": 8192
+    },
+    "qwen-max": {
+      "contextWindow": 32768,
+      "maxTokens": 8192
+    },
+    "qwen-mt-plus": {
+      "contextWindow": 4096,
+      "maxTokens": 4096
+    },
+    "qwen2.5-7b-instruct": {
+      "contextWindow": 32768,
+      "maxTokens": 8192
+    },
+    "qwen2.5-coder-32b-instruct": {
+      "contextWindow": 32768,
+      "maxTokens": 8192
+    },
+    "qwen3-235b-a22b-instruct-2507": {
+      "contextWindow": 262144,
+      "maxTokens": 16384
+    },
+    "qwen3-235b-a22b-thinking-2507": {
+      "contextWindow": 262144,
+      "maxTokens": 81920
+    },
+    "qwen3-30b-a3b-instruct-2507": {
+      "contextWindow": 262144,
+      "maxTokens": 16384
+    },
+    "qwen3-coder-30b-a3b-instruct": {
+      "contextWindow": 262144,
+      "maxTokens": 65536
+    },
+    "qwen3-coder-480b-a35b-instruct": {
+      "contextWindow": 262144,
+      "maxTokens": 65536
+    },
+    "qwen3-coder-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "qwen3-coder-next": {
+      "contextWindow": 262144,
+      "maxTokens": 65536
+    },
+    "qwen3-max": {
+      "contextWindow": 256000,
+      "maxTokens": 65536
+    },
+    "qwen3-next-80b-a3b-instruct": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "qwen3-vl-235b-a22b-instruct": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "qwen3-vl-30b-a3b-instruct": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "qwen3.8-2.4t-a95b": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "qwen3.8-27b": {
+      "contextWindow": 1000000,
+      "maxTokens": 32768
+    },
+    "qwen3.8-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "qwen3.8-max": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "qwen3.8-max-0902": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "qwen3.8-omni-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "qwen4-max": {
+      "contextWindow": 1000000,
+      "maxTokens": 262144
+    },
+    "seed-2.0-code": {
+      "contextWindow": 256000,
+      "maxTokens": 131072
+    },
+    "sonar": {
+      "contextWindow": 127072,
+      "maxTokens": 4096
+    },
+    "sonar-deep-research": {
+      "contextWindow": 128000,
+      "maxTokens": 32768
+    },
+    "sonar-pro": {
+      "contextWindow": 200000,
+      "maxTokens": 8192
+    },
+    "sonar-reasoning-pro": {
+      "contextWindow": 128000,
+      "maxTokens": 4096
+    },
+    "step-3.5-flash": {
+      "contextWindow": 262144,
+      "maxTokens": 256000
+    },
+    "step-3.7-flash": {
+      "contextWindow": 262144,
+      "maxTokens": 256000
+    },
+    "step-5-preview": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "voxtral-mini-3b-2507": {
+      "contextWindow": 32768,
+      "maxTokens": 32768
+    },
+    "voxtral-small-24b-2507": {
+      "contextWindow": 32768,
+      "maxTokens": 32768
+    },
+    "voxtral-small-latest": {
+      "contextWindow": 32768,
+      "maxTokens": 32000
+    },
+    "wizardlm-2-8x22b": {
+      "contextWindow": 65536,
+      "maxTokens": 8000
+    },
+    "~claude-fable-latest": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "~claude-haiku-latest": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "~claude-opus-latest": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "~claude-sonnet-latest": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "~deepseek-flash-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "~deepseek-pro-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "~deepseek-v4-flash-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "~gemini-flash-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "~gemini-pro-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "~glm-flash-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "~glm-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "~gpt-astra-latest": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "~gpt-luna-latest": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "~gpt-mini-latest": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "~gpt-sol-latest": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "~gpt-terra-latest": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "~grok-latest": {
+      "contextWindow": 524288,
+      "maxTokens": 500000
+    },
+    "~kimi-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
     }
   },
   "empiriolabs": {
@@ -16101,6 +15549,14 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "accounts/fireworks/routers/glm-5p3-fast": {
       "contextWindow": 1048572,
+      "maxTokens": 262144
+    },
+    "accounts/fireworks/routers/glm-5p3-flash-flex": {
+      "contextWindow": 1048573,
+      "maxTokens": 131072
+    },
+    "accounts/fireworks/routers/glm-5p3-flex": {
+      "contextWindow": 1048573,
       "maxTokens": 262144
     },
     "accounts/fireworks/routers/glm-5p3-spot": {
@@ -17423,11 +16879,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "grok-4-fast-non-reasoning": {
       "contextWindow": 2000000,
-      "maxTokens": 2000000
+      "maxTokens": 30000
     },
     "grok-4-fast-reasoning": {
       "contextWindow": 2000000,
-      "maxTokens": 2000000
+      "maxTokens": 30000
     },
     "grok-code-fast-1": {
       "contextWindow": 256000,
@@ -17796,7 +17252,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 131072
     },
     "MiniMaxAI/MiniMax-M3": {
-      "contextWindow": 1048576,
+      "contextWindow": 524288,
       "maxTokens": 512000
     },
     "MiniMaxAI/MiniMax-M3.1-Flash": {
@@ -18575,7 +18031,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen/qwen3.8-max-preview": {
       "contextWindow": 1000000,
@@ -19455,11 +18911,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "grok-4-fast-non-reasoning": {
       "contextWindow": 2000000,
-      "maxTokens": 2000000
+      "maxTokens": 30000
     },
     "grok-4-fast-reasoning": {
       "contextWindow": 2000000,
-      "maxTokens": 2000000
+      "maxTokens": 30000
     },
     "grok-code-fast-1": {
       "contextWindow": 256000,
@@ -19929,10 +19385,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 524288
     },
-    "muse-glimmer-30b:free": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
     "muse-spark-1-2": {
       "contextWindow": 1048576,
       "maxTokens": 131072
@@ -19983,7 +19435,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3-7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen3-8-max": {
       "contextWindow": 1000000,
@@ -21171,7 +20623,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3.7-plus": {
       "contextWindow": 983616,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen3.8-2.4t-a95b": {
       "contextWindow": 1010000,
@@ -23373,7 +22825,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen3-6-35b": {
       "contextWindow": 16384,
@@ -24591,6 +24043,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 256000,
       "maxTokens": 256000
     },
+    "zai/glm-4-32b-0414-128k": {
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
     "zai/glm-4.5": {
       "contextWindow": 128000,
       "maxTokens": 98304
@@ -24987,7 +24443,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     }
   },
   "modelscope": {
@@ -25493,6 +24949,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
+    "TEE/glm-5.3-uncensored": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
     "TEE/gpt-oss-120b": {
       "contextWindow": 131072,
       "maxTokens": 16384
@@ -25796,10 +25256,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "command-a-reasoning-08-2025": {
       "contextWindow": 256000,
       "maxTokens": 8192
-    },
-    "deepcogito/cogito-v1-preview-qwen-32B": {
-      "contextWindow": 128000,
-      "maxTokens": 32768
     },
     "deepseek-ai/DeepSeek-R1-0528": {
       "contextWindow": 163840,
@@ -26565,12 +26021,16 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 32000,
       "maxTokens": 4096
     },
+    "moonshotai/kimi-k2-thinking": {
+      "contextWindow": 262144,
+      "maxTokens": 98304
+    },
     "moonshotai/kimi-k2.5": {
-      "contextWindow": 256000,
+      "contextWindow": 262144,
       "maxTokens": 65536
     },
     "moonshotai/kimi-k2.5:thinking": {
-      "contextWindow": 256000,
+      "contextWindow": 262144,
       "maxTokens": 65536
     },
     "moonshotai/kimi-k2.6": {
@@ -26897,10 +26357,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 200000,
       "maxTokens": 100000
     },
-    "openai/o3-pro-2025-06-10": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
     "orca/orcacyber-flash-1.0": {
       "contextWindow": 1048064,
       "maxTokens": 393216
@@ -27122,11 +26578,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 65536
     },
     "qwen/qwen3.5-397b-a17b": {
-      "contextWindow": 258048,
+      "contextWindow": 262144,
       "maxTokens": 65536
     },
     "qwen/qwen3.5-397b-a17b:thinking": {
-      "contextWindow": 258048,
+      "contextWindow": 262144,
       "maxTokens": 65536
     },
     "qwen/qwen3.5-9b": {
@@ -27409,17 +26865,13 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1040000,
       "maxTokens": 32768
     },
+    "thinkingmachines/inkling-2-mini": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
     "thinkingmachines/inkling:thinking": {
       "contextWindow": 1040000,
       "maxTokens": 32768
-    },
-    "unbiased/pareto-26.10": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
-    "unbiased/pareto-26.9": {
-      "contextWindow": 262144,
-      "maxTokens": 131072
     },
     "universal-summarizer": {
       "contextWindow": 32768,
@@ -27525,10 +26977,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "xiaomi/mimo-v2.6-flash-mopd": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
-    },
     "xiaomi/mimo-v2.6-flash-uncensored": {
       "contextWindow": 1048576,
       "maxTokens": 65536
@@ -27548,6 +26996,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "xtools-at/deepseek-v4-pro-qwen3.5-9b-uncensored-heretic": {
       "contextWindow": 32768,
       "maxTokens": 8192
+    },
+    "yetalabs/kimi-k3.1-pro-abliterated": {
+      "contextWindow": 980000,
+      "maxTokens": 262144
     },
     "z-ai/GLM-4.5-Air": {
       "contextWindow": 128000,
@@ -28709,7 +28161,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen4-max": {
       "contextWindow": 1000000,
-      "maxTokens": 262000
+      "maxTokens": 262144
     },
     "stepfun/step-3.7-flash": {
       "contextWindow": 262144,
@@ -28849,25 +28301,9 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262144,
       "maxTokens": 262144
     },
-    "mistralai/magistral-small-2506": {
-      "contextWindow": 32768,
-      "maxTokens": 32768
-    },
-    "mistralai/mistral-7b-instruct-v0.3": {
-      "contextWindow": 65536,
-      "maxTokens": 65536
-    },
-    "mistralai/mistral-medium-3-instruct": {
-      "contextWindow": 131072,
-      "maxTokens": 32768
-    },
     "moonshotai/kimi-k2.6": {
       "contextWindow": 262144,
       "maxTokens": 262144
-    },
-    "moonshotai/kimi-k3": {
-      "contextWindow": 1048576,
-      "maxTokens": 1048576
     },
     "nvidia/bevformer": {
       "contextWindow": 128000,
@@ -28877,17 +28313,9 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 131072,
       "maxTokens": 16384
     },
-    "nvidia/llama-3.1-nemotron-70b-instruct": {
-      "contextWindow": 128000,
-      "maxTokens": 8192
-    },
     "nvidia/llama-3.1-nemotron-safety-guard-8b-v3": {
       "contextWindow": 128000,
       "maxTokens": 4096
-    },
-    "nvidia/llama-3.1-nemotron-ultra-253b-v1": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
     },
     "nvidia/llama-nemotron-embed-vl-1b-v2": {
       "contextWindow": 8192,
@@ -28921,14 +28349,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 128000,
       "maxTokens": 8192
     },
-    "nvidia/rerank-qa-mistral-4b": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
-    },
-    "nvidia/riva-translate-4b-instruct-v1.1": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
-    },
     "nvidia/sparsedrive": {
       "contextWindow": 128000,
       "maxTokens": 8192
@@ -28936,10 +28356,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "nvidia/streampetr": {
       "contextWindow": 128000,
       "maxTokens": 8192
-    },
-    "nvidia/usdcode": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
     },
     "openai/gpt-oss-20b": {
       "contextWindow": 131072,
@@ -28956,10 +28372,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "stepfun-ai/step-5-preview": {
       "contextWindow": 1048576,
       "maxTokens": 1048576
-    },
-    "z-ai/glm-5.3": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
     },
     "z-ai/glm-5.3-flash": {
       "contextWindow": 1000000,
@@ -29072,6 +28484,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 30000
     },
     "xai.grok-4.6": {
+      "contextWindow": 500000,
+      "maxTokens": 500000
+    },
+    "xai.grok-4.7": {
       "contextWindow": 500000,
       "maxTokens": 500000
     }
@@ -29219,7 +28635,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "bailian/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "bailian/qwen3.8-27b": {
       "contextWindow": 1131072,
@@ -29583,7 +28999,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.7-plus": {
       "contextWindow": 1064000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen/qwen3.8-27b": {
       "contextWindow": 1131072,
@@ -29611,11 +29027,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "volcengine/doubao-seed-2.0-lite": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "volcengine/doubao-seed-2.0-mini": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "volcengine/doubao-seed-2.0-pro": {
       "contextWindow": 256000,
@@ -30471,7 +29887,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "qwen/qwen3.8-27b": {
       "contextWindow": 262144,
@@ -31621,7 +31037,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "deepseek/deepseek-v4-flash-0731": {
       "contextWindow": 1048576,
-      "maxTokens": 943718
+      "maxTokens": 384000
     },
     "deepseek/deepseek-v4-pro": {
       "contextWindow": 1048576,
@@ -31669,7 +31085,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "google/gemma-3-27b-it": {
       "contextWindow": 131072,
-      "maxTokens": 16384
+      "maxTokens": 117964
     },
     "meta-llama/llama-3.3-70b-instruct": {
       "contextWindow": 131072,
@@ -31858,10 +31274,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "z-ai/glm-5.2": {
       "contextWindow": 1048576,
       "maxTokens": 943718
-    },
-    "z-ai/glm-5.3-flash": {
-      "contextWindow": 1048576,
-      "maxTokens": 131072
     }
   },
   "privatemode-ai": {
@@ -32077,11 +31489,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "doubao-seed-2.0-lite": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "doubao-seed-2.0-mini": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "doubao-seed-2.0-pro": {
       "contextWindow": 256000,
@@ -32277,11 +31689,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "x-ai/grok-4-fast-non-reasoning": {
       "contextWindow": 2000000,
-      "maxTokens": 2000000
+      "maxTokens": 30000
     },
     "x-ai/grok-4-fast-reasoning": {
       "contextWindow": 2000000,
-      "maxTokens": 2000000
+      "maxTokens": 30000
     },
     "x-ai/grok-4.1-fast": {
       "contextWindow": 2000000,
@@ -33165,7 +32577,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "seed-2.0-mini": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "seed-2.0-pro": {
       "contextWindow": 256000,
@@ -33419,7 +32831,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "alibaba/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "deepseek/deepseek-v4-flash": {
       "contextWindow": 1000000,
@@ -35197,6 +34609,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 131072
     },
+    "glm-5.4": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
     "hy3": {
       "contextWindow": 256000,
       "maxTokens": 128000
@@ -35225,6 +34641,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 1048576
     },
+    "kimi-k3.1-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
     "mimo-v2.6-flash": {
       "contextWindow": 1048576,
       "maxTokens": 131072
@@ -35235,6 +34655,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "minimax-m3": {
       "contextWindow": 1048576,
+      "maxTokens": 512000
+    },
+    "minimax-m3.1-flash": {
+      "contextWindow": 1000000,
       "maxTokens": 512000
     }
   },
@@ -35769,7 +35193,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "Qwen/Qwen3.7-Plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "Qwen/Qwen3.8-Flash": {
       "contextWindow": 1000000,
@@ -36514,6 +35938,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "grok-4-7": {
       "contextWindow": 500000,
       "maxTokens": 200000
+    },
+    "hy4": {
+      "contextWindow": 1048576,
+      "maxTokens": 64000
     },
     "hy4-preview": {
       "contextWindow": 1048576,
@@ -37791,7 +37219,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "particle/particle-1": {
       "contextWindow": 1048576,
-      "maxTokens": 131072
+      "maxTokens": 1048576
     },
     "perplexity/sonar": {
       "contextWindow": 127000,
@@ -38269,6 +37697,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 131072
     },
+    "glm-5.4": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
     "kimi-k2.8-preview": {
       "contextWindow": 1048576,
       "maxTokens": 32768
@@ -38508,7 +37940,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 8192
     },
     "mistralai/mistral-small-3-1-24b-instruct-2503": {
-      "contextWindow": 131072,
+      "contextWindow": 128000,
       "maxTokens": 16384
     },
     "openai/gpt-oss-120b": {
@@ -39031,7 +38463,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "Qwen/Qwen3.7-Plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "Qwen/Qwen3.8-27B": {
       "contextWindow": 262144,
@@ -39377,7 +38809,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "ByteDance/Seed-2.0-mini": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "ByteDance/Seed-2.0-pro": {
       "contextWindow": 256000,
@@ -39671,11 +39103,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "bytedance/doubao-seed-2.0-lite": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "bytedance/doubao-seed-2.0-mini": {
       "contextWindow": 256000,
-      "maxTokens": 32000
+      "maxTokens": 131072
     },
     "bytedance/doubao-seed-2.0-pro": {
       "contextWindow": 256000,
@@ -39895,7 +39327,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.7-plus": {
       "contextWindow": 1000000,
-      "maxTokens": 64000
+      "maxTokens": 131072
     },
     "stepfun/step-3.5-flash": {
       "contextWindow": 256000,
