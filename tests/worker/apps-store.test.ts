@@ -1085,8 +1085,8 @@ describe("apps-store delivery read faces (consumption)", () => {
     await s.deliverySummaries(ids);
     expect(statements).toHaveLength(2);
     for (const [i, index] of [
-      "idx_webhook_deliveries_bot_health",
-      "idx_webhook_deliveries_bot_outcome_created",
+      "idx_webhook_deliveries_app_health",
+      "idx_webhook_deliveries_app_outcome_created",
     ].entries()) {
       const plan = db.raw.query(`EXPLAIN QUERY PLAN ${statements[i]!}`)
         .all(...ids) as Array<{ detail: string }>;

@@ -320,14 +320,14 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
     expect(count.n).toBe(2);
   });
 
-  test("creates idx_reviews_bot_id ON reviews(app_id) (fully migrated schema; 0056 recreated it under the bot name)", () => {
+  test("creates idx_reviews_app_id ON reviews(app_id) (0125 renamed 0056's bot-named index)", () => {
     const db = createMigratedTestD1();
     const index = db.raw
-      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_reviews_bot_id'")
+      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_reviews_app_id'")
       .get() as { tbl_name: string } | null;
     expect(index).not.toBeNull();
     expect(index!.tbl_name).toBe("reviews");
-    const columns = db.raw.query("PRAGMA index_info(idx_reviews_bot_id)").all() as Array<{ name: string }>;
+    const columns = db.raw.query("PRAGMA index_info(idx_reviews_app_id)").all() as Array<{ name: string }>;
     expect(columns.map((c) => c.name)).toEqual(["app_id"]);
   });
 
@@ -336,7 +336,7 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
     const plan = db.raw
       .query("EXPLAIN QUERY PLAN SELECT id FROM reviews WHERE app_id = 'app-1'")
       .all() as Array<{ detail: string }>;
-    expect(plan.some((p) => p.detail.includes("USING INDEX idx_reviews_bot_id"))).toBe(true);
+    expect(plan.some((p) => p.detail.includes("USING INDEX idx_reviews_app_id"))).toBe(true);
   });
 });
 
@@ -2919,14 +2919,14 @@ describe("migrations/0057_review_targets.sql", () => {
     expect(() => applySplit(db)).toThrow(/guard_queued_claim_without_target/);
   });
 
-  test("creates idx_review_targets_bot_id ON review_targets(app_id)", () => {
+  test("creates idx_review_targets_app_id ON review_targets(app_id) (0125 renamed 0057's bot-named index)", () => {
     const db = createMigratedTestD1();
     const index = db.raw
-      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_targets_bot_id'")
+      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_targets_app_id'")
       .get() as { tbl_name: string } | null;
     expect(index).not.toBeNull();
     expect(index!.tbl_name).toBe("review_targets");
-    const columns = db.raw.query("PRAGMA index_info(idx_review_targets_bot_id)").all() as Array<{
+    const columns = db.raw.query("PRAGMA index_info(idx_review_targets_app_id)").all() as Array<{
       name: string;
     }>;
     expect(columns.map((c) => c.name)).toEqual(["app_id"]);
@@ -2937,7 +2937,7 @@ describe("migrations/0057_review_targets.sql", () => {
     const plan = db.raw
       .query("EXPLAIN QUERY PLAN SELECT id FROM review_targets WHERE app_id = 'bot-1'")
       .all() as Array<{ detail: string }>;
-    expect(plan.some((p) => p.detail.includes("USING INDEX idx_review_targets_bot_repo"))).toBe(true);
+    expect(plan.some((p) => p.detail.includes("USING INDEX idx_review_targets_app_repo"))).toBe(true);
     expect(plan.some((p) => p.detail.includes("SCAN review_targets"))).toBe(false);
   });
 
