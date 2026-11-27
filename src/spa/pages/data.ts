@@ -1,6 +1,13 @@
 
 import { FREE_SLOT_REFUSAL, WORKSPACE_CREATION_CLOSED_REFUSAL } from "../../dashboard/entitlement";
-import { isBotMultiplier, isRpAmount, isRpCeiling, isRpPerCredit, RP_CEILING_MAX } from "../../contracts/rp-limits";
+import {
+  isBotMultiplier,
+  isChainMultiplier,
+  isRpAmount,
+  isRpCeiling,
+  isStoredRpPerCredit,
+  RP_CEILING_MAX,
+} from "../../contracts/rp-limits";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 
 export type Role = "admin" | "member";
@@ -141,7 +148,9 @@ function isAppsRowMonth(value: unknown): value is { used_rp: number; owned: bool
     isRecord(value) &&
     isRpAmount(value.used_rp) &&
     typeof value.owned === "boolean" &&
-    isBotMultiplier(value.multiplier)
+    // The server serves the PRODUCT of the mounted chain, not one bot's stored
+    // factor: a valid two-bot chain exceeds the single-bot bound.
+    isChainMultiplier(value.multiplier)
   );
 }
 
@@ -250,7 +259,7 @@ export function parseUsableBots(data: unknown): UsableBotsPayload | null {
   }
   // Same guard the App-detail parser applies: a present rate must be the whole
   // positive number the profile writer accepts, never a fraction or zero.
-  if (data.rp_per_credit !== undefined && !isRpPerCredit(data.rp_per_credit)) return null;
+  if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (!Array.isArray(data.bots)) return null;
   const bots: UsableBotRow[] = [];
   for (const row of data.bots) {
@@ -2282,7 +2291,7 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
-  if (data.rp_per_credit !== undefined && !isRpPerCredit(data.rp_per_credit)) return null;
+  if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (data.month_plan_rp !== undefined && data.month_plan_rp !== null && !isRpCeiling(data.month_plan_rp)) {
     return null;
   }
@@ -2749,7 +2758,7 @@ export function formatCredits(rp: number, rpPerCredit?: number): string {
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data)) return null;
   if (!isViewerRelation(data.viewer_relation)) return null;
-  if (data.rp_per_credit !== undefined && !isRpPerCredit(data.rp_per_credit)) return null;
+  if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
@@ -2890,7 +2899,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   // the NEXT reader, so it fails here too.
   if (app.multiplier !== undefined && app.multiplier !== null && !isBotMultiplier(app.multiplier)) return null;
   if (app.monthly_rp !== undefined && app.monthly_rp !== null && !isRpCeiling(app.monthly_rp)) return null;
-  if (data.rp_per_credit !== undefined && !isRpPerCredit(data.rp_per_credit)) return null;
+  if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (
     !isNullableString(app.last_webhook_at) ||
     !isNullableString(app.github_name) ||

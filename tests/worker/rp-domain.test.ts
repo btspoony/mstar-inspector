@@ -13,8 +13,10 @@ import { updateBotPricing } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import {
   BOT_MULTIPLIER_MAX,
+  CHAIN_MULTIPLIER_MAX,
   RP_CEILING_MAX,
   isBotMultiplier,
+  isChainMultiplier,
   isRpCeiling,
 } from "../../src/contracts/rp-limits";
 import { rpFor, type QuotaProfile } from "../../src/store/quota-store";
@@ -104,6 +106,22 @@ describe("the shared RP domain", () => {
     expect(isBotMultiplier(Number.POSITIVE_INFINITY)).toBe(false);
     expect(isBotMultiplier(0)).toBe(false);
     expect(isBotMultiplier(-1)).toBe(false);
+  });
+
+  // The Apps list serves `month.multiplier` as the PRODUCT of the mounted
+  // chain, so the single-bot bound is the wrong guard for it: two max-valid
+  // bots multiply past it and the whole list would fail to parse.
+  test("a chain's product is bounded by its price, not by the single-bot bound", () => {
+    expect(isBotMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isChainMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isChainMultiplier(BOT_MULTIPLIER_MAX * BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isChainMultiplier(CHAIN_MULTIPLIER_MAX)).toBe(true);
+    expect(isChainMultiplier(CHAIN_MULTIPLIER_MAX + 1)).toBe(false);
+    expect(isChainMultiplier(Number.POSITIVE_INFINITY)).toBe(false);
+    expect(isChainMultiplier(0)).toBe(false);
+    // The bound is exactly "no storable ceiling could cover one review".
+    expect(isRpCeiling(CHAIN_MULTIPLIER_MAX * 300)).toBe(true);
+    expect(CHAIN_MULTIPLIER_MAX * 300 <= RP_CEILING_MAX).toBe(true);
   });
 });
 
@@ -218,8 +236,64 @@ describe("the SPA parser applies the same domain", () => {
     expect(parseApps(appsPayload(chainRow({ effective_monthly_rp: RP_CEILING_MAX + 1 })))).toBeNull();
   });
 
-  test("a multiplier above the bound makes the parse fail", () => {
+  test("a chain row's multiplier above the single-bot bound makes the parse fail", () => {
     expect(parseApps(appsPayload(chainRow()))).not.toBeNull();
     expect(parseApps(appsPayload(chainRow({ multiplier: BOT_MULTIPLIER_MAX + 1 })))).toBeNull();
+  });
+
+  // The wire fact: `month.multiplier` is the chain's PRODUCT. Two 100× bots —
+  // each a legal stored value — make 10,000, which the single-bot bound refuses.
+  // End to end on the real list route: the payload the server actually serves
+  // for two mounted 100× bots must parse. This is the regression the guard
+  // exists for — the aggregate is a product, and the single-bot bound refused it.
+  test("a two-bot 100× chain serves month.multiplier 10,000 and parses", async () => {
+    world();
+    const partner = "bot-partner";
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+         VALUES (?, ?, ?, 100, 'shared', ?, ?)`,
+      )
+      .run(partner, OFFICIAL, partner, NOW, NOW);
+    db.raw.prepare("UPDATE review_bots SET multiplier = 100 WHERE id = ?").run(BOT_ROW);
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    db.raw
+      .prepare(
+        `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES (?, ?, 1, ?), (?, ?, 2, ?)`,
+      )
+      .run(BOT_ROW, OFFICIAL, BOT_ROW, BOT_ROW, OFFICIAL, partner);
+
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      apps: Array<{ github_app_id: number; month: { multiplier: number } | null }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!;
+    expect(row.month?.multiplier).toBe(100 * 100);
+    // And the guard the SPA applies accepts the payload the server sends.
+    expect(parseApps(body)).not.toBeNull();
+  });
+
+  test("a list row's chain-product multiplier parses past the single-bot bound", () => {
+    const withMonth = (month: Record<string, unknown>) => {
+      const base = appsPayload(chainRow());
+      const rows = base.apps as Array<Record<string, unknown>>;
+      const [only] = rows;
+      return { ...base, apps: [{ ...only, month }] };
+    };
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 100 * 100 }))).not.toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: CHAIN_MULTIPLIER_MAX }))).not.toBeNull();
+    // Past the price domain no stored ceiling could cover the chain's review.
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: CHAIN_MULTIPLIER_MAX + 1 }))).toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: Number.POSITIVE_INFINITY }))).toBeNull();
   });
 });

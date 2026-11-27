@@ -17,10 +17,24 @@
  * review then costs at most 300 × 1,000 = 300,000 RP. A multiplier past it
  * would price a single review above any ceiling that can be stored, so no
  * consumer could ever afford it.
+ *
+ * `CHAIN_MULTIPLIER_MAX` is the same price rule for a CHAIN's aggregate factor
+ * — the product the Apps list serves as `month.multiplier`. It is not one
+ * stored value, so it legitimately exceeds the single-bot bound (two 100× bots
+ * give 10,000); it is bounded by the price the whole chain produces.
+ *
+ * `RP_PER_CREDIT_MAX` is the profile's credit denominator. Every amount is
+ * divided by it, so a rate past the ceiling domain would render every real
+ * spend as `0.00` — and the column admits any positive integer, which is
+ * exactly how a writer and a reader drift apart. WRITERS apply it; READERS
+ * accept a stored row under {@link isStoredRpPerCredit}, because a rate
+ * authored before this bound existed must not turn the page into a load error.
  */
 export const RP_CEILING_MAX = 1_000_000_000;
 export const QUOTA_BASE_MAX = 300;
 export const BOT_MULTIPLIER_MAX = 1_000;
+export const CHAIN_MULTIPLIER_MAX = Math.floor(RP_CEILING_MAX / QUOTA_BASE_MAX);
+export const RP_PER_CREDIT_MAX = RP_CEILING_MAX;
 
 /** A spendable allowance: a positive whole number of RP inside the domain. */
 export function isRpCeiling(value: unknown): value is number {
@@ -35,6 +49,11 @@ export function isRpCeiling(value: unknown): value is number {
 /** A bot's price factor: finite, > 0, and bounded so its price stays representable. */
 export function isBotMultiplier(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= BOT_MULTIPLIER_MAX;
+}
+
+/** A chain's factor: the product of its bots' multipliers — finite, > 0, and priced in domain. */
+export function isChainMultiplier(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= CHAIN_MULTIPLIER_MAX;
 }
 
 /** A computed price: a whole number of RP inside the same domain, at least 1. */
@@ -52,11 +71,30 @@ export function isRpAmount(value: unknown): value is number {
 }
 
 /**
- * The operator profile's credit denominator: the positive whole number
- * `admin/quota-versions.ts` accepts when a version is authored. A reader that
- * accepted zero or a fraction would divide by something the writer never
- * stores — and `formatCredits` would render Infinity or a truncated rate.
+ * The WRITE domain of the profile's credit denominator — what
+ * `admin/quota-versions.ts` accepts when a version is authored. A rate above
+ * it would scale every real spend to `0.00`, so no new version may carry one.
  */
 export function isRpPerCredit(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= RP_PER_CREDIT_MAX
+  );
+}
+
+/**
+ * The READ domain of a STORED rate: any positive whole number.
+ *
+ * Deliberately wider than {@link isRpPerCredit}: the column only CHECKs
+ * `rp_per_credit > 0`, so a profile authored before this bound existed can hold
+ * any positive integer, including one past `2^53`. Refusing it would turn every
+ * face that divides by the rate into a load error for data nobody migrated —
+ * and this round ships no migration. Consequence, stated on the faces that read
+ * the rate: such a rate scales amounts towards `0.00` until the operator authors
+ * a new version. `0`, negatives, fractions, `Infinity` and non-numbers fail.
+ */
+export function isStoredRpPerCredit(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }

@@ -6,6 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { formatCredits, parseApps, parseBotSettings, parseSettings, parseUsableBots } from "../../src/spa/pages/data";
+import { CHAIN_MULTIPLIER_MAX, RP_PER_CREDIT_MAX } from "../../src/contracts/rp-limits";
 
 const chainRow = {
   position: 0,
@@ -451,8 +452,9 @@ describe("parseApps — a pending row without can_bind is shown, not dropped", (
  * missing REQUIRED ceiling is not "unlimited".
  *
  * The producer's own shapes are the input: `overview.effective_ceiling` is
- * computed on every successful bot read, `rp_per_credit` is the positive whole
- * number the admin authoring route accepts, and each list row is an object.
+ * computed on every successful bot read, `rp_per_credit` is a positive whole
+ * number (the admin route bounds new ones; a stored legacy row may exceed that
+ * bound and still has to open), and each list row is an object.
  * A payload that slips a fraction through would render a wrong figure instead
  * of the page's error face, which is the one outcome a type guard exists to
  * prevent.
@@ -482,7 +484,7 @@ describe("amount guards — the parsers apply the writer's domain", () => {
   });
 
   test("a malformed rp_per_credit fails every payload that carries one", () => {
-    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 60, "1000"]) {
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "1000"]) {
       expect(parseUsableBots(botsPayload({ rp_per_credit: bad })), `bots ${String(bad)}`).toBeNull();
       expect(parseSettings({ ...settingsPayload, rp_per_credit: bad }), `settings ${String(bad)}`).toBeNull();
       expect(
@@ -493,6 +495,27 @@ describe("amount guards — the parsers apply the writer's domain", () => {
     // An absent rate stays valid: that is the documented 1,000 fallback.
     const { rp_per_credit: _omitted, ...withoutRate } = botsPayload();
     expect(parseUsableBots(withoutRate)).not.toBeNull();
+  });
+
+  // The WRITE domain is bounded; the READ domain is not. A row authored before
+  // the bound existed (`rp_per_credit > 0` was its only CHECK) must still open:
+  // refusing it would turn the page into a load error for data nobody migrated.
+  // The cost is that such a rate scales amounts towards 0.00 — stated in the
+  // spec on the faces that read it, and fixed by authoring a new version.
+  test("a stored rate past the write bound still parses, so a legacy row opens", () => {
+    for (const stored of [RP_PER_CREDIT_MAX, 2 ** 60]) {
+      expect(parseUsableBots(botsPayload({ rp_per_credit: stored }))?.rp_per_credit, `bots ${String(stored)}`).toBe(
+        stored,
+      );
+      expect(
+        parseSettings({ ...settingsPayload, rp_per_credit: stored })?.rp_per_credit,
+        `settings ${String(stored)}`,
+      ).toBe(stored);
+      expect(
+        parseBotSettings({ ...botPayload, rp_per_credit: stored })?.rp_per_credit,
+        `bot ${String(stored)}`,
+      ).toBe(stored);
+    }
   });
 
   test("a malformed plan ceiling or recorded spend fails the list parse", () => {
@@ -527,7 +550,7 @@ describe("amount guards — the parsers apply the writer's domain", () => {
     expect(parseApps({ viewer, apps: [good] })).not.toBeNull();
   });
 
-  test("a list row's month block must carry a recorded spend and a bounded multiplier", () => {
+  test("a list row's month block must carry a recorded spend and a price-bounded chain product", () => {
     const viewer = { login: "alice", role: "member" };
     const row = {
       github_app_id: 1,
@@ -541,10 +564,16 @@ describe("amount guards — the parsers apply the writer's domain", () => {
       month: { used_rp: 40, owned: false, multiplier: 1 },
     };
     expect(parseApps({ viewer, apps: [row] })).not.toBeNull();
+    // The multiplier here is the CHAIN's product, so a value past the
+    // single-bot bound is legal; only one past the price domain is not.
+    expect(parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: 100 * 100 } }] })).not.toBeNull();
+    expect(
+      parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: CHAIN_MULTIPLIER_MAX } }] }),
+    ).not.toBeNull();
     for (const bad of [
       { used_rp: 1.5, owned: false, multiplier: 1 },
       { used_rp: 40, owned: false, multiplier: 0 },
-      { used_rp: 40, owned: false, multiplier: 5000 },
+      { used_rp: 40, owned: false, multiplier: CHAIN_MULTIPLIER_MAX + 1 },
       { used_rp: 40, owned: "no", multiplier: 1 },
       "month",
     ]) {
@@ -591,7 +620,9 @@ describe("amount guards — the parsers apply the writer's domain", () => {
       ).toBeNull();
     }
     // The consumer payload omits both: absence is not a malformed value.
-    const { multiplier: _m, monthly_rp: _r, ...app } = { ...botPayload.app };
+    const app: Record<string, unknown> = { ...botPayload.app };
+    delete app.multiplier;
+    delete app.monthly_rp;
     expect(parseBotSettings({ ...botPayload, app })).not.toBeNull();
   });
 });

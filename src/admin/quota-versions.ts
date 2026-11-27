@@ -1,6 +1,6 @@
 import { FREE_PLAN_ID } from "../dashboard/entitlement";
 import type { DashboardD1 } from "../dashboard/users";
-import { isRpCeiling, QUOTA_BASE_MAX } from "../contracts/rp-limits";
+import { isRpCeiling, isRpPerCredit, QUOTA_BASE_MAX, RP_PER_CREDIT_MAX } from "../contracts/rp-limits";
 import {
   decodeQuotaProfiles,
   pickQuotaProfile,
@@ -262,10 +262,6 @@ function utcDate(date: string): string | null {
   return at.toISOString().slice(0, 10) === date ? iso : null;
 }
 
-function positiveInt(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
-}
-
 /** A positive whole number no larger than `max` — the shared domain's own test. */
 function positiveIntWithin(value: unknown, max: number): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= max ? value : null;
@@ -350,9 +346,15 @@ export function parseQuotaNumbers(
       error: `base.quick, base.default and base.deep must each be a positive whole number of RP no larger than ${QUOTA_BASE_MAX}`,
     };
   }
-  const rpPerCredit = positiveInt(fields.rpPerCredit);
+  // The rate divides every amount on every face, so the writer applies the
+  // READ domain's bound: a version carrying a rate the SPA refuses would be a
+  // page that cannot open.
+  const rpPerCredit = isRpPerCredit(fields.rpPerCredit) ? fields.rpPerCredit : null;
   if (rpPerCredit === null) {
-    return { ok: false, error: "rpPerCredit must be a positive whole number of RP" };
+    return {
+      ok: false,
+      error: `rpPerCredit must be a positive whole number of RP no larger than ${RP_PER_CREDIT_MAX}`,
+    };
   }
   if (fields.notes !== null && fields.notes !== undefined && typeof fields.notes !== "string") {
     return { ok: false, error: "notes must be a string, or null to record none" };

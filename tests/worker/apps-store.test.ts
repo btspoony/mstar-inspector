@@ -824,20 +824,37 @@ describe("apps-store workspace dual write (migration 0026)", () => {
   // (an App plus its same-id bot) and `createBot` (a standalone bot). The pin
   // keeps every other module out of the table — an ad-hoc INSERT elsewhere
   // fails here — so the intent survives the second path.
-  test("src/ holds exactly the two creation-path INSERT INTO review_bots sites, both in apps-store", () => {
-    const sites: string[] = [];
+  //
+  // A per-file count alone does not pin the PATHS: moving one INSERT to another
+  // function in the same file kept the count at 2 and the test green. Each hit
+  // is therefore attributed to its ENCLOSING member by name, so both creation
+  // functions must keep exactly one and nothing else may hold one.
+  test("src/ holds exactly the two creation-path INSERT INTO review_bots sites, one per creation function", () => {
+    const root = join(import.meta.dir, "../../");
+    const owners = new Map<string, string[]>();
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const path = join(dir, entry.name);
         if (entry.isDirectory()) walk(path);
         else if (entry.name.endsWith(".ts")) {
-          const hits = readFileSync(path, "utf8").match(/INSERT INTO review_bots\b/g)?.length ?? 0;
-          if (hits > 0) sites.push(`${path.slice(join(import.meta.dir, "../../").length)}:${hits}`);
+          const text = readFileSync(path, "utf8");
+          const relative = path.slice(root.length);
+          for (const match of text.matchAll(/INSERT INTO review_bots\b/g)) {
+            const before = text.slice(0, match.index);
+            // The nearest preceding member declaration at the store's own
+            // indentation (`    async createApp(input: ...`) is the owner.
+            const enclosing = [...before.matchAll(/\n {4}async (\w+)\(/g)].at(-1)?.[1] ?? "<module>";
+            const list = owners.get(relative) ?? [];
+            list.push(enclosing);
+            owners.set(relative, list);
+          }
         }
       }
     };
-    walk(join(import.meta.dir, "../../src"));
-    expect(sites).toEqual(["src/dashboard/apps-store.ts:2"]);
+    walk(join(root, "src"));
+    expect([...owners.entries()].map(([file, fns]) => `${file} ${fns.sort().join(",")}`)).toEqual([
+      "src/dashboard/apps-store.ts createApp,createBot",
+    ]);
   });
 });
 

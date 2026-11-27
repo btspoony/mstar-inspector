@@ -8,6 +8,7 @@ import { quotaMonth, quotaStartsOn } from "../../src/store/quota-store";
 import { listQuotaVersions } from "../../src/admin/quota-versions";
 import type { DashboardD1, DashboardD1Statement } from "../../src/dashboard/users";
 import { QUOTA_PLAN_SKIP_REASON, QUOTA_STAGE } from "../../src/contracts/failure-stages";
+import { RP_PER_CREDIT_MAX } from "../../src/contracts/rp-limits";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 
@@ -379,6 +380,36 @@ describe("POST /_internal_admin/api/quota-versions", () => {
       },
     ]);
     expect(db.raw.query("SELECT * FROM quota_profiles WHERE id = 'quota-v1'").get()).toEqual(before);
+  });
+
+  // QC F4-2: ONE rate contract. The reader refuses 0, a fraction and a
+  // non-number; the writer must refuse everything the reader refuses, plus the
+  // rate that would scale every real spend to 0.00. The boundary is shared, so
+  // `2**53` is refused HERE rather than becoming an unopenable page later.
+  test("the rate boundary: the writer refuses what the read domain cannot render", async () => {
+    const db = fixture();
+    const impact = { count: 0, total: 1, startsOn: nextFirst() };
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "1000", 2 ** 53, RP_PER_CREDIT_MAX + 1]) {
+      const res = await adminFetch(db, "POST", "/api/quota-versions", {
+        ...candidate(),
+        rpPerCredit: bad,
+        impact,
+      });
+      expect(res.status, `publish ${String(bad)}`).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("rpPerCredit");
+    }
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: SEEDED_PROFILES });
+
+    // The top of the domain still publishes: the bound is inclusive.
+    const ok = await adminFetch(db, "POST", "/api/quota-versions", {
+      ...candidate(),
+      rpPerCredit: RP_PER_CREDIT_MAX,
+      impact,
+    });
+    expect(ok.status).toBe(201);
+    expect(
+      db.raw.query("SELECT rp_per_credit FROM quota_profiles WHERE version = 3").get(),
+    ).toEqual({ rp_per_credit: RP_PER_CREDIT_MAX });
   });
 
   test("refuses an effective time that would judge the month in progress", async () => {
