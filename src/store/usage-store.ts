@@ -1,6 +1,6 @@
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { isBotMultiplier, isRpPrice, QUOTA_BASE_MAX, RP_CEILING_MAX } from "../contracts/rp-limits";
+import { isBotMultiplier, isRpCeiling, isRpPrice, QUOTA_BASE_MAX, RP_CEILING_MAX } from "../contracts/rp-limits";
 import type { D1Like } from "./types";
 
 /**
@@ -188,7 +188,10 @@ export type ChargeRefusal = "price-out-of-domain";
  * all three of its factors are inside the shared domain `src/contracts/rp-limits`
  * defines — the multiplier, the profile's base weight for this level, and the
  * computed product — and refuses (appends nothing, reports `price-out-of-domain`)
- * otherwise. Refusing to record an unrepresentable charge is the only safe
+ * otherwise. The base weight must also be a WHOLE positive number: the column is
+ * declared INTEGER, but the engine's affinity stores a REAL in it, and a stored
+ * `1.5` would otherwise bind the month and price a charge from a weight no writer
+ * admitted. Refusing to record an unrepresentable charge is the only safe
  * answer: a charge no ceiling can bound would be unpayable AND unrefundable.
  *
  * `seq` is minted inside the same statement, so the attempt ordinal is a
@@ -233,7 +236,11 @@ export async function chargeUsage(
                            CASE WHEN p.effective_from <= ?3 THEN p.effective_from END DESC,
                            p.effective_from ASC
                   LIMIT 1) chosen
-          WHERE chosen.base <= ${QUOTA_BASE_MAX}`,
+          -- A whole, positive RP weight: the column is DECLARED INTEGER but the
+          -- engine's affinity does not reject a REAL, so 1.5 would otherwise bind.
+          WHERE chosen.base > 0
+            AND chosen.base = CAST(chosen.base AS INTEGER)
+            AND chosen.base <= ${QUOTA_BASE_MAX}`,
       )
       .bind(input.workspaceId, input.month, input.occurredAt, input.executionToken),
     db
@@ -251,6 +258,8 @@ export async function chargeUsage(
             AND b.month = ?2
             AND NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)
             AND ${priceOf(baseColumn, "?7")} <= ${RP_CEILING_MAX}
+            AND p.${baseColumn} > 0
+            AND p.${baseColumn} = CAST(p.${baseColumn} AS INTEGER)
             AND p.${baseColumn} <= ${QUOTA_BASE_MAX}`,
       )
       .bind(
@@ -293,7 +302,10 @@ export async function chargeUsage(
   const [observed] = (results[2]?.results ?? []) as Array<{ base: number; rp: number }>;
   // A profile DID resolve and its price is outside the domain: the charge was
   // refused, not merely absent. Anything else is the caller's to interpret.
-  if (observed !== undefined && (!isRpPrice(observed.rp) || observed.base > QUOTA_BASE_MAX)) {
+  // `isRpCeiling` is the shared whole-positive-integer test: a stored REAL base
+  // (the INTEGER column's affinity admits one) fails it exactly as a too-large
+  // weight does, and neither may record a row.
+  if (observed !== undefined && (!isRpPrice(observed.rp) || !isRpCeiling(observed.base) || observed.base > QUOTA_BASE_MAX)) {
     return { charged: false, refused: "price-out-of-domain" };
   }
   return { charged: false };

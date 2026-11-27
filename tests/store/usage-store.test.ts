@@ -653,6 +653,44 @@ describe("F2-2 — the RP domain is enforced AT THE CHARGE, on every path", () =
     expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
   });
 
+  test("a stored fractional base weight refuses — the INTEGER column is not strictly typed", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // A REAL in a column DECLARED INTEGER survives affinity. Before the
+    // integrality guard, 1.5 bound the month and priced ceil(1.5) = 2 RP: a
+    // weight no writer would have admitted, recorded as a charge.
+    db.raw.prepare("UPDATE quota_profiles SET base_deep = ?").run(1.5);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "fractional-base", source: "byok", level: "deep" }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("a fractional weight below 1 refuses even though its price would be 1 RP", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // ceil(0.5 × 1) clamps to 1 RP, well inside the PRICE domain: the refusal
+    // has to come from the weight, which is why both halves are guarded.
+    db.raw.prepare("UPDATE quota_profiles SET base_standard = ?").run(0.5);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "sub-unit-base", source: "shared", level: "default" }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("a fractional multiplier still prices a whole RP — the price cannot leave the domain that way", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // The price is `max(1, ceil(base × multiplier))`, so no in-domain factor
+    // pair can produce a fractional `rp`: the multiplier guard admits 1.5 and
+    // the ceil turns 1 × 1.5 into 2. This pins that the only reachable
+    // fractionality is in the stored BASE, which the guard above refuses.
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "fractional-multiplier", multiplier: 1.5, level: "quick" }),
+    ).toEqual({ charged: true });
+    expect(db.raw.query("SELECT rp FROM usage_events").get()).toEqual({ rp: 2 });
+  });
+
   test("both factors at their individual maxima still charge — the domain admits the pair", async () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
