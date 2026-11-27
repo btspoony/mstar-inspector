@@ -24,6 +24,7 @@ const BOOT: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
 const BOT_PAYLOAD = {
   can_manage: true,
   owned: true,
+  archived: false,
   app: {
     github_app_id: null,
     id: "bot-1",
@@ -104,7 +105,7 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
       //    models read failed — the failure is not fatal to the page.
       expect(container.textContent).toContain("Team bot");
       // The rest of the page rendered: the overview's own facts are present.
-      expect(container.textContent).toContain(t("en", "bots.fieldProvider"));
+      expect(container.textContent).toContain(t("en", "botDetail.usage.source"));
       expect(container.textContent).toContain("Acme");
 
       // 2. THE FAILURE IS VISIBLE on the editor, with its retry affordance —

@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { t } from "../../src/i18n";
 import { APP_ROUTES } from "../../src/dashboard/index";
-import { BotSettingsView } from "../../src/spa/pages/BotSettingsPage";
+import { BotPricingSection } from "../../src/spa/pages/BotSettingsPage";
 import type { BotSettingsPayload } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
 
@@ -25,6 +25,7 @@ function payload(overrides: Partial<BotSettingsPayload> = {}): BotSettingsPayloa
   return {
     can_manage: true,
     official_workspace: true,
+    archived: false,
     app: {
       github_app_id: 1,
       status: "active",
@@ -76,11 +77,9 @@ async function mount(overrides: Partial<BotSettingsPayload> = {}, status = 200, 
   try {
     await act(async () => {
       root.render(
-        createElement(BotSettingsView, {
+        createElement(BotPricingSection, {
           locale,
           payload: payload(overrides),
-          groups: [],
-          notice: null,
           onReload: async () => {
             reloads.push(1);
             return true;
@@ -129,7 +128,7 @@ describe("the bot page's share switch", () => {
   test("sharing confirms first, then PATCHes the shared scope and reloads", async () => {
     const view = await mount();
     try {
-      expect(view.container.textContent).toContain(t(locale, "botSettings.shareTitle"));
+      expect(view.container.textContent).toContain(t(locale, "botDetail.share.title"));
       await view.click(view.buttonWith(t(locale, "botSettings.shareAction")));
       expect(view.scopeCalls()).toEqual([]);
       expect(view.dialog()?.textContent).toContain(t(locale, "botSettings.confirmShareBody"));
@@ -168,13 +167,13 @@ describe("the bot page's share switch", () => {
     const view = await mount({ official_workspace: false });
     try {
       const rendered = String(view.container.textContent);
+      // The share switch is absent for a non-official workspace; the pricing
+      // controls themselves stay preconfigurable.
+      expect(rendered.includes(t(locale, "botDetail.share.switch"))).toBe(false);
       for (const key of [
-        "botSettings.shareTitle",
-        "botSettings.shareCopy",
         "botSettings.shareAction",
         "botSettings.unshareAction",
       ] as const) {
-        expect(rendered.includes(t(locale, key)), key).toBe(false);
         expect(view.buttonWith(t(locale, key))).toBeNull();
       }
     } finally {
@@ -186,9 +185,10 @@ describe("the bot page's share switch", () => {
     const view = await mount({ can_manage: false });
     try {
       const rendered = String(view.container.textContent);
-      expect(rendered.includes(t(locale, "botSettings.shareTitle"))).toBe(false);
+      // The read-only consumer face never renders this section at all; mounted
+      // directly, the member answer keeps every share concept absent.
+      expect(rendered.includes(t(locale, "botDetail.share.switch"))).toBe(false);
       expect(view.buttonWith(t(locale, "botSettings.shareAction"))).toBeNull();
-      expect(rendered).toContain(t(locale, "botSettings.readOnly"));
     } finally {
       await view.cleanup();
     }

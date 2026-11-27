@@ -1,26 +1,46 @@
 /**
- * The bot detail page (`/dashboard/<ref>/bots/:botId`, D7/D23/D24): ONE page,
- * two blocks. The read-only overview renders for every member of a workspace
- * that can use the bot (own or shared); the editable region renders only when
- * `can_manage` says this caller owns the workspace that provides it — and the
- * store refuses the write regardless, so hiding is never the guard.
+ * The bot detail page (`/dashboard/<ref>/bots/:botId`, D7/D23/D24): ONE route,
+ * two faces. The owner — the bot's own workspace with manage rights — gets
+ * 概览/配置 tabs: the overview is read-only, the config tab writes profile,
+ * pricing, providers, chains, seats, runtime and the archive action. Every
+ * other reader (a consumer workspace, or a member without manage) gets the
+ * read-only face — usage, capability summary and mounts — with the owner's
+ * provider/seat/chain/pricing machinery ABSENT, never disabled. An archived
+ * bot shows its banner to both faces; only the owner restores it, and the
+ * config tab locks behind that banner.
  *
- * The overview proves only what the API served: name, description, provider
- * workspace, sharing state, mounting Apps, multiplier, this month's spend and
- * the capability summary built from the model's default chain plus its
- * sandbox image (D21) — never a client-derived guess.
+ * Credits render via `formatCredits` at the payload's rate; the route omits
+ * `rp_per_credit` when the operator profile is unreadable, and formatCredits'
+ * ADR fallback (1 Credit = 1,000 RP) covers that case.
  */
 import { useEffect, useRef, useState } from "react";
+import {
+  Button,
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  FlowSection,
+  Input,
+  StatusBadge,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@design-system";
 import { t } from "../../i18n";
-import { fetchJson } from "../api";
+import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { MetricBand, type Metric } from "../components/MetricBand";
+import { PageHeader } from "../components/PageHeader";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import { apiBase } from "../workspace-base";
-import { patchJson } from "../api";
-import { PageHeader } from "../components/PageHeader";
-import { SectionCard } from "../components/SectionCard";
 import {
+  formatCredits,
   parseBotSettings,
   parseModels,
   splitModelChain,
@@ -28,31 +48,16 @@ import {
   type BotSettingsPayload,
   type ModelOptionGroup,
 } from "./data";
-import { BotSettingsView } from "./BotSettingsPage";
-import type { NoticeKind } from "./PageNotice";
+import { BotPricingSection, BotSettingsView } from "./BotSettingsPage";
+import { NoticeRegion, PageNotice, type OpNotice } from "./PageNotice";
 
-/** The month cell: a shared bot's ceiling, an own bot's freedom, or a dash. */
-export function BotMonthLabel({
-  locale,
-  overview,
-  owned,
-  quotaError,
-}: {
-  locale: SpaBoot["locale"];
-  overview: BotOverview | undefined;
-  owned: boolean;
-  quotaError?: boolean;
-}) {
-  if (!overview) return <>{t(locale, "apps.bots.monthNone")}</>;
-  const used = overview.month_used_rp;
-  if (owned) return <>{t(locale, "bots.monthOwn", { used })}</>;
-  // F10: an unresolvable ceiling is an ERROR, never "no ceiling".
-  if (quotaError === true) return <>{t(locale, "bots.monthUnknown")}</>;
-  return overview.plan_monthly_rp === null ? (
-    <>{t(locale, "bots.monthNoCeiling", { used })}</>
-  ) : (
-    <>{t(locale, "bots.monthLimit", { used, limit: overview.plan_monthly_rp })}</>
-  );
+/** formatCredits without the unit — for templates that carry their own. */
+function creditAmount(rp: number, rpPerCredit?: number): string {
+  return formatCredits(rp, rpPerCredit).slice(0, -" Credits".length);
+}
+
+function botApiPath(botId: string): string {
+  return `${apiBase()}/api/review-bots/${encodeURIComponent(botId)}`;
 }
 
 export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string }) {
@@ -60,11 +65,10 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   const [payload, setPayload] = useState<BotSettingsPayload | null>(null);
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  // F14: a models failure is its OWN state. The page still renders; the editor
-  // shows the error and a retry, and retry re-reads both affected sources.
+  // F14: a models failure is its OWN state. The page still renders; the owner
+  // config tab shows the error and a retry, and retry re-reads both sources.
   const [modelsError, setModelsError] = useState(false);
   const [modelsRetry, setModelsRetry] = useState(0);
-  const [notice] = useState<{ kind: NoticeKind; message: string } | null>(null);
 
   const sequenceRef = useRef(0);
   const base = apiBase();
@@ -142,6 +146,18 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   // F5: ownership is the bot's workspace, NOT its publication scope — an
   // owner who publishes a bot still reads own-bot unlimited usage.
   const owned = payload.owned === true;
+  // The owner face requires BOTH facts: whose bot it is, and this caller's
+  // manage rights on that workspace. A plain member of the owning workspace
+  // reads the consumer face.
+  const isOwner = owned && payload.can_manage;
+  const archived = payload.archived === true;
+  const shared = app.scope === "shared";
+  // Served by the route only when the operator profile is readable; absent ⇒
+  // formatCredits' ADR fallback. The parser passes unknown fields through, so
+  // the rate is narrowed here rather than asserted.
+  const rawRate = "rp_per_credit" in payload ? payload.rp_per_credit : undefined;
+  const rpPerCredit =
+    typeof rawRate === "number" && Number.isFinite(rawRate) && rawRate > 0 ? rawRate : undefined;
   // F4: the capability summary reads the NON-OWNER overview read, so a shared
   // bot's configured default chain is visible to its consumers; `model_chain`
   // stays owner-only configuration.
@@ -149,207 +165,410 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   const namedChains = payload.model_chains
     .filter((entry) => entry.name !== "default")
     .map((entry) => ({ name: entry.name, chain: splitModelChain(entry.chain) }));
-  const capabilityDefault =
-    defaultChain.length === 0
-      ? t(locale, "bots.capabilityChainUnset")
-      : t(locale, "bots.capabilityDefaultChain", { models: defaultChain.join(", ") });
+
+  const monthValue = !overview
+    ? t(locale, "bots.monthNone")
+    : payload.quota_error === true
+      ? t(locale, "bots.monthUnknown")
+      : isOwner
+        ? t(locale, "credits.unlimitedOwn", { used: creditAmount(overview.month_used_rp, rpPerCredit) })
+        : overview.plan_monthly_rp === null
+          ? t(locale, "credits.noCeiling", { used: creditAmount(overview.month_used_rp, rpPerCredit) })
+          : formatCredits(overview.month_used_rp, rpPerCredit);
+  const metrics: Metric[] = [
+    { key: t(locale, "bots.fieldMultiplier"), value: `×${app.multiplier ?? 1}` },
+    { key: t(locale, "credits.usedThisMonth"), value: monthValue },
+    { key: t(locale, "bots.fieldMounted"), value: String(overview?.mounted_apps.length ?? 0) },
+  ];
+
+  const header = (
+    <PageHeader
+      title={app.name ?? appDisplayNameOf(app)}
+      description={
+        <span className="flex flex-col gap-1.5">
+          {app.description ? <span>{app.description}</span> : null}
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="font-mono">{app.id}</span>
+            {archived ? (
+              <StatusBadge tone="neutral">{t(locale, "bots.list.archived")}</StatusBadge>
+            ) : (
+              <StatusBadge tone={shared ? "accent" : "neutral"}>
+                {t(locale, shared ? "bots.stateShared" : "bots.stateOwn")}
+              </StatusBadge>
+            )}
+          </span>
+        </span>
+      }
+      metrics={<MetricBand metrics={metrics} />}
+    />
+  );
+
+  const readOnlySections = (
+    <>
+      <BotUsageSection locale={locale} payload={payload} owner={isOwner} rpPerCredit={rpPerCredit} />
+      <BotCapabilitySection locale={locale} payload={payload} defaultChain={defaultChain} namedChains={namedChains} />
+      <BotMountsSection locale={locale} overview={overview} />
+    </>
+  );
+
+  // The consumer face: the SAME header and metric band, then a read-only
+  // notice and the three read-only sections. No tab bar, and none of the
+  // owner's machinery — absence, not disabled controls.
+  if (!isOwner) {
+    return (
+      <div className="flex flex-col gap-6">
+        {header}
+        {archived ? <PageNotice kind="warn" message={t(locale, "botDetail.archive.consumerBanner")} /> : null}
+        <p className="text-sm text-muted-foreground">{t(locale, "botDetail.consumer.readOnlyNotice")}</p>
+        {readOnlySections}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title={app.name ?? appDisplayNameOf(app)} description={app.description ?? undefined} />
-
-      <SectionCard tier="secondary" title={t(locale, "bots.overviewTitle")}>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-          <dt className="text-muted-foreground">{t(locale, "bots.fieldProvider")}</dt>
-          <dd>{overview?.provider_workspace ?? "—"}</dd>
-
-          <dt className="text-muted-foreground">{t(locale, "bots.fieldSharing")}</dt>
-          <dd>{t(locale, app.scope === "shared" ? "bots.stateShared" : "bots.stateOwn")}</dd>
-
-          <dt className="text-muted-foreground">{t(locale, "bots.fieldMounted")}</dt>
-          <dd>
-            {overview && overview.mounted_apps.length > 0 ? (
-              <span className="flex flex-wrap gap-2">
-                {overview.mounted_apps.map((mounted) => (
-                  <a key={mounted.id} href={`${apiBase()}/apps/${mounted.github_app_id}`}>
-                    {mounted.name}
-                  </a>
-                ))}
-              </span>
-            ) : (
-              t(locale, "bots.mountedNone")
-            )}
-          </dd>
-
-          <dt className="text-muted-foreground">{t(locale, "bots.fieldMultiplier")}</dt>
-          <dd>×{app.multiplier ?? 1}</dd>
-
-          <dt className="text-muted-foreground">
-            {t(locale, "bots.monthLabel")}
-            <span className="sr-only">{t(locale, "bots.monthHint")}</span>
-          </dt>
-          <dd>
-            <BotMonthLabel
-              locale={locale}
-              overview={overview}
-              owned={owned}
-              quotaError={payload.quota_error === true}
-            />
-          </dd>
-
-          <dt className="text-muted-foreground">{t(locale, "bots.fieldCapability")}</dt>
-          <dd className="flex flex-col gap-0.5">
-            <span>{capabilityDefault}</span>
-            <span>{t(locale, "bots.capabilitySandbox", { id: app.sandbox_image_id || "—" })}</span>
-            {namedChains.length > 0 ? (
-              <span className="text-muted-foreground">
-                {namedChains.map((row) => `${row.name}: ${row.chain.join(", ")}`).join(" · ")}
-              </span>
+      {header}
+      {archived ? <ArchivedOwnerBanner locale={locale} botId={app.id} onReload={reloadSection} /> : null}
+      <Tabs defaultValue="overview">
+        <TabsList>
+          <TabsTrigger value="overview">{t(locale, "botDetail.tab.overview")}</TabsTrigger>
+          <TabsTrigger value="config">{t(locale, "botDetail.tab.config")}</TabsTrigger>
+        </TabsList>
+        {/* forceMount keeps both panels in the DOM (hidden when inactive) so a
+            background reload never unmounts an editor mid-write. */}
+        <TabsContent value="overview" forceMount className="flex flex-col gap-6 pt-4">
+          {readOnlySections}
+          <FlowSection title={t(locale, "bots.fieldSharing")}>
+            <p>
+              <StatusBadge tone={shared ? "accent" : "neutral"}>
+                {t(locale, shared ? "bots.stateShared" : "bots.stateOwn")}
+              </StatusBadge>
+            </p>
+          </FlowSection>
+        </TabsContent>
+        <TabsContent value="config" forceMount className="flex flex-col gap-6 pt-4">
+          {archived ? <PageNotice kind="warn" message={t(locale, "botDetail.archive.lockedNotice")} /> : null}
+          {/* Archived locks the WHOLE config face: a disabled fieldset turns
+              every control read-only while the sections stay visible. */}
+          <fieldset disabled={archived} className="m-0 flex min-w-0 flex-col gap-6 border-0 p-0">
+            <BotProfileEditor locale={locale} payload={payload} onReload={reloadSection} />
+            <BotPricingSection locale={locale} payload={payload} onReload={reloadSection} />
+            {/* F14: a models failure surfaces WITH its retry; the stored chain
+                rows below keep rendering from the bot payload. */}
+            {modelsError ? (
+              <ErrorState
+                locale={locale}
+                message={t(locale, "bots.modelsFailed")}
+                onRetry={() => setModelsRetry((value) => value + 1)}
+              />
             ) : null}
-          </dd>
-        </dl>
-      </SectionCard>
-
-      {payload.can_manage ? (
-        <SectionCard tier="secondary" title={t(locale, "bots.editableTitle")}>
-          {/* F14: a models failure surfaces on the editor WITH its retry; the
-              rest of the page above keeps rendering. */}
-          {modelsError ? (
-            <ErrorState
+            <BotSettingsView
               locale={locale}
-              message={t(locale, "bots.modelsFailed")}
-              onRetry={() => setModelsRetry((value) => value + 1)}
+              payload={payload}
+              groups={groups}
+              modelsLoading={false}
+              notice={null}
+              onReload={reloadSection}
             />
-          ) : null}
-          <BotSettingsView
-            locale={locale}
-            payload={payload}
-            groups={groups}
-            modelsLoading={false}
-            notice={notice}
-            onReload={reloadSection}
-          />
-          <div className="mt-4 flex flex-col gap-2">
-            <h3 className="text-sm font-medium">{t(locale, "bots.overridesTitle")}</h3>
-            <BotQuotaOverridesEditor
-              locale={locale}
-              botId={app.id}
-              initial={payload.quota_overrides ?? []}
-            />
-          </div>
-        </SectionCard>
-      ) : null}
+          </fieldset>
+          {archived ? null : <BotArchiveSection locale={locale} botId={app.id} onReload={reloadSection} />}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
 
-/**
- * The owner's per-workspace ceiling editor (F8). `bot_quota_overrides` is the
- * exception layer over the bot's DEFAULT ceiling, and this is the only surface
- * that writes it.
- *
- * Every write goes through `PATCH /api/review-bots/:botId/quota-overrides`; an
- * empty ceiling clears the row, returning that workspace to the default. The
- * list is re-read from the response, so the table always shows what the store
- * holds — never an optimistic guess.
- */
-export function BotQuotaOverridesEditor({
+/** 使用情况: this workspace's month through this bot, against its ceiling. */
+function BotUsageSection({
   locale,
-  botId,
-  initial,
+  payload,
+  owner,
+  rpPerCredit,
 }: {
   locale: SpaBoot["locale"];
-  botId: string;
-  initial: ReadonlyArray<{ workspaceId: string; monthlyRp: number }>;
+  payload: BotSettingsPayload;
+  owner: boolean;
+  rpPerCredit?: number;
 }) {
-  const [rows, setRows] = useState(initial);
-  const [workspaceId, setWorkspaceId] = useState("");
-  const [ceiling, setCeiling] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const overview = payload.overview;
+  const used = overview?.month_used_rp ?? 0;
+  const cap = overview?.plan_monthly_rp ?? null;
+  const quotaError = payload.quota_error === true;
+  const none = t(locale, "bots.monthNone");
+  // The owner's own bot has no enforced ceiling; a consumer reads the ceiling
+  // the store enforces on THIS workspace. An unresolvable ceiling is an error
+  // state (F10), never "no ceiling".
+  const capValue = owner
+    ? none
+    : quotaError
+      ? t(locale, "bots.monthUnknown")
+      : cap === null
+        ? none
+        : formatCredits(cap, rpPerCredit);
+  const remainingValue =
+    !owner && !quotaError && cap !== null ? formatCredits(Math.max(0, cap - used), rpPerCredit) : none;
+  return (
+    <FlowSection title={t(locale, "botDetail.usage.title")} subtitle={t(locale, "botDetail.usage.utcHint")}>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+        <dt className="text-muted-foreground">{t(locale, "botDetail.usage.used")}</dt>
+        <dd className="tabular-nums">{overview ? formatCredits(used, rpPerCredit) : none}</dd>
+        <dt className="text-muted-foreground">{t(locale, "botDetail.usage.cap")}</dt>
+        <dd className="tabular-nums">{overview ? capValue : none}</dd>
+        <dt className="text-muted-foreground">{t(locale, "botDetail.usage.remaining")}</dt>
+        <dd className="tabular-nums">{overview ? remainingValue : none}</dd>
+        <dt className="text-muted-foreground">{t(locale, "botDetail.usage.source")}</dt>
+        <dd>{overview?.provider_workspace ?? none}</dd>
+      </dl>
+    </FlowSection>
+  );
+}
 
-  async function write(target: string, monthlyRp: number | null): Promise<void> {
+/** 能力摘要: what this bot can do, as text — chain, runtime, multiplier. */
+function BotCapabilitySection({
+  locale,
+  payload,
+  defaultChain,
+  namedChains,
+}: {
+  locale: SpaBoot["locale"];
+  payload: BotSettingsPayload;
+  defaultChain: string[];
+  namedChains: Array<{ name: string; chain: string[] }>;
+}) {
+  const capabilityDefault =
+    defaultChain.length === 0
+      ? t(locale, "bots.capabilityChainUnset")
+      : t(locale, "bots.capabilityDefaultChain", { models: defaultChain.join(", ") });
+  return (
+    <FlowSection title={t(locale, "bots.fieldCapability")}>
+      <ul className="flex flex-col gap-1 text-sm">
+        <li>{capabilityDefault}</li>
+        <li>{t(locale, "bots.capabilitySandbox", { id: payload.app.sandbox_image_id || "—" })}</li>
+        <li>
+          {t(locale, "bots.fieldMultiplier")}: ×{payload.app.multiplier ?? 1}
+        </li>
+        {namedChains.map((row) => (
+          <li key={row.name} className="text-muted-foreground">
+            {row.name}: {row.chain.join(", ")}
+          </li>
+        ))}
+      </ul>
+    </FlowSection>
+  );
+}
+
+/** 挂载于: the Apps whose bot chains mount this bot. */
+function BotMountsSection({ locale, overview }: { locale: SpaBoot["locale"]; overview: BotOverview | undefined }) {
+  return (
+    <FlowSection title={t(locale, "bots.fieldMounted")}>
+      {overview && overview.mounted_apps.length > 0 ? (
+        <ul className="flex flex-wrap gap-2 text-sm">
+          {overview.mounted_apps.map((mounted) => (
+            <li key={mounted.id}>
+              <a href={`${apiBase()}/apps/${mounted.github_app_id}`}>{mounted.name}</a>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-muted-foreground">{t(locale, "bots.mountedNone")}</p>
+      )}
+    </FlowSection>
+  );
+}
+
+/** 基本信息: the bot's name (required) and description, written via PATCH profile. */
+function BotProfileEditor({
+  locale,
+  payload,
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  payload: BotSettingsPayload;
+  onReload: () => Promise<boolean>;
+}) {
+  const { app } = payload;
+  const [name, setName] = useState(app.name ?? "");
+  const [description, setDescription] = useState(app.description ?? "");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  // A landed write re-reads the payload; the stored values replace the draft.
+  useEffect(() => {
+    setName(app.name ?? "");
+    setDescription(app.description ?? "");
+  }, [app.name, app.description]);
+
+  async function save(): Promise<void> {
+    const trimmed = name.trim();
+    if (trimmed.length === 0 || busy) return;
     setBusy(true);
+    setNotice(null);
     try {
-      const { status, body } = await patchJson(
-        `${apiBase()}/api/review-bots/${encodeURIComponent(botId)}/quota-overrides`,
-        { workspaceId: target, monthlyRp },
-      );
+      const { status } = await patchJson(`${botApiPath(app.id)}/profile`, {
+        name: trimmed,
+        // An empty description CLEARS the column; the route keeps an omitted
+        // field, so the editor always sends both.
+        description: description.trim() === "" ? null : description,
+      });
       if (status < 200 || status >= 300) {
-        setNotice(t(locale, "bots.overridesFailed"));
+        setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
         return;
       }
-      const parsed = JSON.parse(body) as { overrides?: Array<{ workspaceId: string; monthlyRp: number }> };
-      setRows(parsed.overrides ?? []);
-      setNotice(null);
-      setWorkspaceId("");
-      setCeiling("");
+      const reloaded = await onReload();
+      setNotice(
+        reloaded
+          ? { kind: "success", message: t(locale, "settings.changesSaved") }
+          : { kind: "warn", message: `${t(locale, "settings.changesSaved")} ${t(locale, "bots.staleAfterSave")}` },
+      );
     } catch {
-      setNotice(t(locale, "bots.overridesFailed"));
+      setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
     } finally {
       setBusy(false);
     }
   }
 
-  function submit(): void {
-    const target = workspaceId.trim();
-    const rp = ceiling.trim();
-    if (target.length === 0) return;
-    if (rp.length === 0) {
-      void write(target, null);
-      return;
+  return (
+    <FlowSection title={t(locale, "botDetail.identity.title")}>
+      <div className="flex flex-col gap-3">
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted-foreground">{t(locale, "botDetail.identity.name")}</span>
+          <Input
+            aria-label={t(locale, "botDetail.identity.name")}
+            value={name}
+            required
+            onChange={(event) => setName(event.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted-foreground">{t(locale, "botDetail.identity.description")}</span>
+          <textarea
+            aria-label={t(locale, "botDetail.identity.description")}
+            className="min-h-20 w-full rounded-sm border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+          />
+        </label>
+        <div className="flex items-center gap-3">
+          <Button type="button" disabled={busy || name.trim().length === 0} onClick={() => void save()}>
+            {t(locale, "admin.workspaces.officialSave")}
+          </Button>
+          <NoticeRegion notice={notice} />
+        </div>
+      </div>
+    </FlowSection>
+  );
+}
+
+/** 危险区: archive this bot behind a confirmation that states the consequences. */
+function BotArchiveSection({
+  locale,
+  botId,
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  botId: string;
+  onReload: () => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function archive(): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const { status } = await patchJson(`${botApiPath(botId)}/archive`, { archived: true });
+      if (status < 200 || status >= 300) {
+        setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+        return;
+      }
+      setOpen(false);
+      await onReload();
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+    } finally {
+      setBusy(false);
     }
-    if (!/^\d+$/.test(rp) || Number(rp) <= 0) {
-      setNotice(t(locale, "bots.overrideInvalid"));
-      return;
-    }
-    void write(target, Number(rp));
   }
 
   return (
-    <div className="flex flex-col gap-3" data-slot="bot-quota-overrides">
-      <p className="text-sm text-muted-foreground">{t(locale, "bots.overridesHint")}</p>
-      {notice === null ? null : <p className="text-sm text-(--tone-warn-fg)">{notice}</p>}
-      {rows.length === 0 ? (
-        <p className="text-sm text-muted-foreground">{t(locale, "bots.overridesEmpty")}</p>
-      ) : (
-        <ul className="flex flex-col gap-1">
-          {rows.map((row) => (
-            <li key={row.workspaceId} className="flex items-center justify-between gap-2 text-sm">
-              <span className="font-mono text-xs">{row.workspaceId}</span>
-              <span className="tabular-nums">{t(locale, "bots.overrideValue", { rp: row.monthlyRp })}</span>
-              <button
-                type="button"
-                className="text-xs underline"
-                disabled={busy}
-                aria-label={t(locale, "bots.overrideClear", { workspace: row.workspaceId })}
-                onClick={() => void write(row.workspaceId, null)}
-              >
-                {t(locale, "bots.overrideClearLabel")}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="flex flex-wrap items-end gap-2">
-        <input
-          className="w-56 rounded-md border border-(--border-default) px-2 py-1 text-sm"
-          aria-label={t(locale, "bots.overrideWorkspace")}
-          placeholder={t(locale, "bots.overrideWorkspace")}
-          value={workspaceId}
-          onChange={(event) => setWorkspaceId(event.target.value)}
-        />
-        <input
-          className="w-32 rounded-md border border-(--border-default) px-2 py-1 text-sm tabular-nums"
-          aria-label={t(locale, "bots.overrideCeiling")}
-          placeholder={t(locale, "bots.overrideCeiling")}
-          value={ceiling}
-          onChange={(event) => setCeiling(event.target.value)}
-        />
-        <button type="button" className="rounded-md border border-(--border-default) px-3 py-1 text-sm" disabled={busy} onClick={submit}>
-          {t(locale, "bots.overrideSave")}
-        </button>
+    <>
+      <FlowSection title={t(locale, "botDetail.archive.dangerTitle")} subtitle={t(locale, "botDetail.archive.dangerHint")}>
+        <div className="flex items-center gap-3">
+          <Button type="button" variant="destructive-outline" onClick={() => setOpen(true)}>
+            {t(locale, "botDetail.archive.open")}
+          </Button>
+          <NoticeRegion notice={notice} />
+        </div>
+      </FlowSection>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (!busy) setOpen(next);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t(locale, "botDetail.archive.dialogTitle")}</DialogTitle>
+            <DialogDescription>{t(locale, "botDetail.archive.dangerHint")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline" disabled={busy}>
+                {t(locale, "common.cancel")}
+              </Button>
+            </DialogClose>
+            <Button variant="destructive" disabled={busy} onClick={() => void archive()}>
+              {t(locale, "botDetail.archive.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/** The owner's archived banner: the state fact plus the one write still allowed. */
+function ArchivedOwnerBanner({
+  locale,
+  botId,
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  botId: string;
+  onReload: () => Promise<boolean>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function restore(): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const { status } = await patchJson(`${botApiPath(botId)}/archive`, { archived: false });
+      if (status < 200 || status >= 300) {
+        setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+        return;
+      }
+      await onReload();
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <PageNotice kind="warn" message={t(locale, "botDetail.archive.ownerBanner")} />
+        <NoticeRegion notice={notice} />
       </div>
+      <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void restore()}>
+        {t(locale, "botDetail.archive.restore")}
+      </Button>
     </div>
   );
 }
