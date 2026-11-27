@@ -2213,6 +2213,8 @@ const appListRoute = async (c: DashboardContext) => {
           month_used_rp: spend.get(bot.botId) ?? 0,
           monthly_rp: bot.monthlyRp,
           archived: bot.archived,
+          default_chain: bot.defaultChain,
+          runtime: bot.runtime,
         })),
         // `null` = no chain mounted, so nothing is metered. A number is the
         // sum of this workspace's spend through the mounted bots.
@@ -4943,6 +4945,10 @@ export type AppChainEntry = {
   monthly_rp: number | null;
   /** The bot is archived: mounted and listed, never selected by the relay. */
   archived: boolean;
+  /** The bot's DEFAULT model chain selector string; `null` = none configured. */
+  default_chain: string | null;
+  /** The runtime harness id the bot's reviews execute under. */
+  runtime: string;
 };
 
 /**
@@ -4984,6 +4990,8 @@ async function appChainRead(
     month_used_rp: spend.get(bot.botId) ?? 0,
     monthly_rp: bot.monthlyRp,
     archived: bot.archived,
+    default_chain: bot.defaultChain,
+    runtime: bot.runtime,
   }));
 }
 

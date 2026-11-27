@@ -650,17 +650,37 @@ export function InstalledChainSection({
       cell: (row) => <span className="text-muted-foreground">{row.provider_workspace}</span>,
     },
     {
+      header: t(locale, "settings.defaultChain"),
+      cell: (row) => (
+        <span className="font-mono text-muted-foreground">{row.default_chain ?? "—"}</span>
+      ),
+    },
+    {
+      header: t(locale, "settings.runtimeHarness"),
+      cell: (row) => <span className="font-mono text-muted-foreground">{row.runtime}</span>,
+    },
+    {
       header: t(locale, "apps.chain.columnMultiplier"),
       cell: (row) => <span className="tabular-nums">×{row.multiplier}</span>,
     },
     {
       header: t(locale, "credits.usedThisMonth"),
       align: "right",
-      cell: (row) => (
-        <span className="tabular-nums text-muted-foreground">
-          {formatCredits(row.month_used_rp, rpPerCredit)}
-        </span>
-      ),
+      cell: (row) => {
+        // The ceiling strings carry their own unit, so they take the bare figure.
+        const used = formatCredits(row.month_used_rp, rpPerCredit).slice(0, -" Credits".length);
+        return (
+          <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
+            {/* The ceiling rides the figure (ADR § Units): an own bot is unbounded,
+                a shared bot states its cap, a shared bot without one says so. */}
+            {row.owned
+              ? t(locale, "credits.unlimitedOwn", { used })
+              : row.monthly_rp === null
+                ? t(locale, "credits.noCeiling", { used })
+                : `${formatCredits(row.month_used_rp, rpPerCredit)} / ${formatCredits(row.monthly_rp, rpPerCredit)}`}
+          </span>
+        );
+      },
     },
   ];
   if (canManage) {
@@ -778,10 +798,10 @@ export function InstalledAppFace({
 }) {
   const pill = appStatusPill(locale, payload.app);
   const chain = payload.chain ?? [];
-  // The band counts what the LIVE chain spent: an archived row stays listed
-  // with its own figure, but the relay never selects it, so the band's total
-  // skips it (prototype screen 3: 1.24 + 0.09 = 1.33, the archived 0.01 out).
-  const monthSpendRp = chain.reduce((sum, row) => (row.archived ? sum : sum + row.month_used_rp), 0);
+  // The band sums EVERY mounted row's recorded month spend: archiving stops
+  // future selection, it does not erase Credits already used this month. The
+  // archived row stays listed (marked unavailable) and still counts here.
+  const monthSpendRp = chain.reduce((sum, row) => sum + row.month_used_rp, 0);
   const metrics: Metric[] = [
     { key: t(locale, "appDetail.installed.metricMounted"), value: chain.length },
     { key: t(locale, "appDetail.installed.metricInstallations"), value: (payload.installations ?? []).length },
@@ -815,10 +835,19 @@ export function InstalledAppFace({
         metrics={<MetricBand metrics={metrics} />}
       />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
+      {/* A Blocked App still reads as a mount: the operator must be told why this
+          chain reviews nothing, and still sees the install state they hold —
+          never the creator face's tabs or blocks (ADR § Two origins, two faces). */}
+      {payload.blocked && payload.blocked_reason ? (
+        <PageNotice kind="warn" message={t(locale, BLOCKED_REASON_KEYS[payload.blocked_reason])} />
+      ) : null}
       {/* The install/bind block reuses the settings sections: a manager gets the
           bound row plus every pending installation with its bind action; the
-          read-only payload serves no pending rows, so a member gets the roster. */}
-      {payload.can_manage ? (
+          read-only payload serves no pending rows, so a member gets the roster.
+          The header above already stated the App, so the block carries the bind
+          state only (ADR § App identity is stated once). A blocked App has no
+          bind action to offer, so the block is absent rather than empty. */}
+      {payload.can_manage && !payload.blocked ? (
         <AppInstallSection
           locale={locale}
           appId={appId}
@@ -826,6 +855,7 @@ export function InstalledAppFace({
           installation={payload.installation}
           pendingInstallations={payload.pending_installations ?? []}
           blocked={payload.blocked}
+          showIdentity={false}
           onReload={onReload}
         />
       ) : null}
@@ -1071,9 +1101,10 @@ export function AppDetailView({
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
   onSearch: (next: AppDetailSearch) => void;
 }) {
-  // A Blocked App keeps its current face: the blocked payload carries no
-  // install/bind or App-side facts for the installed face to render.
-  if (appDetailFace(payload.viewer_relation, from) === "installed" && !payload.blocked) {
+  // The face follows the ORIGIN, blocked or not: a Blocked App is still a mount,
+  // so it renders the installed face (read-only identity, the blocked warning,
+  // the install state) with no creator tabs.
+  if (appDetailFace(payload.viewer_relation, from) === "installed") {
     return (
       <InstalledAppFace
         locale={locale}

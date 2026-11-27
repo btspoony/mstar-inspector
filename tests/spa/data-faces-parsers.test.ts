@@ -19,6 +19,8 @@ const chainRow = {
   month_used_rp: 40,
   monthly_rp: null,
   archived: false,
+  default_chain: "deepseek/deepseek-chat",
+  runtime: "omp",
 };
 
 /** The smallest valid App-detail payload: the read-only (non-manager) face. */
@@ -326,6 +328,29 @@ describe("parseSettings — viewer_relation on every App-detail face", () => {
   test("each face fails the parse when a chain row's archived flag is not a boolean", () => {
     for (const [name, face] of faces) {
       expect(parseSettings({ ...face, chain: [{ ...chainRow, archived: "yes" }] }), name).toBeNull();
+    }
+  });
+
+  test("each face parses a chain row's default chain and runtime, keeping a null chain", () => {
+    for (const [name, face] of faces) {
+      const parsed = parseSettings({ ...face, chain: [{ ...chainRow, default_chain: null }] });
+      expect(parsed, name).not.toBeNull();
+      expect(parsed?.chain?.[0]?.default_chain, name).toBeNull();
+      expect(parsed?.chain?.[0]?.runtime, name).toBe("omp");
+    }
+  });
+
+  test("each face fails the parse when a chain row's default chain or runtime is malformed", () => {
+    for (const [name, face] of faces) {
+      const { default_chain: _noChain, ...withoutChain } = chainRow;
+      expect(parseSettings({ ...face, chain: [withoutChain] }), name).toBeNull();
+      expect(
+        parseSettings({ ...face, chain: [{ ...chainRow, default_chain: 7 }] }),
+        name,
+      ).toBeNull();
+      const { runtime: _noRuntime, ...withoutRuntime } = chainRow;
+      expect(parseSettings({ ...face, chain: [withoutRuntime] }), name).toBeNull();
+      expect(parseSettings({ ...face, chain: [{ ...chainRow, runtime: "" }] }), name).toBeNull();
     }
   });
 });

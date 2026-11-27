@@ -1419,6 +1419,8 @@ describe("the install state's read faces (D43, D35)", () => {
         month_used_rp: 0,
         monthly_rp: null,
         archived: false,
+        default_chain: null,
+        runtime: "omp",
       },
     ]);
   });
@@ -1449,6 +1451,8 @@ describe("the install state's read faces (D43, D35)", () => {
         month_used_rp: 0,
         monthly_rp: null,
         archived: false,
+        default_chain: null,
+        runtime: "omp",
       },
     ]);
   });

@@ -574,6 +574,10 @@ export type AppChainEntry = {
   monthly_rp: number | null;
   /** The bot is archived: mounted and listed, never selected by the relay. */
   archived: boolean;
+  /** The bot's DEFAULT model chain selector string; `null` = none configured. */
+  default_chain: string | null;
+  /** The runtime harness id the bot's reviews execute under. */
+  runtime: string;
 };
 
 /**
@@ -603,7 +607,10 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.multiplier === "number" &&
     typeof value.month_used_rp === "number" &&
     (value.monthly_rp === null || typeof value.monthly_rp === "number") &&
-    typeof value.archived === "boolean"
+    typeof value.archived === "boolean" &&
+    (value.default_chain === null || typeof value.default_chain === "string") &&
+    typeof value.runtime === "string" &&
+    value.runtime.length > 0
   );
 }
 

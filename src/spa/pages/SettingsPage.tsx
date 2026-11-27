@@ -483,6 +483,7 @@ export function AppInstallSection({
   installation,
   pendingInstallations,
   blocked,
+  showIdentity = true,
   onReload,
 }: {
   locale: SpaBoot["locale"];
@@ -491,6 +492,8 @@ export function AppInstallSection({
   installation: SettingsManagePayload["installation"];
   pendingInstallations: SettingsManagePayload["pending_installations"];
   blocked: boolean;
+  /** False on a face that already stated the App's identity (the installed face). */
+  showIdentity?: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const slug = app.github_slug;
@@ -523,64 +526,76 @@ export function AppInstallSection({
     }
   }
 
+  // The state-specific content, independent of whether the identity row renders:
+  // a face that already stated the App's name still needs its bind state.
+  const body = (
+    <>
+      {blocked ? null : href === null ? (
+        <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
+      ) : app.scope === "shared" && installation === null ? (
+        <>
+          {pendingInstallations.length === 0 ? null : (
+            <div className="flex flex-col gap-2">
+              <p className="text-sm font-medium">{t(locale, "settings.installPending")}</p>
+              <ul className="flex flex-col gap-2">
+                {pendingInstallations.map((row) => (
+                  <li key={row.installation_id} className="flex items-center gap-2 text-sm">
+                    <span>
+                      {row.account_login === null
+                        ? t(locale, "settings.installPendingUnknownAccount", {
+                            id: String(row.installation_id),
+                          })
+                        : row.account_login}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="w-fit"
+                      disabled={binding !== null}
+                      onClick={() => void bindInstallation(row.installation_id)}
+                    >
+                      {t(locale, "settings.installPendingBind")}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+              {bindFailed ? (
+                <p role="status" className="text-sm text-(--tone-warn-fg)">
+                  {t(locale, "settings.installBindFailed")}
+                </p>
+              ) : null}
+            </div>
+          )}
+        </>
+      ) : null}
+      {installation === null ? null : (
+        <p className="text-sm text-muted-foreground">
+          {installation.account_login === null
+            ? t(locale, "settings.installBoundNoAccount", { id: String(installation.id) })
+            : t(locale, "settings.installBoundAccount", { account: installation.account_login })}
+        </p>
+      )}
+      {installation !== null && installation.removed ? (
+        <p className="text-sm text-(--tone-warn-fg)">{t(locale, "settings.installRemoved")}</p>
+      ) : null}
+    </>
+  );
+
   return (
     <FlowSection title={t(locale, "settings.install")} subtitle={href === null ? undefined : t(locale, "settings.installCopy")}>
-      <AppInstallIdentity
-        locale={locale}
-        name={name}
-        avatarSrc={app.github_avatar_url}
-        appId={app.github_app_id}
-        href={blocked ? null : href}
-      >
-        {blocked ? null : href === null ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
-        ) : app.scope === "shared" && installation === null ? (
-          <>
-            {pendingInstallations.length === 0 ? null : (
-              <div className="flex flex-col gap-2">
-                <p className="text-sm font-medium">{t(locale, "settings.installPending")}</p>
-                <ul className="flex flex-col gap-2">
-                  {pendingInstallations.map((row) => (
-                    <li key={row.installation_id} className="flex items-center gap-2 text-sm">
-                      <span>
-                        {row.account_login === null
-                          ? t(locale, "settings.installPendingUnknownAccount", {
-                              id: String(row.installation_id),
-                            })
-                          : row.account_login}
-                      </span>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="w-fit"
-                        disabled={binding !== null}
-                        onClick={() => void bindInstallation(row.installation_id)}
-                      >
-                        {t(locale, "settings.installPendingBind")}
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-                {bindFailed ? (
-                  <p role="status" className="text-sm text-(--tone-warn-fg)">
-                    {t(locale, "settings.installBindFailed")}
-                  </p>
-                ) : null}
-              </div>
-            )}
-          </>
-        ) : null}
-        {installation === null ? null : (
-          <p className="text-sm text-muted-foreground">
-            {installation.account_login === null
-              ? t(locale, "settings.installBoundNoAccount", { id: String(installation.id) })
-              : t(locale, "settings.installBoundAccount", { account: installation.account_login })}
-          </p>
-        )}
-        {installation !== null && installation.removed ? (
-          <p className="text-sm text-(--tone-warn-fg)">{t(locale, "settings.installRemoved")}</p>
-        ) : null}
-      </AppInstallIdentity>
+      {showIdentity ? (
+        <AppInstallIdentity
+          locale={locale}
+          name={name}
+          avatarSrc={app.github_avatar_url}
+          appId={app.github_app_id}
+          href={blocked ? null : href}
+        >
+          {body}
+        </AppInstallIdentity>
+      ) : (
+        <div className="flex min-w-0 flex-col gap-1">{body}</div>
+      )}
     </FlowSection>
   );
 }

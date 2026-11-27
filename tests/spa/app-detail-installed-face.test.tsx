@@ -3,7 +3,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   AppChainEntry,
+  SettingsBlockedPayload,
   SettingsManagePayload,
+  SettingsPayload,
   SettingsReadOnlyPayload,
 } from "../../src/spa/pages/data";
 import {
@@ -42,14 +44,17 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
     month_used_rp: 0,
     monthly_rp: null,
     archived: false,
+    default_chain: null,
+    runtime: "omp",
     ...overrides,
   };
 }
 
 /**
  * The prototype's three-row chain at the 500 RP/Credit fixture rate: the band
- * totals the two live rows (620 + 45 = 665 RP → 1.33 Credits) and skips the
- * archived row's 5 RP; the first row alone reads 1.24 Credits.
+ * totals ALL THREE rows (620 + 45 + 5 = 670 RP → 1.34 Credits) — an archived
+ * row's recorded spend is still spend this month; the first row alone reads
+ * 1.24 Credits.
  */
 const CHAIN: AppChainEntry[] = [
   chainRow({
@@ -58,6 +63,8 @@ const CHAIN: AppChainEntry[] = [
     name: "Studio Reviewer",
     description: "Default review bot: DeepSeek first, Flash fallback.",
     month_used_rp: 620,
+    default_chain: "deepseek/deepseek-chat, anthropic/claude-sonnet",
+    runtime: "omp",
   }),
   chainRow({
     position: 2,
@@ -68,6 +75,8 @@ const CHAIN: AppChainEntry[] = [
     multiplier: 4,
     month_used_rp: 45,
     monthly_rp: 1000,
+    default_chain: "openai/gpt-5-mini",
+    runtime: "omp-1.4",
   }),
   chainRow({
     position: 3,
@@ -143,11 +152,52 @@ function memberPayload(): SettingsReadOnlyPayload {
   };
 }
 
+/** The Blocked manager: the bot this target runs on is no longer shared with this workspace. */
+function blockedManagerPayload(): SettingsBlockedPayload {
+  return {
+    can_manage: true,
+    blocked: true,
+    blocked_reason: "bot_not_shared",
+    viewer_relation: "installed",
+    rp_per_credit: 500,
+    workspace_id: WORKSPACE_ID,
+    target_id: "rt-1",
+    installation: null,
+    app: {
+      ...IDENTITY_APP,
+      scope: "owned",
+      review_enabled: true,
+      review_trigger_mode: "every_push",
+      review_level: null,
+      default_review_level: "default",
+      github_visibility: "unknown",
+    },
+    check_gate: null,
+    installations: INSTALLATIONS,
+    chain: CHAIN,
+  };
+}
+
+/** The Blocked member: same state, no control anywhere. */
+function blockedMemberPayload(): SettingsReadOnlyPayload {
+  return {
+    can_manage: false,
+    viewer_relation: "installed",
+    rp_per_credit: 500,
+    workspace_id: WORKSPACE_ID,
+    blocked: true,
+    blocked_reason: "bot_not_shared",
+    app: { ...IDENTITY_APP, created_at: "2026-01-01 00:00:00" },
+    installations: INSTALLATIONS,
+    chain: CHAIN,
+  };
+}
+
 const SEARCH = { tab: "settings" as const, window: "30" as const, repo: "", pr: "" };
 const MOUNTABLE = [{ id: "bot-extra", name: "Extra Bot" }];
 
 function renderFace(
-  payload: SettingsManagePayload | SettingsReadOnlyPayload,
+  payload: SettingsPayload,
   from: "installed" | "created" | null = null,
 ): string {
   return renderToStaticMarkup(
@@ -208,8 +258,9 @@ describe("installed face — manager", () => {
     expect(markup).toContain("Mounted bots");
     expect(markup).toContain("Installations");
     expect(markup).toContain("Used this month");
-    // 620 + 45 RP at 500 RP/Credit; the archived row's 5 RP stays off the band.
-    expect(markup).toContain("1.33 Credits");
+    // 620 + 45 + 5 RP at 500 RP/Credit: the archived row's past spend is still
+    // this month's spend (archiving stops selection, not accounting).
+    expect(markup).toContain("1.34 Credits");
   });
 
   test("the install/bind block shows the bound account with its state", () => {
@@ -249,6 +300,42 @@ describe("installed face — manager", () => {
     expect(markup).toContain("1.24 Credits");
     expect(markup).toContain("Archived — skipped");
   });
+
+  test("each row states its default model chain and its runtime", async () => {
+    expect(markup).toContain("Default chain");
+    expect(markup).toContain("Runtime harness");
+    expect(markup).toContain("deepseek/deepseek-chat, anthropic/claude-sonnet");
+    expect(markup).toContain("openai/gpt-5-mini");
+    expect(markup).toContain("omp-1.4");
+    // A bot with no default chain configured reads the dash, not a blank cell.
+    await withMarkup(markup, (container) => {
+      const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+        tr.textContent?.includes("Security Scanner"),
+      );
+      expect(row?.textContent).toContain("—");
+    });
+  });
+
+  test("each row's spend states its ceiling: own bot unlimited, capped, no ceiling", () => {
+    // Row 1 is this workspace's own bot — no ceiling applies to it.
+    expect(markup).toContain("1.24 Credits · unlimited (own bot)");
+    // Row 2 is shared with a 1,000 RP cap at 500 RP/Credit: 0.09 / 2.00 Credits.
+    expect(markup).toContain("0.09 Credits / 2.00 Credits");
+    // Row 3 is shared with no cap of its own.
+    expect(markup).toContain("0.01 Credits · no ceiling");
+  });
+
+  test("the App name is stated once — the header, not the install block too", async () => {
+    await withMarkup(markup, (container) => {
+      const header = container.querySelector('[data-slot="page-header"] h1');
+      expect(header?.textContent).toBe("Wood's Inspector");
+      // The install block keeps its bind state but not a second identity row.
+      expect(container.querySelector('[data-slot="flow-section"]')?.textContent).toContain(
+        "Bound installation account: btspoony",
+      );
+      expect(container.querySelector('[data-slot="flow-section"] [href*="installations/new"]')).toBeNull();
+    });
+  });
 });
 
 describe("installed face — member", () => {
@@ -287,5 +374,42 @@ describe("installed face — the from param decides the face", () => {
       expect(container.querySelector('[data-slot="tabs-list"]')).not.toBeNull();
       expect(container.querySelector('[data-slot="installed-chain"]')).toBeNull();
     });
+  });
+});
+
+describe("installed face — a Blocked App stays a mount, never the creator face", () => {
+  test("a blocked manager sees the installed face, the blocked warning and no creator tabs", async () => {
+    const markup = renderFace(blockedManagerPayload());
+    expect(markup).toContain("no longer shared with this workspace");
+    // The read-only identity still names the App once.
+    expect(markup).toContain("Wood&#x27;s Inspector");
+    expect(markup.match(/GitHub App ID/g)).toHaveLength(1);
+    await withMarkup(markup, (container) => {
+      expect(container.querySelector('[data-slot="tabs-list"]')).toBeNull();
+      expect(container.querySelector('[data-slot="tabs"]')).toBeNull();
+      expect(container.querySelector('[data-slot="installed-chain"]')).not.toBeNull();
+      // No creator-only surface reaches the page, in any form.
+      expect(container.querySelector('[data-slot="app-credentials"]')).toBeNull();
+      expect(container.querySelector('[data-slot="app-share"]')).toBeNull();
+    });
+    expect(markup).not.toContain("Credentials");
+    expect(markup).not.toContain("Share this app");
+  });
+
+  test("a blocked member gets the same face with every chain control absent", async () => {
+    const markup = renderFace(blockedMemberPayload());
+    expect(markup).toContain("no longer shared with this workspace");
+    await withMarkup(markup, (container) => {
+      expect(container.querySelector('[data-slot="tabs-list"]')).toBeNull();
+      expect(container.querySelector('[data-slot="installed-chain"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label^="Move "]')).toBeNull();
+      expect(container.querySelector('[aria-label^="Remove "]')).toBeNull();
+      expect(container.querySelector('[data-slot="app-chain-add"]')).toBeNull();
+    });
+  });
+
+  test("a blocked manager is never offered a bind action", () => {
+    const markup = renderFace(blockedManagerPayload());
+    expect(markup).not.toContain("Bind to this target");
   });
 });

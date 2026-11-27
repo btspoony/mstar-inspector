@@ -1682,14 +1682,23 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           multiplier: number;
           monthlyRp: number | null;
           archived: boolean;
+          /** The bot's DEFAULT chain selector string; `null` = none configured. */
+          defaultChain: string | null;
+          /** The runtime harness id the bot's reviews execute under. */
+          runtime: string;
         }>
       >
     > {
+      // The default chain rides this SAME statement as a correlated subselect —
+      // `readDefaultChainSummary` is the same read, but calling it per row would
+      // turn one statement into N+1 for a whole Apps page.
       const res = await db
         .prepare(
           `SELECT ib.github_app_id AS app_id, ib.position, ib.bot_id, r.name, r.description,
                   r.workspace_id AS bot_workspace_id, r.scope, ws.name AS provider_workspace,
-                  r.multiplier, r.monthly_rp, r.archived_at
+                  r.multiplier, r.monthly_rp, r.archived_at, r.sandbox_image_id,
+                  (SELECT bc.chain FROM bot_model_chains bc
+                    WHERE bc.bot_id = r.id AND bc.name = 'default') AS default_chain
              FROM app_install_bots ib
              JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
              JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
@@ -1709,6 +1718,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           multiplier: number;
           monthly_rp: number | null;
           archived_at: string | null;
+          sandbox_image_id: string;
+          default_chain: string | null;
         }>();
       const byApp = new Map<
         string,
@@ -1723,6 +1734,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           multiplier: number;
           monthlyRp: number | null;
           archived: boolean;
+          defaultChain: string | null;
+          runtime: string;
         }>
       >();
       for (const row of res.results) {
@@ -1743,6 +1756,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           // A read-only fact: an archived bot stays mounted and listed, the
           // relay just never selects it (T1's chain filter owns that rule).
           archived: row.archived_at !== null,
+          defaultChain: row.default_chain,
+          runtime: row.sandbox_image_id,
         });
         byApp.set(row.app_id, list);
       }

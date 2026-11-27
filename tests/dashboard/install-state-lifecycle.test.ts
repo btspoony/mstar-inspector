@@ -436,6 +436,8 @@ describe("the chain read batches its spend", () => {
         multiplier: 2.5,
         monthlyRp: null,
         archived: false,
+        defaultChain: null,
+        runtime: "omp",
       },
     ]);
 
