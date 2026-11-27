@@ -58,6 +58,8 @@ export type BotScopedRow = {
   sandbox_image_id: string;
   multiplier: number;
   monthly_rp: number | null;
+  /** NULL = live. Set = archived: kept, listed, never selected by the relay. */
+  archived_at: string | null;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
@@ -707,6 +709,7 @@ export type ReviewBotRow = {
   sandbox_image_id: string;
   multiplier: number;
   monthly_rp: number | null;
+  archived_at: string | null;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
@@ -756,6 +759,7 @@ export type UsableBotListRow = {
   shared_at: string | null;
   multiplier: number;
   monthly_rp: number | null;
+  archived_at: string | null;
 };
 
 /**
@@ -765,7 +769,7 @@ export type UsableBotListRow = {
  */
 const USABLE_BOT_LIST_SQL = `
   SELECT r.id, r.name, r.description, r.workspace_id, r.scope, r.shared_at, r.multiplier, r.monthly_rp,
-         ws.name AS workspace_name
+         r.archived_at, ws.name AS workspace_name
     FROM review_bots r
     JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
    WHERE r.deleted_at IS NULL AND (r.workspace_id = ?1 OR r.scope = 'shared')

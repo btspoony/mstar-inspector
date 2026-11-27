@@ -49,7 +49,7 @@ const CHAIN_SQL = `
   SELECT ib.bot_id AS bot_id, ib.position AS position, r.workspace_id AS workspace_id,
          r.scope AS scope, r.monthly_rp AS monthly_rp
     FROM app_install_bots ib
-    JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
+    JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL AND r.archived_at IS NULL
    WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2
    ORDER BY ib.position ASC`;
 
