@@ -1221,4 +1221,18 @@ describe("the creator face carries no chain (ADR)", () => {
     expect(markup).not.toContain(t("en", "apps.chain.moveUp", { bot: "Mstar Standard" }));
     expect(await chainRows(markup)).toEqual([]);
   });
+
+  test("a creator manager's face renders no chain table, no 添加机器人, no move controls", async () => {
+    const markup = renderDetail(
+      {
+        ...managePayload,
+        chain: [chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5 })],
+      },
+    );
+    expect(markup).not.toContain('data-slot="app-chain"');
+    expect(markup).not.toContain(t("en", "apps.chain.title"));
+    expect(markup).not.toContain(t("en", "apps.chain.addBot"));
+    expect(markup).not.toContain(t("en", "apps.chain.moveUp", { bot: "Mstar Standard" }));
+    expect(await chainRows(markup)).toEqual([]);
+  });
 });

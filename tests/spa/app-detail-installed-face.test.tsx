@@ -204,6 +204,7 @@ const MOUNTABLE = [{ id: "bot-extra", name: "Extra Bot" }];
 function renderFace(
   payload: SettingsPayload,
   from: "installed" | "created" | null = null,
+  mountable = MOUNTABLE,
 ): string {
   return renderToStaticMarkup(
     createElement(AppDetailView, {
@@ -214,7 +215,7 @@ function renderFace(
       notice: null,
       search: SEARCH,
       from,
-      mountable: MOUNTABLE,
+      mountable,
       onReload: async () => true,
       onSearch: () => {},
     }),
@@ -292,6 +293,19 @@ describe("installed face — manager", () => {
       expect(container.querySelector('[aria-label="Move Docs Scanner later"]')).not.toBeNull();
       expect(container.querySelector('[aria-label="Remove Security Scanner from the chain"]')).not.toBeNull();
       // The add list offers only the unmounted bot.
+      expect(container.querySelector('[aria-label="Add Extra Bot"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Add Studio Reviewer"]')).toBeNull();
+    });
+  });
+
+  test("a bot already in the chain never reappears among the add actions", async () => {
+    // The parent subtracts mounted bots from the mountable list
+    // (AppDetailPage.tsx's InstalledAppFace); pass one already-mounted.
+    const filtered = renderFace(managerPayload(), null, [
+      { id: "bot-studio", name: "Studio Reviewer" },
+      ...MOUNTABLE,
+    ]);
+    await withMarkup(filtered, (container) => {
       expect(container.querySelector('[aria-label="Add Extra Bot"]')).not.toBeNull();
       expect(container.querySelector('[aria-label="Add Studio Reviewer"]')).toBeNull();
     });
@@ -433,6 +447,14 @@ describe("installed face — member", () => {
 
   test("the member still reads the bound installation roster", () => {
     expect(markup).toContain("btspoony");
+  });
+
+  test("an empty chain with mountable bots available still gives the member no add affordance", async () => {
+    const empty = renderFace({ ...memberPayload(), chain: [] });
+    await withMarkup(empty, (container) => {
+      expect(container.querySelector('[data-slot="app-chain-add"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Add Extra Bot"]')).toBeNull();
+    });
   });
 });
 
