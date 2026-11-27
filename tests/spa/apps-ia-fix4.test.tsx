@@ -58,12 +58,12 @@ describe("F10 — the bots table branches on quota_error", () => {
   test("an UNKNOWN ceiling renders the unknown marker, never 'no ceiling'", () => {
     const html = renderBots(botsPayload({ plan_monthly_rp: null, quota_error: true }));
     expect(html).toContain(t("en", "bots.monthUnknown"));
-    expect(html).not.toContain(t("en", "bots.monthNoCeiling", { used: 42 }));
+    expect(html).not.toContain(t("en", "credits.noCeiling", { used: "0.04" }));
   });
 
   test("a KNOWN unlimited plan still reads 'no ceiling'", () => {
     const html = renderBots(botsPayload({ plan_monthly_rp: null }));
-    expect(html).toContain(t("en", "bots.monthNoCeiling", { used: 42 }));
+    expect(html).toContain(t("en", "credits.noCeiling", { used: "0.04" }));
     expect(html).not.toContain(t("en", "bots.monthUnknown"));
   });
 });

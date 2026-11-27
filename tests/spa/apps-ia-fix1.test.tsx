@@ -17,6 +17,7 @@ import {
   type BotsReadState,
 } from "../../src/spa/pages/AppsPage";
 import type { AppsPayload, UsableBotsPayload } from "../../src/spa/pages/data";
+import { formatCredits } from "../../src/spa/pages/data";
 import { withLocation } from "./browser-stub";
 
 const app = (overrides: Partial<AppsPayload["apps"][number]> = {}): AppsPayload["apps"][number] => ({
@@ -73,12 +74,12 @@ describe("F1 — installed membership is an installation relation, not visibilit
 
   test("the installed table carries a month cell and never reads 0/limit when unmounted", () => {
     // F1: the month state comes from the mounted chain, so an own bot's chain
-    // renders own-bot unlimited against the chain's spend.
+    // renders own-bot unlimited against the chain's spend — in Credits.
     const face = render(
       payload([app({ installed: true, month: { used_rp: 0, owned: true, multiplier: 1 } })], { month_plan_rp: 5000 }),
     );
-    expect(face).toContain(t("en", "bots.monthLabel"));
-    expect(face).toContain(t("en", "bots.monthOwn", { used: 0 }));
+    expect(face).toContain(t("en", "credits.usedThisMonth"));
+    expect(face).toContain(t("en", "credits.unlimitedOwn", { used: "0.00" }));
   });
 });
 
@@ -154,8 +155,8 @@ describe("F5 — ownership and manage permission are separate from publication s
 
   test("an owned bot PUBLISHED as shared still reads own-bot unlimited (no plan ceiling)", () => {
     const html = face([bot({ scope: "shared", owned: true })]);
-    expect(html).toContain(t("en", "bots.monthOwn", { used: 7 }));
-    expect(html).not.toContain(t("en", "bots.monthLimit", { used: 7, limit: 1000 }));
+    expect(html).toContain(t("en", "credits.unlimitedOwn", { used: "0.01" }));
+    expect(html).not.toContain(t("en", "credits.noCeiling", { used: "0.01" }));
   });
 
   test("a member of the owning workspace reads the bot as read-only, not editable", () => {
@@ -166,7 +167,7 @@ describe("F5 — ownership and manage permission are separate from publication s
 
   test("a shared bot from another workspace reads a ceiling, and membership is exclusive", () => {
     const html = face([bot({ id: "bot-2", owned: false, can_manage: false, workspace_name: "Other" })]);
-    expect(html).toContain(t("en", "bots.monthLimit", { used: 7, limit: 1000 }));
+    expect(html).toContain(`${formatCredits(7)} / ${formatCredits(1000)}`);
     expect(html).toContain(t("en", "apps.bots.tagShared"));
   });
 });

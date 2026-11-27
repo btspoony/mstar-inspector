@@ -35,7 +35,7 @@ import {
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { MetricBand, type Metric } from "@/components/MetricBand";
 import { PageHeader } from "@/components/PageHeader";
-import { fetchJson } from "../api";
+import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { AppAvatar } from "../components/AppAvatar";
 import { appInstallHref } from "../components/AppInstallIdentity";
@@ -48,10 +48,12 @@ import { spaClick } from "../spa-click";
 import {
   appDisplayName,
   appStatusPill,
+  formatCredits,
   parseApps,
   parseUsableBots,
   reviewEnabled,
   type AppsPayload,
+  type PendingBindRow,
   type SharedAppCard,
   type SharedBotRow,
   type UsableBotsPayload,
@@ -117,6 +119,34 @@ export function appsTabQuery(tab: AppsTab, defaultTab: AppsTab): string {
   return tab === defaultTab ? "" : `?tab=${tab}`;
 }
 
+/**
+ * One 本月已用 figure in Credits (ADR: RP never renders). The ceiling state
+ * rides the same string: 不限（自有机器人）for an all-own chain, 不限 for a
+ * known-unlimited plan, `已用 / 上限` otherwise. An unknown ceiling is the
+ * error marker, never "no ceiling" (F10).
+ */
+function monthSpendCell(
+  locale: SpaBoot["locale"],
+  month: { used_rp: number; owned: boolean } | null,
+  quotaError: boolean,
+  planRp: number | null,
+): string {
+  if (month === null) return t(locale, "bots.monthNone");
+  // The bare two-decimal figure, for dictionary strings that carry their own unit.
+  const used = formatCredits(month.used_rp).slice(0, -" Credits".length);
+  if (month.owned) return t(locale, "credits.unlimitedOwn", { used });
+  if (quotaError) return t(locale, "bots.monthUnknown");
+  if (planRp === null) return t(locale, "credits.noCeiling", { used });
+  return `${formatCredits(month.used_rp)} / ${formatCredits(planRp)}`;
+}
+
+/** The list's pending-bind flow, threaded from the stateful page. */
+export type PendingBindFlow = {
+  binding: boolean;
+  failed: boolean;
+  onBind: (row: PendingBindRow) => void;
+};
+
 export type AppsReadState =
   | { kind: "loading" }
   | { kind: "ok"; payload: AppsPayload }
@@ -168,6 +198,38 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The pending row's bind action — the same flow the App settings install
+  // block runs: POST the bind, follow the authorize redirect when GitHub must
+  // verify the installer, else reload the list.
+  const [binding, setBinding] = useState<number | null>(null);
+  const [bindFailed, setBindFailed] = useState(false);
+  const bindPendingInstallation = useCallback(
+    async (row: PendingBindRow): Promise<void> => {
+      setBinding(row.installation_id);
+      setBindFailed(false);
+      try {
+        const res = await postForm(`${base}/apps/${row.app_github_app_id}/bind-installation`, {
+          installationId: String(row.installation_id),
+        });
+        if (res.status !== 200) {
+          setBindFailed(true);
+          return;
+        }
+        const body = JSON.parse(res.body) as { authorize_url?: unknown };
+        if (typeof body.authorize_url === "string") {
+          window.location.assign(body.authorize_url);
+          return;
+        }
+        await load();
+      } catch {
+        setBindFailed(true);
+      } finally {
+        setBinding(null);
+      }
+    },
+    [base, load],
+  );
 
   const defaultTab: AppsTab | null =
     apps.kind === "ok" ? (installedAppsOf(apps.payload).length > 0 ? "installed" : "created") : null;
@@ -228,6 +290,11 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       tab={tab}
       onTabChange={onTabChange}
       onRetry={() => void load()}
+      pendingBind={{
+        binding: binding !== null,
+        failed: bindFailed,
+        onBind: (row) => void bindPendingInstallation(row),
+      }}
     />
   );
 }
@@ -248,6 +315,7 @@ export function AppsView({
   tab,
   onTabChange,
   onRetry,
+  pendingBind,
 }: {
   locale: SpaBoot["locale"];
   /** Static-SSR form: a loaded face plus its payload. */
@@ -262,6 +330,8 @@ export function AppsView({
   tab?: AppsTab;
   onTabChange?: (tab: string) => void;
   onRetry: () => void;
+  /** The pending rows' bind flow; absent in static renders. */
+  pendingBind?: PendingBindFlow;
 }) {
   const appsState: AppsReadState =
     apps ?? (state === "error" ? { kind: "error", message: t(locale, "common.loadFailed") } : state === "ok" && payload ? { kind: "ok", payload } : { kind: "error", message: t(locale, "common.loadFailed") });
@@ -271,6 +341,10 @@ export function AppsView({
   const ownedApps = loaded?.apps.filter((app) => app.owned !== false) ?? [];
   const hasCreated = ownedApps.length > 0;
   const activeTab: AppsTab = tab ?? (installed.length > 0 ? "installed" : "created");
+  // Apps this workspace already installed are never offered for install again.
+  const installedAppIds: ReadonlySet<string> = new Set(
+    installed.map((app) => app.bot_id).filter((id): id is string => id !== undefined),
+  );
   const createAction = (
     <CreateAppChooser
       locale={locale}
@@ -280,10 +354,12 @@ export function AppsView({
          Apps. `shared_bots` is the bot face (review-usage) and no App chooser
          may read it. */
       sharedApps={loaded?.shared_apps ?? []}
+      installedAppIds={installedAppIds}
     />
   );
 
-  const rejected24h = loaded?.apps.reduce((total, app) => total + app.health.rejected24h, 0) ?? 0;
+  // The ADR bans a 24h rejection figure on every surface — the band carries
+  // the three remaining payload-proved facts.
   const metrics: Metric[] = loaded
     ? [
         { key: t(locale, "apps.metricApps"), value: loaded.apps.length },
@@ -295,11 +371,6 @@ export function AppsView({
           key: t(locale, "apps.metricReviewOff"),
           value: loaded.apps.filter((app) => !reviewEnabled(app)).length,
         },
-        {
-          key: t(locale, "apps.metricRejected24h"),
-          value: rejected24h,
-          tone: rejected24h > 0 ? "danger" : undefined,
-        },
       ]
     : [];
 
@@ -308,7 +379,7 @@ export function AppsView({
       <PageHeader
         title={t(locale, "apps.heading")}
         description={t(locale, "apps.headingDescription")}
-        actions={hasCreated ? createAction : null}
+        actions={createAction}
         metrics={<MetricBand metrics={metrics} />}
       />
       {appsState.kind === "error" ? (
@@ -334,17 +405,19 @@ export function AppsView({
               quotaError={loaded.quota_error === true}
               canCreate={canCreate}
               createAction={createAction}
+              pendingBind={pendingBind}
             />
           </TabsContent>
           <TabsContent value="created">
             {hasCreated ? (
-              <AppsList locale={locale} payload={{ ...loaded, apps: ownedApps }} />
+              <AppsList locale={locale} payload={{ ...loaded, apps: ownedApps }} origin="created" />
             ) : (
+              // The header carries the ONE create control; the guidance only
+              // explains it.
               <EmptyState
                 icon={<GitHubMark />}
                 title={t(locale, "apps.emptyTitle")}
                 description={canCreate ? t(locale, "apps.emptyDescription") : t(locale, "apps.installed.emptyTitle")}
-                action={createAction}
               />
             )}
           </TabsContent>
@@ -364,9 +437,12 @@ export function AppsView({
 
 /**
  * F1/F9: the installed tab — ONLY Apps this workspace holds an installation
- * relation to, with the plan's per-install month cell, plus one "Waiting to be
- * bound" row per pending physical installation. The empty state carries the
- * documented actions: browse the shared Apps and create one.
+ * relation to. A pending physical installation renders INSIDE its App's row
+ * (never a detached list under the table): the account, the 等待绑定 state and
+ * the bind action. A pending row whose App has no installed row yet (a shared
+ * App installed on GitHub but never bound) gets its own row in the same
+ * table, named by the server-joined App name (F16). The empty state carries
+ * the documented actions: browse the shared Apps and create one.
  */
 function InstalledTab({
   locale,
@@ -375,6 +451,7 @@ function InstalledTab({
   quotaError,
   canCreate,
   createAction,
+  pendingBind,
 }: {
   locale: SpaBoot["locale"];
   payload: AppsPayload;
@@ -382,6 +459,7 @@ function InstalledTab({
   quotaError: boolean;
   canCreate: boolean;
   createAction: ReactNode;
+  pendingBind?: PendingBindFlow;
 }) {
   const pending = payload.pending_installations ?? [];
   const planRp = payload.month_plan_rp ?? null;
@@ -409,86 +487,140 @@ function InstalledTab({
       />
     );
   }
-  const hrefOf = (appId: number): string => `${apiBase()}/apps/${appId}`;
-  const columns: DataTableColumn<AppsPayload["apps"][number]>[] = [
+  // The origin rides every detail link: the App detail reads `from` to pick
+  // the installed face (ADR: two origins, two faces).
+  const hrefOf = (appId: number): string => `${apiBase()}/apps/${appId}?from=installed`;
+  const installedIds = new Set(installed.map((app) => app.github_app_id));
+  const rows: InstalledRow[] = [
+    ...installed.map((app) => ({
+      kind: "app" as const,
+      app,
+      pending: pending.filter((row) => row.app_github_app_id === app.github_app_id),
+    })),
+    ...pending
+      .filter((row) => !installedIds.has(row.app_github_app_id))
+      .map((row) => ({ kind: "pending" as const, pending: row })),
+  ];
+  const dash = <span className="text-muted-foreground">{t(locale, "bots.monthNone")}</span>;
+  const columns: DataTableColumn<InstalledRow>[] = [
     {
       header: t(locale, "apps.tableName"),
-      cell: (app) => (
-        <span className="flex items-center gap-3">
-          <AppAvatar
-            src={app.github_avatar_url}
-            appId={app.github_app_id}
-            className="h-9 w-9 shrink-0 rounded-full border border-(--border-default) object-cover"
-          />
-          <a
-            className="text-sm font-semibold text-foreground no-underline hover:underline"
-            href={hrefOf(app.github_app_id)}
-            onClick={(event) => spaClick(hrefOf(app.github_app_id), event)}
-          >
-            {appDisplayName(app)}
-          </a>
-        </span>
+      cell: (row) => (
+        <div className="flex flex-col gap-2">
+          {row.kind === "app" ? (
+            <span className="flex items-center gap-3">
+              <AppAvatar
+                src={row.app.github_avatar_url}
+                appId={row.app.github_app_id}
+                className="h-9 w-9 shrink-0 rounded-full border border-(--border-default) object-cover"
+              />
+              <a
+                className="text-sm font-semibold text-foreground no-underline hover:underline"
+                href={hrefOf(row.app.github_app_id)}
+                onClick={(event) => spaClick(hrefOf(row.app.github_app_id), event)}
+              >
+                {appDisplayName(row.app)}
+              </a>
+            </span>
+          ) : (
+            <span className="text-sm font-semibold">{row.pending.app_name}</span>
+          )}
+          {(row.kind === "app" ? row.pending : [row.pending]).map((entry) => (
+            <PendingInstallationLine key={entry.installation_id} locale={locale} pending={entry} pendingBind={pendingBind} />
+          ))}
+        </div>
       ),
     },
     {
       header: t(locale, "apps.tableStatus"),
-      cell: (app) => {
-        const pill = appStatusPill(locale, app);
+      cell: (row) => {
+        if (row.kind === "pending") return dash;
+        const pill = appStatusPill(locale, row.app);
         return <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>;
       },
     },
     {
       header: t(locale, "apps.tableCreator"),
-      cell: (app) => <span className="text-muted-foreground">{app.created_by}</span>,
+      cell: (row) =>
+        row.kind === "app" ? <span className="text-muted-foreground">{row.app.created_by}</span> : dash,
     },
     {
-      header: t(locale, "bots.monthLabel"),
-      cell: (app) => (
-        <span className="text-muted-foreground tabular-nums" title={t(locale, "bots.monthHint")}>
-          {/* F1: no chain mounted means nothing is metered — a dash, never 0. */}
-          {app.month === null || app.month === undefined
-            ? t(locale, "bots.monthNone")
-            : app.month.owned
-              ? t(locale, "bots.monthOwn", { used: app.month.used_rp })
-              : quotaError
-                ? t(locale, "bots.monthUnknown")
-                : planRp === null
-                  ? t(locale, "bots.monthNoCeiling", { used: app.month.used_rp })
-                  : t(locale, "bots.monthLimit", { used: app.month.used_rp, limit: planRp })}
-        </span>
-      ),
+      header: t(locale, "credits.usedThisMonth"),
+      cell: (row) =>
+        row.kind === "pending" ? (
+          dash
+        ) : (
+          <span className="text-muted-foreground tabular-nums">
+            {/* F1: no chain mounted means nothing is metered — a dash, never 0. */}
+            {monthSpendCell(locale, row.app.month ?? null, quotaError, planRp)}
+          </span>
+        ),
     },
   ];
   return (
     <div className="flex flex-col gap-4">
-      {installed.length > 0 ? (
-        <DataTable
-          columns={columns}
-          rows={installed}
-          rowKey={(app) => String(app.github_app_id)}
-          rowProps={(app) => ({
-            className: "cursor-pointer",
-            onClick: (event) => spaClick(hrefOf(app.github_app_id), event),
-          })}
-        />
-      ) : null}
-      {pending.length > 0 ? (
-        <ul className="flex flex-col gap-2" data-slot="pending-installations">
-          {pending.map((row) => (
-            <li key={row.installation_id} className="flex items-center justify-between gap-3 text-sm">
-              <span>
-                {row.account_login ??
-                  t(locale, "settings.installPendingUnknownAccount", { id: row.installation_id })}
-                {" · "}
-                <span className="text-muted-foreground">{t(locale, "settings.installPending")}</span>
-              </span>
-              {/* F16: the server joins the App's own display name. */}
-              <span className="text-muted-foreground">{row.app_name}</span>
-            </li>
-          ))}
-        </ul>
+      <DataTable
+        columns={columns}
+        rows={rows}
+        rowKey={(row) => (row.kind === "app" ? `app-${row.app.github_app_id}` : `pending-${row.pending.installation_id}`)}
+        rowProps={(row) =>
+          row.kind === "app"
+            ? {
+                className: "cursor-pointer",
+                onClick: (event) => spaClick(hrefOf(row.app.github_app_id), event),
+              }
+            : {}
+        }
+      />
+      {pendingBind?.failed ? (
+        <p role="status" className="text-sm text-(--tone-warn-fg)">
+          {t(locale, "settings.installBindFailed")}
+        </p>
       ) : null}
     </div>
+  );
+}
+
+/** One table row of the installed tab: an installed App, or a pending installation whose App has no row yet. */
+type InstalledRow =
+  | { kind: "app"; app: AppsPayload["apps"][number]; pending: PendingBindRow[] }
+  | { kind: "pending"; pending: PendingBindRow };
+
+/**
+ * One pending installation attached to its App's row: the account GitHub
+ * reported (or the unknown-account stand-in), the 等待绑定 state, and the bind
+ * action that starts the authorize flow.
+ */
+function PendingInstallationLine({
+  locale,
+  pending,
+  pendingBind,
+}: {
+  locale: SpaBoot["locale"];
+  pending: PendingBindRow;
+  pendingBind?: PendingBindFlow;
+}) {
+  return (
+    <span
+      data-slot="pending-installation"
+      className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+    >
+      <span>
+        {pending.account_login ??
+          t(locale, "settings.installPendingUnknownAccount", { id: pending.installation_id })}
+      </span>
+      <StatusBadge tone="warn">{t(locale, "settings.installPending")}</StatusBadge>
+      <span>{t(locale, "apps.installReturnHint")}</span>
+      <Button
+        type="button"
+        variant="secondary"
+        size="sm"
+        disabled={pendingBind?.binding === true}
+        onClick={() => pendingBind?.onBind(pending)}
+      >
+        {t(locale, "settings.installPendingBind")}
+      </Button>
+    </span>
   );
 }
 
@@ -570,17 +702,16 @@ export function UsableBotsList({
       cell: (bot) => <span className="tabular-nums">×{bot.multiplier}</span>,
     },
     {
-      header: t(locale, "bots.monthLabel"),
+      header: t(locale, "credits.usedThisMonth"),
       cell: (bot) => (
-        <span className="text-muted-foreground tabular-nums" title={t(locale, "bots.monthHint")}>
+        <span className="text-muted-foreground tabular-nums">
           {/* F10: an unknown ceiling is an error, never "no ceiling". */}
-          {bot.owned
-            ? t(locale, "bots.monthOwn", { used: bot.month_used_rp })
-            : payload.quota_error === true
-              ? t(locale, "bots.monthUnknown")
-              : payload.plan_monthly_rp === null
-                ? t(locale, "bots.monthNoCeiling", { used: bot.month_used_rp })
-                : t(locale, "bots.monthLimit", { used: bot.month_used_rp, limit: payload.plan_monthly_rp })}
+          {monthSpendCell(
+            locale,
+            { used_rp: bot.month_used_rp, owned: bot.owned },
+            payload.quota_error === true,
+            payload.plan_monthly_rp,
+          )}
         </span>
       ),
     },
@@ -731,18 +862,28 @@ export function SharedAppsDialog({
 }
 
 
+/**
+ * The ONE create action (ADR + prototype): the dialog is titled 创建 GitHub App
+ * and its primary action is the manifest `POST {base}/manifest/start`; 使用平台
+ * 共享的 App is the secondary path below it. An App this workspace already
+ * installed is never offered for install again — no install action, no
+ * bind-after-install hint.
+ */
 function CreateAppChooser({
   locale,
   canCreate,
   reason,
   sharedApps,
+  installedAppIds,
 }: {
   locale: SpaBoot["locale"];
   canCreate: boolean;
   reason: string;
   sharedApps: SharedAppCard[];
+  /** Local ids of the Apps this workspace already installed. */
+  installedAppIds: ReadonlySet<string>;
 }) {
-  const addHref = `${apiBase()}/repos`;
+  const choices = sharedApps.filter((app) => !installedAppIds.has(app.id));
   return (
     <div className="flex flex-wrap items-center gap-2" data-slot="create-app-chooser">
       <Dialog>
@@ -751,57 +892,56 @@ function CreateAppChooser({
         </DialogTrigger>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t(locale, "apps.createDialog.title")}</DialogTitle>
+            <DialogTitle>{t(locale, "apps.createDialog.githubTitle")}</DialogTitle>
             <DialogDescription>{t(locale, "apps.createDialog.description")}</DialogDescription>
           </DialogHeader>
-          {sharedApps.length > 0 ? (
-            <ul className="flex flex-col gap-3" data-slot="shared-apps">
-              {sharedApps.map((app) => {
-                const installHref = appInstallHref(app.github_slug);
-                return (
-                  <li key={app.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
-                    <span className="text-sm font-semibold">{app.name}</span>
-                    {app.github_description ? (
-                      <span className="text-sm text-muted-foreground">{app.github_description}</span>
-                    ) : null}
-                    {app.owner_workspace_name ? (
-                      <span className="text-xs text-muted-foreground">
-                        {t(locale, "apps.cardOwner", { workspace: app.owner_workspace_name })}
+          <form method="post" action={`${apiBase()}/manifest/start`}>
+            <Button type="submit">{t(locale, "apps.createDialog.selfHostedSubmit")}</Button>
+          </form>
+          <div className="flex flex-col gap-3 border-t border-border pt-3">
+            <h3 className="text-sm font-semibold">{t(locale, "apps.createDialog.shared")}</h3>
+            {choices.length > 0 ? (
+              <ul className="flex flex-col gap-3" data-slot="shared-apps">
+                {choices.map((app) => {
+                  const installHref = appInstallHref(app.github_slug);
+                  return (
+                    <li key={app.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
+                      <span className="text-sm font-semibold">{app.name}</span>
+                      {app.github_description ? (
+                        <span className="text-sm text-muted-foreground">{app.github_description}</span>
+                      ) : null}
+                      {app.owner_workspace_name ? (
+                        <span className="text-xs text-muted-foreground">
+                          {t(locale, "apps.cardOwner", { workspace: app.owner_workspace_name })}
+                        </span>
+                      ) : null}
+                      {app.capability ? (
+                        <span className="text-xs text-muted-foreground">{app.capability}</span>
+                      ) : null}
+                      <span className="flex flex-wrap items-center gap-2 pt-1">
+                        {installHref === null ? (
+                          <span className="text-xs text-muted-foreground">{t(locale, "settings.installNoSlug")}</span>
+                        ) : (
+                          <Button asChild variant="secondary" size="sm">
+                            <a href={installHref} target="_blank" rel="noreferrer noopener">
+                              {t(locale, "apps.cardInstall")}
+                            </a>
+                          </Button>
+                        )}
+                        <span className="text-xs text-muted-foreground">{t(locale, "apps.installReturnHint")}</span>
                       </span>
-                    ) : null}
-                    {app.capability ? (
-                      <span className="text-xs text-muted-foreground">{app.capability}</span>
-                    ) : null}
-                    <span className="flex flex-wrap items-center gap-2 pt-1">
-                      {installHref === null ? (
-                        <span className="text-xs text-muted-foreground">{t(locale, "settings.installNoSlug")}</span>
-                      ) : (
-                        <Button asChild variant="secondary" size="sm">
-                          <a href={installHref} target="_blank" rel="noreferrer noopener">
-                            {t(locale, "apps.cardInstall")}
-                          </a>
-                        </Button>
-                      )}
-                      <span className="text-xs text-muted-foreground">{t(locale, "apps.installReturnHint")}</span>
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="text-sm text-muted-foreground">{t(locale, "apps.createDialog.noSharedBots")}</p>
-          )}
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted-foreground">{t(locale, "apps.createDialog.noSharedBots")}</p>
+            )}
+          </div>
           <DialogFooter>
-            <form method="post" action={`${apiBase()}/manifest/start`}>
-              <Button type="submit" variant="outline">
-                {t(locale, "apps.createDialog.selfHostedSubmit")}
-              </Button>
-            </form>
-            <Button asChild>
-              <a href={addHref} onClick={(event) => spaClick(addHref, event)}>
-                {t(locale, "targets.add")}
-              </a>
-            </Button>
+            <DialogClose asChild>
+              <Button variant="outline">{t(locale, "common.cancel")}</Button>
+            </DialogClose>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -819,12 +959,17 @@ export function AppsList({
   locale,
   payload,
   detailSegment = "apps",
+  origin,
 }: {
   locale: SpaBoot["locale"];
   payload: AppsPayload;
   detailSegment?: "apps" | "targets";
+  /** The list the reader came from — recorded on the detail link so the App
+   * detail opens the matching face (ADR: two origins, two faces). */
+  origin?: "installed" | "created";
 }) {
-  const hrefOf = (appId: number): string => `${apiBase()}/${detailSegment}/${appId}`;
+  const hrefOf = (appId: number): string =>
+    `${apiBase()}/${detailSegment}/${appId}${origin === undefined ? "" : `?from=${origin}`}`;
 
   const columns: DataTableColumn<AppsPayload["apps"][number]>[] = [
     {
@@ -863,20 +1008,13 @@ export function AppsList({
       header: t(locale, "apps.tableHealth"),
       cell: (app) => {
         const latest = app.health.latest;
+        // The ADR bans a 24h rejection figure on every list.
         return (
           <span className="text-muted-foreground tabular-nums">
             {latest
               ? t(locale, "apps.health.delivery", { time: formatRelativeTime(latest.created_at, locale) })
               : t(locale, "apps.health.deliveryNever")}
             {latest ? ` · ${deliveryOutcomeLabel(latest.outcome, locale)}` : ""}
-            {app.health.rejected24h > 0 ? (
-              <>
-                {" · "}
-                <span className="text-(--tone-danger-fg)">
-                  {t(locale, "apps.health.rejected24h", { count: app.health.rejected24h })}
-                </span>
-              </>
-            ) : null}
           </span>
         );
       },

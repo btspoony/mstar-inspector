@@ -170,14 +170,6 @@ describe("AppsPage create dialog", () => {
           ) ?? null;
         await click(trigger);
       },
-      addLink(): DomElement | null {
-        const href = `${apiBase()}/repos`;
-        return (
-          [...(dialog()?.querySelectorAll("a") ?? [])].find(
-            (node) => node.getAttribute("href") === href && node.textContent === t("en", "targets.add"),
-          ) ?? null
-        );
-      },
       async cleanup() {
         globalThis.fetch = realFetch;
         await act(async () => root.unmount());
@@ -186,12 +178,14 @@ describe("AppsPage create dialog", () => {
     };
   }
 
-  test("the dialog links to the repository add flow and posts no target", async () => {
+  test("the dialog's primary action is the manifest flow — no repository-add path, no target post", async () => {
     const page = await mountPage("/dashboard/acme/apps", [SHARED]);
     try {
       await page.open();
       expect(page.dialog()).not.toBeNull();
-      expect(page.addLink()?.getAttribute("href")).toBe("/dashboard/acme/repos");
+      expect(page.dialog()?.querySelector('form[action="/dashboard/acme/manifest/start"]')).not.toBeNull();
+      // The retired targets.add primary is gone.
+      expect(page.dialog()?.querySelector('a[href$="/repos"]')).toBeNull();
       expect(page.dialog()?.querySelector('[data-slot="create-target-form"]')).toBeNull();
       expect(page.dialog()?.querySelector("form[action$='/api/targets']")).toBeNull();
       const cards = page.dialog()?.querySelector('[data-slot="shared-apps"]');
@@ -207,12 +201,11 @@ describe("AppsPage create dialog", () => {
     }
   });
 
-  test("the self-hosted manifest flow stays available beside it", async () => {
+  test("the manifest flow renders even with no shared Apps to browse", async () => {
     const page = await mountPage("/dashboard/acme/apps", []);
     try {
       await page.open();
       expect(page.dialog()?.querySelector('form[action="/dashboard/acme/manifest/start"]')).not.toBeNull();
-      expect(page.addLink()).not.toBeNull();
       expect(page.dialog()?.textContent).toContain(t("en", "apps.createDialog.noSharedBots"));
     } finally {
       await page.cleanup();
