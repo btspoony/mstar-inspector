@@ -43,6 +43,7 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
     multiplier: 1,
     month_used_rp: 0,
     monthly_rp: null,
+    effective_monthly_rp: null,
     archived: false,
     default_chain: null,
     runtime: "omp",
@@ -75,6 +76,7 @@ const CHAIN: AppChainEntry[] = [
     multiplier: 4,
     month_used_rp: 45,
     monthly_rp: 1000,
+    effective_monthly_rp: 1000,
     default_chain: "openai/gpt-5-mini",
     runtime: "omp-1.4",
   }),
@@ -325,15 +327,87 @@ describe("installed face — manager", () => {
     expect(markup).toContain("0.01 Credits · no ceiling");
   });
 
-  test("the App name is stated once — the header, not the install block too", async () => {
+  /**
+   * The relay enforces the VIEWER's workspace ceiling: its
+   * `bot_quota_overrides` row when one exists, else the bot's default
+   * (`readBotCeiling`). The row must state that number, not `monthly_rp`.
+   * Fixture rate: 500 RP/Credit.
+   */
+  const spendCell = (rows: AppChainEntry[]): Promise<string> =>
+    withMarkup(
+      renderFace({ ...managerPayload(), chain: rows }),
+      (container) =>
+        Array.from(container.querySelectorAll("tbody tr td"))
+          .map((td) => td.textContent ?? "")
+          .find((text) => text.includes("Credits")) ?? "",
+    );
+
+  test("an override replaces the bot's default in the row", async () => {
+    const cell = await spendCell([
+      chainRow({
+        position: 1,
+        bot_id: "bot-overridden",
+        name: "Overridden",
+        owned: false,
+        month_used_rp: 45,
+        monthly_rp: 1000,
+        effective_monthly_rp: 5000,
+      }),
+    ]);
+    // 45 RP used / the 5,000 RP override — never the bot's 1,000 default.
+    expect(cell).toBe("0.09 Credits / 10.00 Credits");
+  });
+
+  test("an override applies even when the bot itself has no default", async () => {
+    const cell = await spendCell([
+      chainRow({
+        position: 1,
+        bot_id: "bot-override-only",
+        name: "Override only",
+        owned: false,
+        month_used_rp: 45,
+        monthly_rp: null,
+        effective_monthly_rp: 5000,
+      }),
+    ]);
+    expect(cell).toBe("0.09 Credits / 10.00 Credits");
+  });
+
+  test("no override and no default reads as no ceiling", async () => {
+    const cell = await spendCell([
+      chainRow({
+        position: 1,
+        bot_id: "bot-uncapped",
+        name: "Uncapped",
+        owned: false,
+        month_used_rp: 45,
+        monthly_rp: null,
+        effective_monthly_rp: null,
+      }),
+    ]);
+    expect(cell).toBe("0.09 Credits · no ceiling");
+  });
+
+  test("the App name is stated once, and the install entry survives that", async () => {
     await withMarkup(markup, (container) => {
       const header = container.querySelector('[data-slot="page-header"] h1');
       expect(header?.textContent).toBe("Wood's Inspector");
       // The install block keeps its bind state but not a second identity row.
-      expect(container.querySelector('[data-slot="flow-section"]')?.textContent).toContain(
-        "Bound installation account: btspoony",
-      );
-      expect(container.querySelector('[data-slot="flow-section"] [href*="installations/new"]')).toBeNull();
+      const section = container.querySelector('[data-slot="flow-section"]')!;
+      expect(section.textContent).toContain("Bound installation account: btspoony");
+      expect(section.querySelector("p.font-semibold")).toBeNull();
+      // The install entry is NOT part of the identity row: an unblocked
+      // manager still opens GitHub's install page from this block.
+      expect(section.querySelector('a[href*="installations/new"]')).not.toBeNull();
+    });
+  });
+
+  test("an unblocked manager with nothing bound still has the install entry", async () => {
+    const unbound = renderFace({ ...managerPayload(), installation: null });
+    await withMarkup(unbound, (container) => {
+      const section = container.querySelector('[data-slot="flow-section"]')!;
+      expect(section.querySelector('a[href*="installations/new"]')).not.toBeNull();
+      expect(section.querySelector("p.font-semibold")).toBeNull();
     });
   });
 });

@@ -1681,6 +1681,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           available: boolean;
           multiplier: number;
           monthlyRp: number | null;
+          /**
+           * The ceiling the relay enforces for THIS workspace: its
+           * `bot_quota_overrides` row when one exists, else `monthlyRp`.
+           */
+          effectiveMonthlyRp: number | null;
           archived: boolean;
           /** The bot's DEFAULT chain selector string; `null` = none configured. */
           defaultChain: string | null;
@@ -1689,16 +1694,21 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         }>
       >
     > {
-      // The default chain rides this SAME statement as a correlated subselect —
-      // `readDefaultChainSummary` is the same read, but calling it per row would
-      // turn one statement into N+1 for a whole Apps page.
+      // The default chain and the effective ceiling ride this SAME statement as
+      // correlated subselects — `readDefaultChainSummary` and `readBotCeiling`
+      // are the same reads, but calling them per row would turn one statement
+      // into N+1 for a whole Apps page. The override's column is NOT NULL, so
+      // COALESCE expresses "override else default" exactly.
       const res = await db
         .prepare(
           `SELECT ib.github_app_id AS app_id, ib.position, ib.bot_id, r.name, r.description,
                   r.workspace_id AS bot_workspace_id, r.scope, ws.name AS provider_workspace,
                   r.multiplier, r.monthly_rp, r.archived_at, r.sandbox_image_id,
                   (SELECT bc.chain FROM bot_model_chains bc
-                    WHERE bc.bot_id = r.id AND bc.name = 'default') AS default_chain
+                    WHERE bc.bot_id = r.id AND bc.name = 'default') AS default_chain,
+                  COALESCE((SELECT o.monthly_rp FROM bot_quota_overrides o
+                             WHERE o.bot_id = r.id AND o.workspace_id = ?1), r.monthly_rp)
+                    AS effective_monthly_rp
              FROM app_install_bots ib
              JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
              JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
@@ -1720,6 +1730,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           archived_at: string | null;
           sandbox_image_id: string;
           default_chain: string | null;
+          effective_monthly_rp: number | null;
         }>();
       const byApp = new Map<
         string,
@@ -1733,6 +1744,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           available: boolean;
           multiplier: number;
           monthlyRp: number | null;
+          effectiveMonthlyRp: number | null;
           archived: boolean;
           defaultChain: string | null;
           runtime: string;
@@ -1753,6 +1765,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           available: row.scope === "shared" || row.bot_workspace_id === workspaceId,
           multiplier: row.multiplier,
           monthlyRp: row.monthly_rp,
+          effectiveMonthlyRp: row.effective_monthly_rp,
           // A read-only fact: an archived bot stays mounted and listed, the
           // relay just never selects it (T1's chain filter owns that rule).
           archived: row.archived_at !== null,

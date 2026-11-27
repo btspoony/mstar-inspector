@@ -572,6 +572,11 @@ export type AppChainEntry = {
   month_used_rp: number;
   /** The bot's own monthly cap; `null` = no cap of its own. */
   monthly_rp: number | null;
+  /**
+   * The ceiling the relay enforces for this workspace: its
+   * `bot_quota_overrides` row when one exists, else `monthly_rp`.
+   */
+  effective_monthly_rp: number | null;
   /** The bot is archived: mounted and listed, never selected by the relay. */
   archived: boolean;
   /** The bot's DEFAULT model chain selector string; `null` = none configured. */
@@ -607,6 +612,10 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.multiplier === "number" &&
     typeof value.month_used_rp === "number" &&
     (value.monthly_rp === null || typeof value.monthly_rp === "number") &&
+    (value.effective_monthly_rp === null ||
+      (typeof value.effective_monthly_rp === "number" &&
+        Number.isSafeInteger(value.effective_monthly_rp) &&
+        value.effective_monthly_rp > 0)) &&
     typeof value.archived === "boolean" &&
     (value.default_chain === null || typeof value.default_chain === "string") &&
     typeof value.runtime === "string" &&

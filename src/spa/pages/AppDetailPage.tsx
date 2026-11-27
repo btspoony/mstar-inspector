@@ -672,12 +672,14 @@ export function InstalledChainSection({
         return (
           <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
             {/* The ceiling rides the figure (ADR § Units): an own bot is unbounded,
-                a shared bot states its cap, a shared bot without one says so. */}
+                a shared bot states the cap the RELAY enforces for this workspace
+                (its override, else the bot's default), and says so when there is
+                none at all. `monthly_rp` alone would misstate an override. */}
             {row.owned
               ? t(locale, "credits.unlimitedOwn", { used })
-              : row.monthly_rp === null
+              : row.effective_monthly_rp === null
                 ? t(locale, "credits.noCeiling", { used })
-                : `${formatCredits(row.month_used_rp, rpPerCredit)} / ${formatCredits(row.monthly_rp, rpPerCredit)}`}
+                : `${formatCredits(row.month_used_rp, rpPerCredit)} / ${formatCredits(row.effective_monthly_rp, rpPerCredit)}`}
           </span>
         );
       },

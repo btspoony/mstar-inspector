@@ -492,7 +492,11 @@ export function AppInstallSection({
   installation: SettingsManagePayload["installation"];
   pendingInstallations: SettingsManagePayload["pending_installations"];
   blocked: boolean;
-  /** False on a face that already stated the App's identity (the installed face). */
+  /**
+   * False on a face that already stated the App's identity (the installed
+   * face): the name/avatar row disappears, the install entry and the bind
+   * state do not.
+   */
   showIdentity?: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
@@ -528,8 +532,28 @@ export function AppInstallSection({
 
   // The state-specific content, independent of whether the identity row renders:
   // a face that already stated the App's name still needs its bind state.
+  //
+  // The install entry is NOT part of the identity row: a face that states the
+  // App's name once still owes the manager GitHub's install page, including
+  // when nothing is bound yet. `AppInstallIdentity` therefore gets no href
+  // here and this section renders the one link, so exactly one copy exists.
   const body = (
     <>
+      {blocked || href === null ? null : (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex w-fit items-center gap-1.5 text-sm text-primary hover:underline"
+          aria-label={t(locale, "settings.installLinkAria", {
+            link: t(locale, "settings.installLink"),
+            name,
+          })}
+        >
+          {t(locale, "settings.installLink")}
+          <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        </a>
+      )}
       {blocked ? null : href === null ? (
         <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
       ) : app.scope === "shared" && installation === null ? (
@@ -589,7 +613,9 @@ export function AppInstallSection({
           name={name}
           avatarSrc={app.github_avatar_url}
           appId={app.github_app_id}
-          href={blocked ? null : href}
+          // The section's body renders the one install link; the identity row
+          // carries identity only, so either face yields exactly one entry.
+          href={null}
         >
           {body}
         </AppInstallIdentity>

@@ -18,6 +18,7 @@ const chainRow = {
   multiplier: 1,
   month_used_rp: 40,
   monthly_rp: null,
+  effective_monthly_rp: null,
   archived: false,
   default_chain: "deepseek/deepseek-chat",
   runtime: "omp",
@@ -120,6 +121,29 @@ describe("parseSettings — chain row archived", () => {
     const { archived: _omitted, ...without } = chainRow;
     expect(parseSettings({ ...settingsPayload, chain: [without] })).toBeNull();
     expect(parseSettings({ ...settingsPayload, chain: [{ ...chainRow, archived: "yes" }] })).toBeNull();
+  });
+});
+
+describe("parseSettings — chain row effective ceiling", () => {
+  test("an override, a default and none all parse", () => {
+    for (const effective of [5000, null]) {
+      const parsed = parseSettings({
+        ...settingsPayload,
+        chain: [{ ...chainRow, effective_monthly_rp: effective }],
+      });
+      expect(parsed?.chain?.[0]?.effective_monthly_rp).toBe(effective);
+    }
+  });
+
+  test("a missing, zero or non-integer effective ceiling fails the parse", () => {
+    const { effective_monthly_rp: _omitted, ...without } = chainRow;
+    expect(parseSettings({ ...settingsPayload, chain: [without] })).toBeNull();
+    for (const bad of [0, -1, 1.5, Number.NaN, "5000"]) {
+      expect(
+        parseSettings({ ...settingsPayload, chain: [{ ...chainRow, effective_monthly_rp: bad }] }),
+        String(bad),
+      ).toBeNull();
+    }
   });
 });
 

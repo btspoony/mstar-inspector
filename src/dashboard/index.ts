@@ -2212,6 +2212,7 @@ const appListRoute = async (c: DashboardContext) => {
           multiplier: bot.multiplier,
           month_used_rp: spend.get(bot.botId) ?? 0,
           monthly_rp: bot.monthlyRp,
+          effective_monthly_rp: bot.effectiveMonthlyRp,
           archived: bot.archived,
           default_chain: bot.defaultChain,
           runtime: bot.runtime,
@@ -4943,6 +4944,11 @@ export type AppChainEntry = {
   month_used_rp: number;
   /** The bot's own monthly cap (F5); `null` = no cap of its own. */
   monthly_rp: number | null;
+  /**
+   * The ceiling the relay enforces for the VIEWER's workspace: its
+   * `bot_quota_overrides` row when one exists, else `monthly_rp`.
+   */
+  effective_monthly_rp: number | null;
   /** The bot is archived: mounted and listed, never selected by the relay. */
   archived: boolean;
   /** The bot's DEFAULT model chain selector string; `null` = none configured. */
@@ -4989,6 +4995,7 @@ async function appChainRead(
     multiplier: bot.multiplier,
     month_used_rp: spend.get(bot.botId) ?? 0,
     monthly_rp: bot.monthlyRp,
+    effective_monthly_rp: bot.effectiveMonthlyRp,
     archived: bot.archived,
     default_chain: bot.defaultChain,
     runtime: bot.runtime,
