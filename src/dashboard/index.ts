@@ -3147,10 +3147,18 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // Inside the try, like every other settings read: the route's catch is the
     // only guard that logs `api_render` and answers the controlled 500.
     const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
+    // Holds for EVERY viewer, so it precedes the role split. A bot route admits
+    // by ownership or by a target on the bot, so those are the two reach facts
+    // this payload has — the same decision the App route applies to its own.
+    const viewerRelation = viewerRelationOf(
+      app.workspace_id === gate.scope.workspaceId,
+      target !== null || gate.targets_many,
+    );
     if (!canManageApp(gate.scope)) {
       return c.json({
         can_manage: false,
         workspace_id: gate.scope.workspaceId,
+        viewer_relation: viewerRelation,
         ...(target === null ? {} : { target_id: target.id }),
         blocked: blockedReason !== null,
         blocked_reason: blockedReason,
@@ -3187,6 +3195,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: gate.scope.workspaceId,
+        viewer_relation: viewerRelation,
         targets_many: gate.targets_many,
         target_id: target === null ? null : target.id,
         ...(target === null
@@ -3245,6 +3254,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
           };
     const base = {
       workspace_id: gate.scope.workspaceId,
+      viewer_relation: viewerRelation,
       targets_many: gate.targets_many,
       app: {
         github_app_id: app.github_app_id,
@@ -4867,13 +4877,21 @@ async function viewerRelationRead(
   workspaceId: string,
   hasLiveTarget: boolean,
 ): Promise<ViewerRelation> {
-  const owned = app.workspace_id === workspaceId;
   const installed = await db
     .prepare(`SELECT 1 AS present FROM app_installations WHERE github_app_id = ?1 AND workspace_id = ?2`)
     .bind(app.id, workspaceId)
     .first<{ present: number }>();
-  if (owned) return installed === null && !hasLiveTarget ? "created" : "both";
-  return "installed";
+  return viewerRelationOf(app.workspace_id === workspaceId, installed !== null || hasLiveTarget);
+}
+
+/**
+ * The decision itself, so both settings routes answer it from the reach facts
+ * each one can actually read — the App route its install state and targets, the
+ * bot route its targets — instead of one joining the other's id space (F2).
+ */
+function viewerRelationOf(owned: boolean, reachedOtherwise: boolean): ViewerRelation {
+  if (!owned) return "installed";
+  return reachedOtherwise ? "both" : "created";
 }
 
 /**

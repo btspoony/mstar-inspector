@@ -315,6 +315,19 @@ describe("parseSettings — viewer_relation on every App-detail face", () => {
       expect(parseSettings({ ...face, viewer_relation: "owner" }), name).toBeNull();
     }
   });
+
+  test("each face fails the parse when a chain row loses its archived flag", () => {
+    const { archived: _omitted, ...without } = chainRow;
+    for (const [name, face] of faces) {
+      expect(parseSettings({ ...face, chain: [without] }), name).toBeNull();
+    }
+  });
+
+  test("each face fails the parse when a chain row's archived flag is not a boolean", () => {
+    for (const [name, face] of faces) {
+      expect(parseSettings({ ...face, chain: [{ ...chainRow, archived: "yes" }] }), name).toBeNull();
+    }
+  });
 });
 
 describe("formatCredits", () => {
