@@ -603,6 +603,23 @@ function installChainForCreatedStates(
     )
     .bind(appId, stamp, ...(installationId === null ? [] : [installationId]));
 }
+/**
+ * An install state survives while its workspace OWNS the App or holds a live
+ * bound installation of it; it is an orphan only when neither is true. The two
+ * `NOT EXISTS` read as "neither … nor": an owner's state, written by
+ * `createApp` with zero physical installations, is legal — and so is a
+ * consumer's state bound to another workspace's shared App. Exported so the
+ * sweep below and the split-integrity report delete and count by ONE predicate.
+ */
+export function orphanInstallStateSql(s: string): string {
+  return `NOT EXISTS (SELECT 1 FROM app_workspaces w
+                      WHERE w.app_id = ${s}.github_app_id AND w.workspace_id = ${s}.workspace_id)
+     AND NOT EXISTS (SELECT 1 FROM github_app_installations i
+                      WHERE i.app_id = ${s}.github_app_id
+                        AND i.bound_workspace_id = ${s}.workspace_id
+                        AND i.removed_at IS NULL)`;
+}
+
 
 /**
  * The install state and its chain, removed when the workspace no longer holds
@@ -621,12 +638,7 @@ function installStateSweep(db: AppsStoreD1, appId: string): AppsStoreStatement[]
        WHERE s.github_app_id = ?1
          AND s.github_app_id = ${row}.github_app_id
          AND s.workspace_id = ${row}.workspace_id
-         AND NOT EXISTS (SELECT 1 FROM app_workspaces w
-                          WHERE w.app_id = s.github_app_id AND w.workspace_id = s.workspace_id)
-         AND NOT EXISTS (SELECT 1 FROM github_app_installations i
-                          WHERE i.app_id = s.github_app_id
-                            AND i.bound_workspace_id = s.workspace_id
-                            AND i.removed_at IS NULL))`;
+         AND ${orphanInstallStateSql("s")})`;
   return [
     db.prepare(`DELETE FROM app_install_bots WHERE ${orphaned("app_install_bots")}`).bind(appId),
     db
@@ -1062,6 +1074,33 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .prepare(SCOPED_APP_SQL)
         .bind(githubAppId, workspaceId)
         .first<GithubAppTenantRow>();
+    },
+
+    /**
+     * True when this install's chain can only execute through a bot the
+     * platform SHARES: it mounts at least one live shared bot of another
+     * workspace and mounts no bot of its own. That is the one case the relay
+     * consults the plan for — `selectReviewBot` admits an own bot by ownership
+     * before any plan read — so a route asking one step early asks this.
+     * An empty chain and a chain holding an own bot both answer false: the
+     * former is `no-review-bot` at delivery, the latter never needs the plan.
+     */
+    async chainNeedsSharedBot(appId: string, workspaceId: string): Promise<boolean> {
+      const row = await db
+        .prepare(
+          `SELECT
+             NOT EXISTS (SELECT 1 FROM app_install_bots ib
+                           JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
+                          WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2
+                            AND r.workspace_id = ?2)
+             AND EXISTS (SELECT 1 FROM app_install_bots ib
+                           JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
+                          WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2
+                            AND r.scope = 'shared' AND r.workspace_id <> ?2) AS needs_shared_bot`,
+        )
+        .bind(appId, workspaceId)
+        .first<{ needs_shared_bot: number }>();
+      return row?.needs_shared_bot === 1;
     },
 
     async getScopedBotById(botId: string, workspaceId: string): Promise<BotScopedRow | null> {

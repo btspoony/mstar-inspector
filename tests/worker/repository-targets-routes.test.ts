@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
+import { SHARED_BOT_REFUSAL } from "../../src/dashboard/entitlement";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
@@ -498,6 +499,94 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
   const INSTALLATION = 11;
   const grant = (repositories: Array<{ id: number; owner: string; name: string }>) =>
     stubRepositories({ [INSTALLATION]: repositories });
+
+  const postSaas = (db: TestD1, path: string, login: string, body: unknown): Promise<Response> =>
+    session(login).then((headers) =>
+      worker.fetch(
+        new Request(`https://worker.local${path}`, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        { ...makeEnv(db), DEPLOYMENT_MODE: "saas" },
+      ),
+    );
+
+  function seedSubscription(db: TestD1, planId: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES ('default', ?, 'active', '2026-10-24T00:00:00.000Z', '2026-10-24T00:00:00.000Z')`,
+      )
+      .run(planId);
+  }
+
+  /** Point the workspace's chain at a bot ANOTHER workspace shares, so only the plan can admit a delivery. */
+  function mountSharedBotOnly(db: TestD1, appId: string): void {
+    const botId = crypto.randomUUID();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots (id, workspace_id, name, scope, shared_at, multiplier, created_at, updated_at)
+         VALUES (?, ?, 'shared-only', 'shared', datetime('now'), 1, datetime('now'), datetime('now'))`,
+      )
+      .run(botId, OTHER_WS);
+    db.raw
+      .prepare("UPDATE app_install_bots SET bot_id = ? WHERE github_app_id = ? AND workspace_id = 'default'")
+      .run(botId, appId);
+  }
+
+  const defaultTargets = (db: TestD1): number =>
+    (db.raw
+      .query("SELECT COUNT(*) AS n FROM review_targets WHERE workspace_id = 'default' AND deleted_at IS NULL")
+      .get() as { n: number }).n;
+
+  test("a chain that can only execute through a shared bot refuses under a plan without the capability", async () => {
+    const { db, botId } = await seededWorld({ target: false, installations: [INSTALLATION] });
+    mountSharedBotOnly(db, botId);
+    // The fixture's point: the chain really does need the plan's capability.
+    expect(await createReviewBotsStore(db).chainNeedsSharedBot(botId, "default")).toBe(true);
+    grant([{ id: 801, owner: "acme", name: "api" }]);
+
+    const res = await postSaas(db, "/dashboard/default/api/targets", "mallory", {
+      bot_id: botId,
+      repositories: [{ repo_id: 801, owner: "acme", name: "api" }],
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: SHARED_BOT_REFUSAL("free") });
+    expect(defaultTargets(db)).toBe(0);
+  });
+
+  test("the same creation succeeds under a plan that includes the shared bot", async () => {
+    const { db, botId } = await seededWorld({ target: false, installations: [INSTALLATION] });
+    mountSharedBotOnly(db, botId);
+    seedSubscription(db, "pro");
+    grant([{ id: 801, owner: "acme", name: "api" }]);
+
+    const res = await postSaas(db, "/dashboard/default/api/targets", "mallory", {
+      bot_id: botId,
+      repositories: [{ repo_id: 801, owner: "acme", name: "api" }],
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { created: Array<{ repo_id: number }>; duplicates: unknown[] };
+    expect(body.created.map((row) => row.repo_id)).toEqual([801]);
+    expect(defaultTargets(db)).toBe(1);
+  });
+
+  test("a chain holding the workspace's own bot creates on the free plan, exactly as the relay admits it", async () => {
+    const { db, botId } = await seededWorld({ target: false, installations: [INSTALLATION] });
+    expect(await createReviewBotsStore(db).chainNeedsSharedBot(botId, "default")).toBe(false);
+    grant([{ id: 801, owner: "acme", name: "api" }]);
+
+    const res = await postSaas(db, "/dashboard/default/api/targets", "mallory", {
+      bot_id: botId,
+      repositories: [{ repo_id: 801, owner: "acme", name: "api" }],
+    });
+
+    expect(res.status).toBe(201);
+    expect(defaultTargets(db)).toBe(1);
+  });
 
   test("one target per selected repository, each inheriting the workspace defaults", async () => {
     const { db } = await seededWorld({ target: false, installations: [INSTALLATION] });

@@ -109,6 +109,7 @@ import {
   UNLIMITED_PLAN_ID,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
+  SHARED_BOT_REFUSAL,
   sharedBotAvailability,
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
@@ -5378,6 +5379,21 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   const repoIds = repositories.filter((repository) => !walked.byRepoId.has(repository.repo_id)).map((repository) => repository.repo_id);
   if (repoIds.length > 0) {
     return c.json({ error: "repository_not_installed", repo_ids: [...new Set(repoIds)] }, 400);
+  }
+  // The plan is asked once for the whole request: N targets on one App share
+  // one verdict. `chainNeedsSharedBot` is the relay's own condition — a chain
+  // that mounts an own bot is admitted on ownership there and never reads the
+  // plan — so this refuses exactly the creations the next delivery would.
+  const botScope = (await apps.chainNeedsSharedBot(app.id, member.scope.workspaceId)) ? "shared" : "own";
+  const verdict = await checkEntitlement({
+    db: member.db,
+    mode: deploymentModeOf(c.env.DEPLOYMENT_MODE),
+    workspaceId: member.scope.workspaceId,
+    kind: "shared-bot",
+    botScope,
+  });
+  if (!verdict.ok && verdict.refusal.kind === "shared-bot") {
+    return c.json({ error: SHARED_BOT_REFUSAL(verdict.refusal.planId) }, 400);
   }
   const store = createTargetsStore(member.db);
   const created: Array<{ target_id: string; repo_id: number; repo_owner: string; repo_name: string }> = [];

@@ -1,54 +1,30 @@
 /**
  * The operator's per-Bot multiplier distribution: every live Review Bot's
- * `multiplier`, grouped by value, with a count per value and the Bots at each
- * value. A price change or rollback is a per-Bot `multiplier` edit, so this
- * view is the operator's answer to "what is the platform currently priced at,
- * and which Bot settings would a rollback need to touch?"
+ * `multiplier`, grouped by value, with the Bots at each value. A price change or
+ * rollback is a per-Bot `multiplier` edit, so this view answers "what is the
+ * platform currently priced at, and which Bot settings would a rollback need to
+ * touch?"
  *
- * Read-only by construction: one SELECT over the live rows
- * (`deleted_at IS NULL`), grouped in SQL — the count and the Bot list of each
- * value come out of the same group, so they can never disagree. The module
- * never writes configuration, runs no audit action and owns no key.
+ * The read itself lives in the App store. `tests/store/tenant-read-face.test.ts`
+ * allows `review_bots` to be read only from `dashboard/apps-store.ts` plus a
+ * short maintenance allowlist, and a maintenance read may not project a name or
+ * an owning workspace — both of which this view needs to be useful. So this
+ * module holds the operator gate and the response, nothing else.
+ *
+ * Read-only by construction: no write, no audit action, no key.
  */
-import type {
-  BotMultiplierBot,
-  BotMultipliersReport,
-  BotMultiplierGroup,
-} from "../contracts/bot-multipliers";
-import type { D1Like } from "../store/types";
+import { createReviewBotsStore } from "../dashboard/apps-store";
+import type { BotMultipliersReport } from "../contracts/bot-multipliers";
+import type { DashboardD1 } from "../dashboard/users";
 import { operatorLogin, type AdminContext } from "./gate";
 
-type MultiplierRow = {
-  multiplier: number;
-  count: number;
-  /** The group's Bots as a JSON array, aggregated by the same statement. */
-  bots_json: string;
-};
-
 /**
- * Read the distribution. One statement: SQLite's `json_group_array` aggregates
- * the Bots of each group in the database, `count(*)` counts them, and only the
- * in-memory walk parses the JSON the statement already produced — grouping
- * itself never happens here.
+ * Read the distribution. Grouping happens in SQL — the count and the Bot list of
+ * each value come out of the same group, so they can never disagree.
  */
-export async function readBotMultiplierDistribution(db: D1Like): Promise<BotMultipliersReport> {
-  const rows = await db
-    .prepare(
-      `SELECT multiplier, count(*) AS count,
-              json_group_array(json_object('botId', id, 'name', name, 'workspaceId', workspace_id)) AS bots_json
-         FROM review_bots
-        WHERE deleted_at IS NULL
-        GROUP BY multiplier
-        ORDER BY multiplier ASC`,
-    )
-    .all<MultiplierRow>();
-
-  const groups: BotMultiplierGroup[] = rows.results.map((row) => ({
-    multiplier: row.multiplier,
-    count: row.count,
-    bots: JSON.parse(row.bots_json) as BotMultiplierBot[],
-  }));
-  return { groups };
+export async function readBotMultiplierDistribution(db: DashboardD1): Promise<BotMultipliersReport> {
+  const groups = await createReviewBotsStore(db).readMultiplierDistribution();
+  return { groups: groups.map((group) => ({ ...group, count: group.bots.length })) };
 }
 
 /** `GET /api/runtime/bot-multipliers` — the read-only operator view. */
