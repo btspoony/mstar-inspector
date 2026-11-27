@@ -1,5 +1,5 @@
 # ADR: Add PR detail and GitHub badge entry points for review reruns
-Status: proposed — the rerun entry points and their shared enqueue boundary have been chosen but have not shipped
+Status: proposed — neither entry point this record decides exists: the PR detail page issues no trigger request and the review comment carries no badge; what ships today is GitHub's own Check re-request reusing the shared enqueue path, the alternative this record set aside
 Spec: docs/specs/feature/review-trigger-policy.md § 3. Bot-mention comment trigger (normative)
 
 ## Problem
@@ -24,14 +24,14 @@ The in-page states use their own approved wording, never a raw error:
 - **Already running:** “A review is already running for this commit.”
 - **Starting:** “Starting the rerun.” On acceptance, show this state and return the user to the PR detail page.
 
-A trigger refusal is not a review failure. The [failure-status ADR](2026-11-21-review-failure-user-facing-status.md) owns only the terminal Check summary, not these in-page states.
+A trigger refusal is not a review failure. The [failure-status ADR](../../implemented/architecture/2026-11-21-review-failure-user-facing-status.md) owns only the terminal Check summary, not these in-page states.
 
 ## Alternatives considered
 
 - **Keep the mention as the only entry.** It makes an internal user switch to GitHub and write a comment, without expressing per-head intent.
 - **Have the badge call the trigger endpoint directly.** A static link gives the product no place to authorize the viewer or show acceptance or refusal, and a public PR exposes the trigger endpoint itself.
 - **Ship only the internal PR detail control.** It leaves no path from GitHub, where most review discussion happens.
-- **Reuse GitHub’s Check re-request action.** Its action semantics are owned by GitHub, not this product, and the [trigger policy defers it](../../../../docs/specs/feature/review-trigger-policy.md#5-non-goals).
+- **Reuse GitHub’s Check re-request action.** Its action semantics are owned by GitHub, not this product. It now starts a review through the shared enqueue path ([trigger policy](../../../../docs/specs/feature/review-trigger-policy.md#2-trigger-modes-normative)), but it cannot express what this record needs: it carries no per-head intent of its own, it exists only where the App already posted a Check, and it names no entry point the product can refuse and explain when publication for that head is unresolved.
 
 ## Acceptance criteria
 
@@ -44,6 +44,6 @@ A trigger refusal is not a review failure. The [failure-status ADR](2026-11-21-r
 
 ## Risks
 
-- The rerun entries must not ship before the [billing posture for repeated attempts](2026-11-21-paid-review-step-at-most-once.md#risks) is decided. A one-click rerun combined with a terminal failure message that tells the user to retry can lead to repeated charges the user cannot see.
+- The rerun entries must not ship before the [billing posture for repeated attempts](../../implemented/architecture/2026-11-21-paid-review-step-at-most-once.md#risks) is decided. A one-click rerun combined with a terminal failure message that tells the user to retry can lead to repeated charges the user cannot see.
 - A badge on a public PR advertises that the repository uses this tool. The review comment is already public when the App reviews a public repository. A workspace manager can suppress the badge for a public repository through the owning workspace’s Settings → Configuration surface (`/dashboard/<ref>/settings`, `src/spa/pages/WorkspaceSettingsPage.tsx:1–12`). The absent-row default is to show the badge.
 - The App-management permission wins for both new entries because they act within the App’s owning workspace. The PR-author or repository-owner rule still governs GitHub comments; it offers an alternate entry, not permission to use the internal control.
