@@ -79,3 +79,8 @@ CREATE TABLE guard_quota_binding_without_profile (
 INSERT INTO guard_quota_binding_without_profile (n)
 SELECT COUNT(*) FROM usage_events u
 WHERE NOT EXISTS (SELECT 1 FROM quota_profiles);
+
+-- The guard has done its job (a non-zero count aborts the whole file above);
+-- dropping it keeps the schema free of a permanently-empty scratch table, the
+-- same way 0115 and 0118 end.
+DROP TABLE guard_quota_binding_without_profile;

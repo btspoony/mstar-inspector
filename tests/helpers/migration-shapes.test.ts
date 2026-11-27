@@ -69,7 +69,17 @@ describe("fixture shapes (review bot vocabulary)", () => {
       const reviews = (
         db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string }>
       ).map((column) => column.name);
-      expect(reviews, `${shape}: review attribution column`).toContain(renamed ? "app_id" : "app_id");
+      // 0005 names the column app_id; 0056 renames it to bot_id; 0115 renames it
+      // back to app_id AND adds a fresh bot_id for the executing bot. No shape in
+      // FIXTURE_SHAPES currently stops between 0056 and 0115, so the middle arm is
+      // the era branch a future shape would take, not a tautology.
+      if (renamed) {
+        expect(reviews, `${shape}: review attribution column (bot era)`).toContain("bot_id");
+        expect(reviews, `${shape}: review attribution column (bot era)`).not.toContain("app_id");
+      } else {
+        expect(reviews, `${shape}: review attribution column`).toContain("app_id");
+      }
+      if (postSplit) expect(reviews, `${shape}: executing bot column`).toContain("bot_id");
       expect(tables.has("review_targets"), `${shape}: target table`).toBe(renamed || postSplit);
       const botColumns = (
         db.raw.query(`PRAGMA table_info(${renamed ? "review_bots" : "github_apps"})`).all() as Array<{

@@ -27,7 +27,9 @@ function familyTable(db: TestD1, kind: "workspaces" | "installations"): { table:
     .all() as Array<{ name: string }>;
   const names = new Set(rows.map((r) => r.name));
   if (kind === "workspaces") {
-    if (names.has("app_workspaces")) return { table: "app_workspaces", keyColumn: names.has("review_bots") && names.has("github_apps") ? "app_id" : "app_id" };
+    // 0115 renames the column to app_id in the same migration that creates
+    // app_workspaces, so the key is always app_id here.
+    if (names.has("app_workspaces")) return { table: "app_workspaces", keyColumn: "app_id" };
     if (names.has("bot_workspaces")) return { table: "bot_workspaces", keyColumn: "bot_id" };
     return null;
   }

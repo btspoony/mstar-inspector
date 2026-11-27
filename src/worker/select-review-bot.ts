@@ -1,4 +1,4 @@
-import type { BotScope, DeliveryOutcome } from "../dashboard/apps-store";
+import type { BotScope } from "../dashboard/apps-store";
 import type { DashboardD1 } from "../dashboard/users";
 import type { ReviewTargetRow } from "../dashboard/targets-store";
 import { checkEntitlement } from "../dashboard/entitlement";
