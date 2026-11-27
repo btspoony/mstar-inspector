@@ -563,6 +563,8 @@ export type AppChainEntry = {
   month_used_rp: number;
   /** The bot's own monthly cap; `null` = no cap of its own. */
   monthly_rp: number | null;
+  /** The bot is archived: mounted and listed, never selected by the relay. */
+  archived: boolean;
 };
 
 /**
@@ -591,7 +593,8 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.available === "boolean" &&
     typeof value.multiplier === "number" &&
     typeof value.month_used_rp === "number" &&
-    (value.monthly_rp === null || typeof value.monthly_rp === "number")
+    (value.monthly_rp === null || typeof value.monthly_rp === "number") &&
+    typeof value.archived === "boolean"
   );
 }
 
@@ -935,6 +938,8 @@ export type BotQuotaOverride = { workspaceId: string; monthlyRp: number };
 
 export type BotSettingsPayload = {
   can_manage: boolean;
+  /** Archived is a state fact for every viewer; only the owner may flip it. */
+  archived: boolean;
   /** The owner's exception layer over the default ceiling; owner-only. */
   quota_overrides?: BotQuotaOverride[];
   /** F10: the ceiling could not be resolved — never render "no ceiling". */
@@ -951,8 +956,31 @@ export type ProviderManagementPayload = BotConfigSections & {
   model_limits_snapshot: string;
 };
 
+/**
+ * Which of the two App faces a reader came for, resolved by the server from
+ * facts that hold for every member — never from the role, because the SPA
+ * picks the face before it knows whether the viewer manages. Required on
+ * every App-detail payload: a payload without it parses to `null`.
+ */
+export type ViewerRelation = "installed" | "created" | "both";
+
+function isViewerRelation(value: unknown): value is ViewerRelation {
+  return value === "installed" || value === "created" || value === "both";
+}
+
+/**
+ * The facts every App-detail face carries, resolved before the role split.
+ * `rp_per_credit` is the operator profile's credit rate; it is ABSENT when
+ * that profile is unreadable — readers fall back to the ADR-documented
+ * 1 Credit = 1,000 RP (see {@link formatCredits}).
+ */
+type AppDetailViewerFacts = {
+  viewer_relation: ViewerRelation;
+  rp_per_credit?: number;
+};
+
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
-export type SettingsReadOnlyPayload = {
+export type SettingsReadOnlyPayload = AppDetailViewerFacts & {
   can_manage: false;
   workspace_id: string;
   blocked: boolean;
@@ -983,7 +1011,7 @@ export function appDisplayName(app: {
   );
 }
 
-type SettingsManageBase = {
+type SettingsManageBase = AppDetailViewerFacts & {
   can_manage: true;
   workspace_id: string;
   installation: BoundInstallation | null;
@@ -1032,7 +1060,7 @@ export type SettingsUntargetedPayload = SettingsManageBase & {
  * chains, custom providers, sandbox image or metadata. Those belong to the
  * owning workspace, so their absence is the contract, not a degradation.
  */
-export type SettingsBlockedPayload = {
+export type SettingsBlockedPayload = AppDetailViewerFacts & {
   can_manage: true;
   blocked: true;
   blocked_reason: BlockedReason;
@@ -1049,7 +1077,7 @@ export type SettingsBlockedPayload = {
  * target-owned slice is absent and `target_id` is an explicit `null` — the
  * shape the SPA's `targets_many` notice reads.
  */
-export type SettingsBlockedManyPayload = AppChain & {
+export type SettingsBlockedManyPayload = AppDetailViewerFacts & AppChain & {
   can_manage: true;
   blocked: true;
   blocked_reason: BlockedReason;
@@ -2559,8 +2587,23 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
+function isPositiveFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+/**
+ * RP rendered as Credits. The 1,000 fallback is the ADR-documented rate
+ * (1 Credit = 1,000 RP) for when the operator profile is unreadable and the
+ * payload carries no `rp_per_credit`.
+ */
+export function formatCredits(rp: number, rpPerCredit?: number): string {
+  return `${(rp / (rpPerCredit ?? 1000)).toFixed(2)} Credits`;
+}
+
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data)) return null;
+  if (!isViewerRelation(data.viewer_relation)) return null;
+  if (data.rp_per_credit !== undefined && !isPositiveFinite(data.rp_per_credit)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
@@ -2573,6 +2616,14 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (data.blocked_reason !== null && !isBlockedReason(data.blocked_reason)) return null;
   if (data.blocked !== (data.blocked_reason !== null)) return null;
   if (data.targets_many !== undefined && typeof data.targets_many !== "boolean") return null;
+  // The chain is served on every face (it is the workspace's install state,
+  // not a credential), so it is validated before the role split.
+  if (
+    data.chain !== undefined &&
+    (!Array.isArray(data.chain) || !data.chain.every(isAppChainEntry))
+  ) {
+    return null;
+  }
   if (data.blocked) {
     if (
       data.app.github_metadata_synced_at !== undefined &&
@@ -2640,12 +2691,6 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!parseCatalogReference(data)) return null;
   if (!isSandboxImageList(data.sandbox_images)) return null;
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
-  if (
-    data.chain !== undefined &&
-    (!Array.isArray(data.chain) || !data.chain.every(isAppChainEntry))
-  ) {
-    return null;
-  }
   if (!hasTarget) return data as SettingsPayload;
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
@@ -2670,6 +2715,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!isRecord(data)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
+  if (typeof data.archived !== "boolean") return null;
   let quotaOverrides: BotQuotaOverride[] | undefined;
   if (data.quota_overrides !== undefined) {
     if (!Array.isArray(data.quota_overrides)) return null;

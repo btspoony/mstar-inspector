@@ -320,7 +320,7 @@ describe("App detail IA copy", () => {
 
 describe("creation chooser copy", () => {
   const KEYS = [
-    "apps.createDialog.title",
+    "apps.createDialog.githubTitle",
     "apps.createDialog.description",
     "apps.createDialog.botTargets",
     "apps.createDialog.noSharedBots",
@@ -441,6 +441,87 @@ describe("the shared-bot surfaces' copy", () => {
       const label = t(locale, "admin.nav.bots");
       expect(label).not.toBe("admin.nav.bots");
       expect(label.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("App/Bot IA contract keys (Task 4)", () => {
+  const NEW_KEYS = [
+    "apps.origin.installed",
+    "apps.origin.created",
+    "apps.createDialog.githubTitle",
+    "apps.createDialog.shared",
+    "appDetail.installed.metricMounted",
+    "appDetail.installed.metricInstallations",
+    "appDetail.installed.metricSpend",
+    "appDetail.installed.chainTitle",
+    "appDetail.installed.addBot",
+    "appDetail.installed.archivedSkipped",
+    "appDetail.creator.tabSettings",
+    "appDetail.creator.tabDelivery",
+    "appDetail.creator.tabInstalled",
+    "appDetail.creator.appSection",
+    "bots.list.title",
+    "bots.list.ownedSection",
+    "bots.list.ownedHint",
+    "bots.list.sharedSection",
+    "bots.list.sharedHint",
+    "bots.list.archived",
+    "bots.create.open",
+    "bots.create.title",
+    "bots.create.nameLabel",
+    "bots.create.descriptionLabel",
+    "bots.create.submit",
+    "botDetail.tab.overview",
+    "botDetail.tab.config",
+    "botDetail.identity.title",
+    "botDetail.identity.name",
+    "botDetail.identity.description",
+    "botDetail.share.title",
+    "botDetail.share.switch",
+    "botDetail.share.multiplier",
+    "botDetail.share.monthlyCap",
+    "botDetail.share.monthlyCapHint",
+    "botDetail.share.inactiveHint",
+    "botDetail.overrides.title",
+    "botDetail.overrides.clear",
+    "botDetail.usage.title",
+    "botDetail.usage.used",
+    "botDetail.usage.cap",
+    "botDetail.usage.remaining",
+    "botDetail.usage.source",
+    "botDetail.usage.utcHint",
+    "botDetail.archive.dangerTitle",
+    "botDetail.archive.dangerHint",
+    "botDetail.archive.open",
+    "botDetail.archive.dialogTitle",
+    "botDetail.archive.confirm",
+    "botDetail.archive.restore",
+    "botDetail.archive.ownerBanner",
+    "botDetail.archive.consumerBanner",
+    "botDetail.archive.lockedNotice",
+    "botDetail.consumer.readOnlyNotice",
+    "credits.unit",
+    "credits.usedThisMonth",
+    "credits.noCeiling",
+    "credits.unlimitedOwn",
+  ] as const;
+
+  test("every new surface key resolves in both locales", () => {
+    for (const key of NEW_KEYS) {
+      expect(isDictionaryKey(key), key).toBe(true);
+      for (const locale of LOCALES) {
+        expect(t(locale, key as DictionaryKey), `${locale} ${key}`).not.toBe(key);
+      }
+    }
+  });
+
+  test("the new Credits copy never prints the legacy RP unit", () => {
+    const creditKeys = NEW_KEYS.filter((key) => key.startsWith("credits.") || key === "appDetail.installed.metricSpend");
+    for (const key of creditKeys) {
+      for (const locale of LOCALES) {
+        expect(t(locale, key as DictionaryKey), `${locale} ${key}`).not.toMatch(/\bRP\b/);
+      }
     }
   });
 });

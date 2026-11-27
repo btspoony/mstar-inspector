@@ -124,6 +124,21 @@ export const en = {
     },
   },
   bots: {
+    list: {
+      title: "Bots",
+      ownedSection: "Bots I created",
+      ownedHint: "Review bots this workspace provides and maintains; editable here.",
+      sharedSection: "Bots shared with me",
+      sharedHint: "Review bots other workspaces share with this workspace; read-only.",
+      archived: "Archived",
+    },
+    create: {
+      open: "Create bot",
+      title: "Create bot",
+      nameLabel: "Name",
+      descriptionLabel: "Description (optional)",
+      submit: "Create",
+    },
     overridesTitle: "Per-workspace ceilings",
     overridesHint:
       "Blank uses the default ceiling. A workspace appears here once it mounts this bot.",
@@ -168,8 +183,76 @@ export const en = {
     staleAfterSave:
       "The change was saved, but this page could not re-read it — reload to see the stored value.",
   },
+  botDetail: {
+    tab: {
+      overview: "Overview",
+      config: "Config",
+    },
+    identity: {
+      title: "Basic info",
+      name: "Name",
+      description: "Description",
+    },
+    share: {
+      title: "Share & pricing",
+      switch: "Share with other workspaces",
+      multiplier: "Multiplier",
+      monthlyCap: "Monthly ceiling",
+      monthlyCapHint: "The Credits a single workspace may spend per month; blank = no ceiling.",
+      inactiveHint:
+        "Sharing is off: the multiplier, monthly ceiling and per-workspace overrides take effect only once sharing is on — you can preconfigure them here.",
+    },
+    overrides: {
+      title: "Per-workspace overrides",
+      clear: "Clear override",
+    },
+    usage: {
+      title: "Usage",
+      used: "Used this month",
+      cap: "Monthly ceiling",
+      remaining: "Remaining",
+      source: "Billing source",
+      utcHint: "Credits this workspace spent through this bot this month; the window is the UTC calendar month.",
+    },
+    archive: {
+      dangerTitle: "Danger zone",
+      dangerHint:
+        "Once archived, no App's review will use this bot; workspaces using it see \u201cArchived\u201d. You can restore it at any time.",
+      open: "Archive this bot",
+      dialogTitle: "Archive this bot",
+      confirm: "Archive",
+      restore: "Restore",
+      ownerBanner: "This bot is archived and will not be used by any review.",
+      consumerBanner: "This bot was archived by its owning workspace and is no longer available.",
+      lockedNotice: "This bot is archived: the configuration is locked until it is restored.",
+    },
+    consumer: {
+      readOnlyNotice: "This page is read-only. A shared bot is configured only by its owning workspace.",
+    },
+  },
+  credits: {
+    unit: "Credits",
+    usedThisMonth: "Used this month",
+    noCeiling: "{used} Credits · no ceiling",
+    unlimitedOwn: "{used} Credits · unlimited (own bot)",
+  },
   appDetail: {
     documentPage: "App",
+
+    installed: {
+      metricMounted: "Mounted bots",
+      metricInstallations: "Installations",
+      metricSpend: "Used this month",
+      chainTitle: "Mounted bots",
+      addBot: "Add bot",
+      archivedSkipped: "Archived — skipped",
+    },
+    creator: {
+      tabSettings: "App settings",
+      tabDelivery: "Delivery",
+      tabInstalled: "Installed",
+      appSection: "GitHub App",
+    },
 
     backToApps: "Back to Apps",
     botSettingsLink: "Bot settings",
@@ -439,6 +522,10 @@ export const en = {
     },
   },
   apps: {
+    origin: {
+      installed: "Installed",
+      created: "Created here",
+    },
     tabInstalled: "Installed apps",
     tabCreated: "Apps I created",
     tabBots: "Bots I can use",
@@ -553,6 +640,8 @@ export const en = {
     openAria: "Open {name} detail",
     createDialog: {
       title: "Create a review target",
+      githubTitle: "Create GitHub App",
+      shared: "Use a platform-shared App",
       description: "Use an App this platform already shares, or connect your own GitHub App.",
       botTargets: "{name} · {count} targets",
       noSharedBots: "This platform shares no App yet — connect your own GitHub App instead.",
