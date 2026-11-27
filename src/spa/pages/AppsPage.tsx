@@ -1,5 +1,5 @@
 /**
- * The Apps page (D6/D8/D22/D25): ONE list surface split into three
+ * The Apps page (D6/D8/D22/D25): ONE list surface split into two
  * URL-addressable tabs.
  *
  * - `installed` — Apps this workspace holds an INSTALL STATE for (D43), plus one
@@ -7,8 +7,9 @@
  *   the state, never a target or a physical installation: those are what the
  *   state is an aggregate over.
  * - `created` — the Apps the workspace owns, installed or not.
- * - `bots` — "Bots I can use": one server-ordered read, client-side filters, no
- *   App column.
+ *
+ * Bots have their OWN directory (`/bots`); the legacy `?tab=bots` spelling
+ * answers a redirect there, and this page never fetches or renders a bot list.
  *
  * The tab rides `?tab=`; only the tab equal to the REAL default is omitted, an
  * unknown value is corrected once the payload lands, and tab changes push
@@ -95,9 +96,9 @@ export async function loadUsableBots(base: string): Promise<UsableBotsPayload> {
   return parsed;
 }
 
-export type AppsTab = "installed" | "created" | "bots";
+export type AppsTab = "installed" | "created";
 
-const APP_TABS: readonly AppsTab[] = ["installed", "created", "bots"];
+const APP_TABS: readonly AppsTab[] = ["installed", "created"];
 
 /**
  * F1/D8: an App is INSTALLED when this workspace holds an installation
@@ -111,7 +112,7 @@ export function installedAppsOf(payload: AppsPayload): AppsPayload["apps"] {
 /** The tab the URL names, or the D8 default once membership is known. */
 export function appsTabOf(search: string, hasInstalled: boolean): AppsTab {
   const value = new URLSearchParams(search).get("tab");
-  if (value === "installed" || value === "created" || value === "bots") return value;
+  if (value === "installed" || value === "created") return value;
   return hasInstalled ? "installed" : "created";
 }
 
@@ -138,12 +139,10 @@ function monthSpendCell(
   rpPerCredit?: number,
 ): string {
   if (month === null) return t(locale, "bots.monthNone");
-  // The bare two-decimal figure, for dictionary strings that carry their own unit.
-  const used = formatCredits(month.used_rp, rpPerCredit).slice(0, -" Credits".length);
-  if (month.owned) return t(locale, "credits.unlimitedOwn", { used });
-  if (quotaError) return t(locale, "bots.monthUnknown");
-  if (planRp === null) return t(locale, "credits.noCeiling", { used });
-  return `${formatCredits(month.used_rp, rpPerCredit)} / ${formatCredits(planRp, rpPerCredit)}`;
+  if (month.owned) {
+    return usageCeilingCell(locale, month, { owned: true, quotaError: false, ceilingRp: null, rpPerCredit });
+  }
+  return usageCeilingCell(locale, month, { owned: false, quotaError, ceilingRp: planRp, rpPerCredit });
 }
 
 /** The list's pending-bind flow, threaded from the stateful page. */
