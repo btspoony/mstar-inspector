@@ -1,5 +1,5 @@
 # ADR: Add PR detail and GitHub badge entry points for review reruns
-Status: proposed — the rerun entry points and their shared enqueue boundary have been chosen but have not shipped
+Status: proposed — neither entry point this record decides exists: the PR detail page issues no trigger request and the review comment carries no badge; what ships today is GitHub's own Check re-request reusing the shared enqueue path, the alternative this record set aside
 Spec: docs/specs/feature/review-trigger-policy.md § 3. Bot-mention comment trigger (normative)
 
 ## Problem
