@@ -2473,7 +2473,9 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
     // Both facts hold for EVERY viewer, so they precede the role split: the SPA
     // chooses the face before it learns whether this member manages.
     const [viewerRelation, rpPerCredit] = await Promise.all([
-      viewerRelationRead(member.db, appRow, member.scope.workspaceId),
+      // The scoped read already admitted this viewer, so the live target it
+      // found is this workspace's use relation — no second query for it.
+      viewerRelationRead(member.db, appRow, member.scope.workspaceId, live.length > 0),
       // Operator quota data may be absent (a deployment whose `quota_profiles`
       // is empty); the App detail must still open. The payload then carries no
       // rate and the SPA charges the documented 1 Credit = 1,000 RP.
@@ -2486,7 +2488,7 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
       return c.json({
         can_manage: false,
         workspace_id: member.scope.workspaceId,
-        ...(viewerRelation === null ? {} : { viewer_relation: viewerRelation }),
+        viewer_relation: viewerRelation,
         ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
         ...(target === null ? {} : { target_id: target.id }),
         blocked: blockedReason !== null,
@@ -2528,7 +2530,7 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: member.scope.workspaceId,
-        ...(viewerRelation === null ? {} : { viewer_relation: viewerRelation }),
+        viewer_relation: viewerRelation,
         ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
         targets_many: targetsMany,
         target_id: target === null ? null : target.id,
@@ -2631,7 +2633,7 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
     return c.json({
       can_manage: true,
       workspace_id: member.scope.workspaceId,
-      ...(viewerRelation === null ? {} : { viewer_relation: viewerRelation }),
+      viewer_relation: viewerRelation,
       ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
       targets_many: targetsMany,
       ...targetOwned.top,
@@ -4851,25 +4853,27 @@ export type ViewerRelation = "both" | "created" | "installed";
 /**
  * Which of the two App faces a reader came for, resolved from facts that hold
  * for every member — never from the role, because the SPA picks the face before
- * it knows whether the viewer manages. `created` = this workspace owns the App,
- * `installed` = it holds an `app_installations` row for it, `both` = both.
+ * it knows whether the viewer manages. `both` = this workspace owns the App and
+ * also reaches it another way, `created` = it owns the App and reaches it no
+ * other way, `installed` = it does not own it but reaches it through install
+ * state or a live target.
  *
- * `null` = neither: a viewer admitted by a live target alone has no install
- * state, so it holds no face and the payload omits the field rather than
- * claiming an installation it does not have.
+ * The relation selects the FACE; whether an `app_installations` row exists is a
+ * separate fact the list payload reports as `installed`.
  */
 async function viewerRelationRead(
   db: DashboardDb,
   app: Pick<GithubAppRow, "id" | "workspace_id">,
   workspaceId: string,
-): Promise<ViewerRelation | null> {
+  hasLiveTarget: boolean,
+): Promise<ViewerRelation> {
   const owned = app.workspace_id === workspaceId;
   const installed = await db
     .prepare(`SELECT 1 AS present FROM app_installations WHERE github_app_id = ?1 AND workspace_id = ?2`)
     .bind(app.id, workspaceId)
     .first<{ present: number }>();
-  if (owned) return installed === null ? "created" : "both";
-  return installed === null ? null : "installed";
+  if (owned) return installed === null && !hasLiveTarget ? "created" : "both";
+  return "installed";
 }
 
 /**

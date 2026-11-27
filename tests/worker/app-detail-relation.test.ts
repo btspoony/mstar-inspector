@@ -201,10 +201,11 @@ describe("GET /api/apps/:appId — visibility follows the install state", () => 
     expect(body.viewer_relation).toBe("installed");
   });
 
-  test("a live target without install state is admitted but claims no installation", async () => {
+  test("a live target without install state reads installed, but claims no installation", async () => {
     const db = await world();
-    // The reverse edge: the target admits the App, the install state is what
-    // the relation must read — so the payload states no relation at all.
+    // The reverse edge: the target admits the App and is itself a use relation,
+    // so the face is `installed` — while the list's `installed` boolean stays
+    // the installation fact and reads false.
     db.raw.run(
       `DELETE FROM app_install_bots WHERE github_app_id = '${APP_ID}' AND workspace_id = '${TENANT_WS}';
        DELETE FROM app_installations WHERE github_app_id = '${APP_ID}' AND workspace_id = '${TENANT_WS}';`,
@@ -214,7 +215,34 @@ describe("GET /api/apps/:appId — visibility follows the install state", () => 
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.can_manage).toBe(false);
-    expect("viewer_relation" in body).toBe(false);
+    expect(body.viewer_relation).toBe("installed");
+
+    // The list's membership IS the install state (D43), so this viewer's App
+    // is absent there — the false the relation must not blur.
+    const list = (await (await get(db, TENANT_LIST, "mallory")).json()) as {
+      apps: Array<{ bot_id: string }>;
+    };
+    expect(list.apps.some((app) => app.bot_id === APP_ID)).toBe(false);
+  });
+
+  test("an owner reaching the App through a target but no install row reads both", async () => {
+    const db = await world();
+    db.raw.run(
+      `DELETE FROM app_install_bots WHERE github_app_id = '${APP_ID}' AND workspace_id = '${OWNER_WS}';
+       DELETE FROM app_installations WHERE github_app_id = '${APP_ID}' AND workspace_id = '${OWNER_WS}';`,
+    );
+    seedTarget(db, APP_ID, { workspaceId: OWNER_WS, id: "target-owner" });
+
+    const body = (await (await get(db, DETAIL, "dana")).json()) as Record<string, unknown>;
+    expect(body.can_manage).toBe(true);
+    expect(body.viewer_relation).toBe("both");
+
+    // The relation counts the target; the list's `installed` does not — it is
+    // the installation fact alone.
+    const list = (await (await get(db, `/dashboard/${OWNER_WS}/api/apps`, "dana")).json()) as {
+      apps: Array<{ bot_id: string; installed: boolean }>;
+    };
+    expect(list.apps.find((app) => app.bot_id === APP_ID)?.installed).toBe(false);
   });
 });
 
