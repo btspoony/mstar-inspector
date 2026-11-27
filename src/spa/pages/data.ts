@@ -1919,12 +1919,13 @@ export function pullRequestStatePill(
 
 /**
  * The App detail page's faces: 应用设置 (the App's own configuration, the
- * default), 机器人 (the App's ordered chain, read-only), 投递状态 (the bot's
- * webhook deliveries, filtered and paged) and 已安装. The data faces — 洞察 and
+ * default), 投递状态 (the bot's webhook deliveries, filtered and paged) and
+ * 已安装. The chain is the installed face's subject, so 机器人 is not a tab
+ * here; the data faces — 洞察 and
  * Pull requests — belong to the repository detail, so they are not values a
  * URL can open here.
  */
-export type AppDetailTab = "settings" | "bots" | "delivery" | "installations";
+export type AppDetailTab = "settings" | "delivery" | "installations";
 
 /**
  * URL-derived detail state: the App detail's active tab. `window`/`repo`/`pr`
@@ -1956,9 +1957,10 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
 /**
  * The search string as the App detail states it — the ONE derivation shared by
  * the mount initializer and the popstate re-sync (the spa-url-state-resync
- * contract). The bare path IS the 应用设置 tab; `?tab=bots`, `?tab=delivery` and
+ * contract). The bare path IS the 应用设置 tab; `?tab=delivery` and
  * `?tab=installations` are the other addresses this page opens, and any other
- * value (including the retired data-tab spellings) resolves to the default. `pr` rides verbatim only when
+ * value (including the retired `bots` and data-tab spellings) resolves to the
+ * default. `pr` rides verbatim only when
  * `pullRequestRefOf` resolves it — the same predicate the detail face reads —
  * so the address bar never advertises an open detail that can never open.
  */
@@ -1967,7 +1969,7 @@ export function parseAppDetailSearch(search: string): AppDetailSearch {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const rawTab = params.get("tab");
   const tab: AppDetailTab =
-    rawTab === "installations" || rawTab === "delivery" || rawTab === "bots" ? rawTab : "settings";
+    rawTab === "installations" || rawTab === "delivery" ? rawTab : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";

@@ -228,8 +228,6 @@ export const zhCN: Dictionary = {
       appSection: "GitHub App",
     },
     backToApps: "返回应用",
-    botSettingsLink: "机器人设置",
-    tabBots: "机器人",
     tabSettings: "应用设置",
     tabDelivery: "投递状态",
     tabInstallations: "已安装",

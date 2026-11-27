@@ -255,8 +255,6 @@ export const en = {
     },
 
     backToApps: "Back to Apps",
-    botSettingsLink: "Bot settings",
-    tabBots: "Bots",
     tabSettings: "App settings",
     tabDelivery: "Deliveries",
     tabInstallations: "Installed",

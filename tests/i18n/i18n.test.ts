@@ -268,6 +268,12 @@ describe("App detail IA copy", () => {
     expect(isDictionaryKey("settings.backToApps")).toBe(false);
   });
 
+  test("the creator face's retired keys are removed, not aliased", () => {
+    for (const key of ["appDetail.botSettingsLink", "appDetail.tabBots"] as const) {
+      expect(isDictionaryKey(key), key).toBe(false);
+    }
+  });
+
   test("the installations section keys exist atomically; the retired eyebrow and sentence keys are removed, not aliased", () => {
     for (const key of [
       "settings.installations",

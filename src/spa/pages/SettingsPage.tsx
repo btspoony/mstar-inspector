@@ -362,12 +362,15 @@ export function AppInfoSection({
   workspaceId,
   canManage,
   onReload,
+  credentialsSlot,
 }: {
   locale: SpaBoot["locale"];
   app: SettingsIdentityAppMeta | SettingsAppMeta | AppIdentityCardApp | BotSettingsAppMeta;
   workspaceId: string;
   canManage: boolean;
   onReload?: () => Promise<unknown>;
+  /** The creator face's credential state, folded into this section as one sub-row. */
+  credentialsSlot?: ReactNode;
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
@@ -449,6 +452,7 @@ export function AppInfoSection({
               })}
             </p>
           ) : null}
+          {credentialsSlot}
         </div>
       </div>
       {canManage && onReload ? (

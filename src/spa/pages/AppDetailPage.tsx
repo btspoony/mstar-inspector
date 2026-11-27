@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
-import { t, type DictionaryKey } from "../../i18n";
+import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
 import { MetricBand, type Metric } from "@/components/MetricBand";
 import {
@@ -34,7 +34,7 @@ import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
 import { loadUsableBots } from "./AppsPage";
-import { apiBase, currentOrigin } from "../workspace-base";
+import { apiBase } from "../workspace-base";
 import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -589,8 +589,8 @@ export function AppChainSection({
  * The installed face's chain section — ONE control surface: the row ↑↓✕
  * controls live in the table's actions column and 添加机器人 sits in the
  * section header. A member (canManage false) gets the same rows with the
- * controls ABSENT, not disabled. The creator face keeps its own chip-row
- * editor ({@link AppChainSection}) until Task 7 settles that face.
+ * controls ABSENT, not disabled. The creator face carries no chain; the
+ * member identity view keeps the read-only {@link AppChainSection}.
  */
 export function InstalledChainSection({
   locale,
@@ -908,18 +908,14 @@ export function TargetHeader({
 
   // F11: App-scoped facts ONLY. `keys.length` and `model_chains.length` were
   // BOT configuration reached through an equal id — a different entity after
-  // the split — so the band carries installations, Apps mounted through the
-  // chain, the delivery refusal count and the App's scope, nothing else.
+  // the split — so the band carries installations and Apps mounted through
+  // the chain, nothing else. The 24h refusal count is the delivery tab's own
+  // figure; it never rides this band.
   const chain = payload.chain ?? [];
   const metrics: Metric[] = payload.can_manage && !payload.blocked
     ? [
         { key: t(locale, "settings.installations"), value: payload.installations.length },
         { key: t(locale, "appDetail.metricMountedBots"), value: mountedBotCount(chain) },
-        {
-          key: t(locale, "apps.metricRejected24h"),
-          value: payload.delivery_summary?.rejected24h ?? 0,
-          tone: (payload.delivery_summary?.rejected24h ?? 0) > 0 ? "danger" : undefined,
-        },
       ]
     : [];
 
@@ -934,16 +930,6 @@ export function TargetHeader({
       {blockedMessage ? <PageNotice kind="warn" message={blockedMessage} /> : null}
     </>
   );
-}
-
-function RepositoriesNotice({
-  locale,
-  copy,
-}: {
-  locale: SpaBoot["locale"];
-  copy: DictionaryKey;
-}) {
-  return <p className="py-3 text-sm text-muted-foreground">{t(locale, copy)}</p>;
 }
 
 function TargetOpsZone({
@@ -1029,52 +1015,14 @@ function TargetOpsZone({
 }
 
 /**
- * F11: the credential controls the plan keeps on the App face for managers.
- * They are APP facts — the webhook endpoint the App receives on, its numeric
- * id, and where its stored private key and webhook secret live. The secrets
- * themselves are never in the payload; this block names them and links the
- * place they are rotated.
- */
-export function AppCredentialsSection({
-  locale,
-  workspaceId,
-  app,
-}: {
-  locale: SpaBoot["locale"];
-  workspaceId: string;
-  app: SettingsPayload["app"];
-}) {
-  const webhookUrl = `${currentOrigin()}/webhook/${workspaceId}/${app.id}`;
-  return (
-    <section className="flex flex-col gap-2 py-3" data-slot="app-credentials">
-      <h3 className="text-sm font-semibold">{t(locale, "appDetail.credentialsTitle")}</h3>
-      <p className="text-sm text-muted-foreground">{t(locale, "appDetail.credentialsCopy")}</p>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsWebhook")}</dt>
-        <dd>
-          <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">{webhookUrl}</code>
-        </dd>
-        {app.github_app_id === null ? null : (
-          <>
-            <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsAppId")}</dt>
-            <dd className="tabular-nums">{app.github_app_id}</dd>
-          </>
-        )}
-        <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsStored")}</dt>
-        <dd>{t(locale, "appDetail.credentialsStoredValue")}</dd>
-      </dl>
-    </section>
-  );
-}
-
-/**
  * The App detail face — pure `t()` + data rendering, no window/router access,
  * so tests can static-render it. A valid `from` param wins over the served
  * `viewer_relation`; the installed face (a mount: read-only identity, metric
  * band, install/bind, one chain control surface, no tab bar) renders for every
  * role, with controls absent for members. Otherwise a non-manager gets the D4
- * identity card and a manager gets 应用设置 (identity header, ops, the bot's
- * sections) and 已安装 — the creator face Task 7 settles.
+ * identity card and a manager gets the creator face: 应用设置 (the merged
+ * GitHub App + credentials section, the ops block, the share switch),
+ * 投递状态 and 已安装 — no bots tab, no repository block, no 24h figure.
  */
 export function AppDetailView({
   locale,
@@ -1143,7 +1091,7 @@ export function AppDetailView({
   const bot = payload.blocked ? null : payload;
 
   function onTabChange(next: string): void {
-    if (next !== "settings" && next !== "bots" && next !== "delivery" && next !== "installations") return;
+    if (next !== "settings" && next !== "delivery" && next !== "installations") return;
     onSearch({ ...search, tab: next });
   }
 
@@ -1157,18 +1105,16 @@ export function AppDetailView({
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
           <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
-          {/* D40: this plan registers the `bots` tab — the chain is the plan's
-              own subject, and no other plan edits this tab set. */}
-          <TabsTrigger value="bots">{t(locale, "appDetail.tabBots")}</TabsTrigger>
           <TabsTrigger value="delivery">{t(locale, "appDetail.tabDelivery")}</TabsTrigger>
           <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
         </TabsList>
         <TabsContent value="settings" forceMount>
           <div className="flex flex-col">
-            {/* F11: the App's own identity and credentials stay on the App
-                face — the bot configuration moved, the App metadata did not.
-                A Blocked App (its bot is no longer shared) renders neither:
-                the payload carries no App-side facts for it. */}
+            {/* The App's own identity AND credential state are ONE GitHub App
+                section: the stored-credentials line folds into AppInfoSection
+                as a sub-row, never a separate block. A Blocked App (its bot is
+                no longer shared) renders neither: the payload carries no
+                App-side facts for it. */}
             {payload.blocked ? null : (
               <AppInfoSection
                 locale={locale}
@@ -1176,45 +1122,24 @@ export function AppDetailView({
                 workspaceId={payload.workspace_id}
                 canManage={true}
                 onReload={onReload}
+                credentialsSlot={
+                  <p className="text-xs text-muted-foreground">
+                    {t(locale, "appDetail.credentialsStored")}: {t(locale, "appDetail.credentialsStoredValue")}
+                  </p>
+                }
               />
             )}
-            {target === null ? (
-              payload.targets_many ? (
-                <RepositoriesNotice locale={locale} copy="appDetail.targetsMany" />
-              ) : (
-                <RepositoriesNotice locale={locale} copy="appDetail.noRepository" />
-              )
-            ) : null}
             {target === null ? null : (
               <TargetOpsZone locale={locale} payload={target} onReload={onReload} />
             )}
-            {payload.blocked ? null : (
-              <AppCredentialsSection locale={locale} workspaceId={payload.workspace_id} app={payload.app} />
-            )}
-            {bot === null || payload.can_manage !== true ? null : (
+            {/* Sharing is an App property only the OFFICIAL workspace may flip;
+                any other workspace gets the state as a read-only line. */}
+            {bot === null || payload.can_manage !== true ? null : payload.official_workspace === true ? (
               <AppShareSection locale={locale} appId={appId} app={payload.app} onReload={onReload} />
-            )}
-          </div>
-        </TabsContent>
-        <TabsContent value="bots">
-          <div className="flex flex-col">
-            {/* F4/D47: the copy follows the REAL bind state. A pending row is an
-                UNBOUND installation of a SHARED App (the server sends none for an
-                owned App, which never binds) — that, and only that, is "the chain
-                appears once the installation is bound". Everything else with an
-                empty chain is the honest "nothing mounted" answer, and rows whose
-                bot is no longer shared render skipped. */}
-            {(payload.chain ?? []).length === 0 && (payload.pending_installations ?? []).length > 0 ? (
-              <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.pendingBind")}</p>
             ) : (
-              <AppChainSection
-                locale={locale}
-                appId={appId}
-                chain={payload.chain ?? []}
-                canManage={payload.can_manage === true}
-                mountableBots={mountable}
-                onReordered={onReload}
-              />
+              <p className="py-3 text-sm text-muted-foreground" data-slot="app-share-readonly">
+                {t(locale, bot.app.scope === "shared" ? "apps.shareAppOn" : "apps.shareAppOff")}
+              </p>
             )}
           </div>
         </TabsContent>
