@@ -479,6 +479,40 @@ describe("setBotQuotaOverride — the writer bot_quota_overrides was missing", (
     db.raw.close();
   });
 
+  test("an archive the write's own batch saw reports archived even if the bot is restored before the call returns", async () => {
+    const db = world();
+    let fired = false;
+    // The archive lands INSIDE the batch and the restore lands before it
+    // returns: a read after the write would find a LIVE bot and report `ok`
+    // for an override that was never written.
+    const racing = {
+      ...db,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements: Parameters<TestD1["batch"]>[0]) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-shared'").run(TS);
+        }
+        const results = await db.batch(statements);
+        db.raw.prepare("UPDATE review_bots SET archived_at = NULL WHERE id = 'bot-shared'").run();
+        return results;
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(racing).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("archived");
+    expect(fired).toBe(true);
+    expect(overrides(db, "bot-shared")).toEqual([]);
+    db.raw.close();
+  });
+
   test("a clear between the read and an archive writes nothing and reports archived", async () => {
     const db = world();
     const store = createReviewBotsStore(db);

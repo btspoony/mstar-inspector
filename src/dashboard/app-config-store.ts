@@ -1026,13 +1026,36 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
                                       WHERE b.id = ? AND b.deleted_at IS NULL AND b.archived_at IS NULL)`;
 
   /**
-   * A guarded statement that matched nothing wrote nothing — but it cannot say
-   * whether the reason was the archive lock or a legitimately absent row. This
-   * read names it, and only runs on that already-refused path.
+   * The state proof a mutation's own batch carries as its FIRST statement.
+   * Each guarded statement also carries the predicate, but a statement that
+   * wrote nothing cannot say WHY — and reading that afterwards is unsound: an
+   * archive followed by a restore between the write and the read would report
+   * success for a write that never happened. Inside the batch the probe and the
+   * write see one transaction, so the outcome is the state the write saw.
+   * `present` separates a DELETED bot (a forbidden target) from an ARCHIVED one.
    */
-  async function refuseIfArchived(appId: string): Promise<void> {
-    const row = await readBotWriteTarget(db, appId);
-    if (row?.archived === true) throw new BotArchivedError(appId);
+  function liveProbeStatement(appId: string): AppConfigStatement {
+    return db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM review_bots b
+                         WHERE b.id = ? AND b.deleted_at IS NULL AND b.archived_at IS NULL) AS live,
+                EXISTS (SELECT 1 FROM review_bots b WHERE b.id = ? AND b.deleted_at IS NULL) AS present`,
+      )
+      .bind(appId, appId);
+  }
+
+  /** One mutation as ONE batch behind that probe; `results` are the write's own. */
+  async function guardedBatch(
+    appId: string,
+    statements: AppConfigStatement[],
+  ): Promise<{ results: AppConfigBatchResult[]; archived: boolean }> {
+    const [probe, ...results] = await db.batch([liveProbeStatement(appId), ...statements]);
+    const row = (probe!.results as Array<{ live: number; present: number }>)[0];
+    return { results, archived: row?.live !== 1 && row?.present === 1 };
+  }
+
+  function refuseArchived(appId: string): never {
+    throw new BotArchivedError(appId);
   }
 
   type KeyTable = {
@@ -1058,20 +1081,32 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     return left < right ? -1 : 1;
   }
 
+  /**
+   * The 0024 sentinel row's repair, run on first touch. It rewrites credential
+   * material and changes the externally visible `key_id`, so both statements
+   * carry the archive predicate: an archived bot's row is never rewritten, and
+   * a caller that read it live still sees the promoted shape in memory — the
+   * stored envelope stays decryptable under the legacy AAD either way.
+   */
   async function promoteLegacyKeyRow(spec: KeyTable, row: AppProviderKeyRow): Promise<AppProviderKeyRow> {
     const plain = await box.decryptSecret(row.key_enc, spec.legacyAad(row.bot_id, row.provider));
     const keyId = await providerKeyId(plain);
     const keyEnc = await box.encryptSecret(plain, spec.aad(row.bot_id, row.provider, keyId));
+    const live = `EXISTS (SELECT 1 FROM review_bots b
+                           WHERE b.id = ${spec.table}.bot_id
+                             AND b.deleted_at IS NULL AND b.archived_at IS NULL)`;
     await db.batch([
       db
         .prepare(
-          `DELETE FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ? AND EXISTS (
+          `DELETE FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ? AND ${live} AND EXISTS (
              SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?
            )`,
         )
         .bind(row.bot_id, row.provider, LEGACY_KEY_ID, row.bot_id, row.provider, keyId),
       db
-        .prepare(`UPDATE ${spec.table} SET key_id = ?, key_enc = ? WHERE bot_id = ? AND provider = ? AND key_id = ?`)
+        .prepare(
+          `UPDATE ${spec.table} SET key_id = ?, key_enc = ? WHERE bot_id = ? AND provider = ? AND key_id = ? AND ${live}`,
+        )
         .bind(keyId, keyEnc, row.bot_id, row.provider, LEGACY_KEY_ID),
     ]);
     return { ...row, key_id: keyId, key_enc: keyEnc };
@@ -1234,39 +1269,40 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     await readKeyRows(spec, appId, provider);
     const keyId = await providerKeyId(plainKey);
     const keyEnc = await box.encryptSecret(plainKey, spec.aad(appId, provider, keyId));
-    const keyStatement = keyInsertStatement(spec, appId, provider, keyId, keyEnc, opts);
-    if (opts.models === undefined) {
-      const res = await keyStatement.run();
-      if (res.meta.changes === 0) {
-        await refuseIfArchived(appId);
-        await throwKeyRefusal(spec, appId, provider, opts.endpoint);
-      }
-      return;
+    const statements = [keyInsertStatement(spec, appId, provider, keyId, keyEnc, opts)];
+    if (opts.models !== undefined) {
+      // The evidence row is written only for the key row THIS batch just wrote:
+      // `changes() > 0` is the key statement's own result, so a refused key write
+      // (an archive between the authority read and the batch) leaves the model
+      // evidence of an already-stored key untouched.
+      statements.push(
+        db
+          .prepare(
+            `WITH now AS (SELECT datetime('now') AS ts)
+             INSERT INTO bot_provider_models (bot_id, provider, key_id, models_json, fetched_at)
+             SELECT ?, ?, ?, ?, (SELECT ts FROM now)
+             WHERE changes() > 0
+               AND EXISTS (SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?)
+               AND ${LIVE_BOT_BY_PARAM}
+             ON CONFLICT (bot_id, provider, key_id) DO UPDATE SET
+               models_json = excluded.models_json,
+               fetched_at = excluded.fetched_at`,
+          )
+          .bind(
+            appId,
+            provider,
+            keyId,
+            JSON.stringify(opts.models),
+            appId,
+            provider,
+            keyId,
+            appId,
+          ),
+      );
     }
-    const res = await db.batch([
-      keyStatement,
-      db
-        .prepare(
-          `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO bot_provider_models (bot_id, provider, key_id, models_json, fetched_at)
-           SELECT ?, ?, ?, ?, (SELECT ts FROM now)
-           WHERE EXISTS (SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?)
-           ON CONFLICT (bot_id, provider, key_id) DO UPDATE SET
-             models_json = excluded.models_json,
-             fetched_at = excluded.fetched_at`,
-        )
-        .bind(
-          appId,
-          provider,
-          keyId,
-          JSON.stringify(opts.models),
-          appId,
-          provider,
-          keyId,
-        ),
-    ]);
-    if (res[0]!.meta.changes === 0) {
-      await refuseIfArchived(appId);
+    const { results, archived } = await guardedBatch(appId, statements);
+    if (results[0]!.meta.changes === 0) {
+      if (archived) refuseArchived(appId);
       await throwKeyRefusal(spec, appId, provider, opts.endpoint);
     }
   }
@@ -1348,13 +1384,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   async function deleteModelChainSeat(appId: string, role: string): Promise<void> {
-    const res = await deleteModelChainSeatStatement(appId, role).run();
-    if (res.meta.changes === 0) await refuseIfArchived(appId);
+    const { results, archived } = await guardedBatch(appId, [deleteModelChainSeatStatement(appId, role)]);
+    if (results[0]!.meta.changes === 0 && archived) refuseArchived(appId);
   }
 
   async function upsertModelChainSeat(appId: string, role: string, chainName: string): Promise<void> {
-    const res = await upsertModelChainSeatStatement(appId, role, chainName).run();
-    if (res.meta.changes === 0) await refuseIfArchived(appId);
+    const { results, archived } = await guardedBatch(appId, [upsertModelChainSeatStatement(appId, role, chainName)]);
+    if (results[0]!.meta.changes === 0 && archived) refuseArchived(appId);
   }
 
   async function assertChainExists(appId: string, chainName: string): Promise<void> {
@@ -1398,7 +1434,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     ): Promise<boolean> {
       await requireBotWrite(authority, appId);
       await readKeyRows(PROVIDER_KEY_TABLE, appId, provider);
-      const res = await db.batch([
+      const { results, archived } = await guardedBatch(appId, [
         db
           .prepare(
             `DELETE FROM bot_provider_keys
@@ -1411,8 +1447,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           )
           .bind(appId, provider, keyId),
       ]);
-      if (res[0]!.meta.changes === 0) await refuseIfArchived(appId);
-      return res[0]!.meta.changes > 0;
+      if (results[0]!.meta.changes === 0 && archived) refuseArchived(appId);
+      return results[0]!.meta.changes > 0;
     },
 
     async listProviderKeys(appId: string, provider?: string): Promise<ProviderKeySummary[]> {
@@ -1446,14 +1482,15 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     async setModelChain(authority: BotWriteAuthority, appId: string, chain: string | null): Promise<void> {
       await requireBotWrite(authority, appId);
       if (chain === null || chain.trim() === "") {
-        const res = await db
-          .prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ? AND ${liveBot("bot_model_chains")}`)
-          .bind(appId, DEFAULT_CHAIN_NAME)
-          .run();
-        if (res.meta.changes === 0) await refuseIfArchived(appId);
+        const { results, archived } = await guardedBatch(appId, [
+          db
+            .prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ? AND ${liveBot("bot_model_chains")}`)
+            .bind(appId, DEFAULT_CHAIN_NAME),
+        ]);
+        if (results[0]!.meta.changes === 0 && archived) refuseArchived(appId);
         return;
       }
-      const [demoted, written] = await db.batch([
+      const { results, archived } = await guardedBatch(appId, [
         db
           .prepare(
             `UPDATE bot_model_chains SET is_default = 0
@@ -1471,7 +1508,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           )
           .bind(appId, DEFAULT_CHAIN_NAME, chain, appId),
       ]);
-      if (written!.meta.changes === 0 && demoted!.meta.changes === 0) await refuseIfArchived(appId);
+      if (results[1]!.meta.changes === 0 && results[0]!.meta.changes === 0 && archived) refuseArchived(appId);
     },
 
     getModelChain(appId: string): Promise<string | null> {
@@ -1549,24 +1586,25 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       if (chain.trim() === "") {
         throw new InvalidModelSelectorError(chain);
       }
-      const res = await db
-        .prepare(
-          `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
-           SELECT ?, ?, ?, 0, datetime('now'), datetime('now') WHERE ${LIVE_BOT_BY_PARAM}
-           ON CONFLICT (bot_id, name) DO UPDATE SET
-             chain = excluded.chain,
-             is_default = excluded.is_default,
-             updated_at = datetime('now')`,
-        )
-        .bind(appId, name, chain, appId)
-        .run();
-      if (res.meta.changes === 0) await refuseIfArchived(appId);
+      const { results, archived } = await guardedBatch(appId, [
+        db
+          .prepare(
+            `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
+             SELECT ?, ?, ?, 0, datetime('now'), datetime('now') WHERE ${LIVE_BOT_BY_PARAM}
+             ON CONFLICT (bot_id, name) DO UPDATE SET
+               chain = excluded.chain,
+               is_default = excluded.is_default,
+               updated_at = datetime('now')`,
+          )
+          .bind(appId, name, chain, appId),
+      ]);
+      if (results[0]!.meta.changes === 0 && archived) refuseArchived(appId);
     },
 
     async removeModelChain(authority: BotWriteAuthority, appId: string, name: string): Promise<boolean> {
       await requireBotWrite(authority, appId);
       assertModelChainName(name);
-      const res = await db.batch([
+      const { results, archived } = await guardedBatch(appId, [
         db
           .prepare(
             `DELETE FROM bot_model_chain_seats
@@ -1577,8 +1615,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           .prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ? AND ${liveBot("bot_model_chains")}`)
           .bind(appId, name),
       ]);
-      if (res[1]!.meta.changes === 0) await refuseIfArchived(appId);
-      return res[1]!.meta.changes > 0;
+      if (results[1]!.meta.changes === 0 && archived) refuseArchived(appId);
+      return results[1]!.meta.changes > 0;
     },
 
     getModelChainSeats(appId: string): Promise<Record<string, string>> {
@@ -1639,10 +1677,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       });
       if (statements.length > 0) {
         // Every seat statement carries the archive guard, so an archived bot
-        // writes no seat at all — and the refusal names the reason rather than
-        // reporting a silent no-op as success.
-        const results = await db.batch(statements);
-        if (results.every((result) => result.meta.changes === 0)) await refuseIfArchived(appId);
+        // writes no seat at all — and the in-batch probe names the reason rather
+        // than reporting a silent no-op as success.
+        const { results, archived } = await guardedBatch(appId, statements);
+        if (archived && results.every((result) => result.meta.changes === 0)) refuseArchived(appId);
       }
     },
 
@@ -1745,9 +1783,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         newDeclaration: isNew,
         endpoint: { base_url: decl.base_url, api: decl.api },
       });
-      const res = isNew ? await db.batch([key, declaration]) : await db.batch([declaration, key]);
-      if (res[isNew ? 0 : 1]!.meta.changes === 0) {
-        await refuseIfArchived(appId);
+      const statements = isNew ? [key, declaration] : [declaration, key];
+      const { results, archived } = await guardedBatch(appId, statements);
+      if (results[isNew ? 0 : 1]!.meta.changes === 0) {
+        if (archived) refuseArchived(appId);
         await throwCustomProviderRefusal(appId, decl, keyId, isNew);
       }
     },
@@ -1758,7 +1797,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       providerId: string,
     ): Promise<boolean> {
       await requireBotWrite(authority, appId);
-      const res = await db.batch([
+      const { results, archived } = await guardedBatch(appId, [
         db
           .prepare(
             `DELETE FROM bot_custom_provider_keys
@@ -1771,8 +1810,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           )
           .bind(appId, providerId),
       ]);
-      if (res[1]!.meta.changes === 0) await refuseIfArchived(appId);
-      return res[1]!.meta.changes > 0;
+      if (results[1]!.meta.changes === 0 && archived) refuseArchived(appId);
+      return results[1]!.meta.changes > 0;
     },
 
     async updateCustomProviderModels(
@@ -1806,9 +1845,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
                   WHERE bot_id = ? AND provider_id = ? AND ${liveBot("bot_custom_providers")}`,
               )
               .bind(idsJson, JSON.stringify(modelsMeta), appId, providerId);
-      const res = await statement.run();
-      if (res.meta.changes === 0) {
-        await refuseIfArchived(appId);
+      const { results, archived } = await guardedBatch(appId, [statement]);
+      if (results[0]!.meta.changes === 0) {
+        if (archived) refuseArchived(appId);
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
       }
     },
@@ -1885,15 +1924,16 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     ): Promise<boolean> {
       await requireBotWrite(authority, appId);
       await readKeyRows(CUSTOM_KEY_TABLE, appId, providerId);
-      const res = await db
-        .prepare(
-          `DELETE FROM bot_custom_provider_keys
-            WHERE bot_id = ? AND provider = ? AND key_id = ? AND ${liveBot("bot_custom_provider_keys")}`,
-        )
-        .bind(appId, providerId, keyId)
-        .run();
-      if (res.meta.changes === 0) await refuseIfArchived(appId);
-      return res.meta.changes > 0;
+      const { results, archived } = await guardedBatch(appId, [
+        db
+          .prepare(
+            `DELETE FROM bot_custom_provider_keys
+              WHERE bot_id = ? AND provider = ? AND key_id = ? AND ${liveBot("bot_custom_provider_keys")}`,
+          )
+          .bind(appId, providerId, keyId),
+      ]);
+      if (results[0]!.meta.changes === 0 && archived) refuseArchived(appId);
+      return results[0]!.meta.changes > 0;
     },
 
     async getCustomProvidersForConsumer(appId: string): Promise<CustomProviderConsumerConfig[]> {

@@ -1576,31 +1576,32 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       }
       // The archive predicate rides the MUTATION, not the read above: an archive
       // that lands between the two changes zero rows instead of leaving an
-      // override on a locked bot.
+      // override on a locked bot. The liveness probe rides the SAME batch as
+      // that write, because a read AFTER it cannot answer the question: an
+      // archive followed by a restore in between would report `ok` for a write
+      // that never happened.
       const live = "EXISTS (SELECT 1 FROM review_bots r WHERE r.id = ?1 AND r.deleted_at IS NULL AND r.archived_at IS NULL)";
-      const res =
+      const probe = db
+        .prepare(`SELECT ${live} AS n`)
+        .bind(input.botId);
+      const write =
         input.monthlyRp === null
-          ? await db
+          ? db
               .prepare(`DELETE FROM bot_quota_overrides WHERE bot_id = ?1 AND workspace_id = ?2 AND ${live}`)
               .bind(input.botId, input.workspaceId)
-              .run()
-          : await db
+          : db
               .prepare(
                 `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
                  SELECT ?1, ?2, ?3, ?4 WHERE ${live}
                  ON CONFLICT (bot_id, workspace_id) DO UPDATE SET
                    monthly_rp = excluded.monthly_rp, updated_at = excluded.updated_at`,
               )
-              .bind(input.botId, input.workspaceId, input.monthlyRp, input.now)
-              .run();
-      if (res.meta.changes > 0) return "ok";
-      // Zero rows: the INSERT path can only miss that way, and a clear of an
-      // absent override is a no-op. Reading again only NAMES the reason.
-      const archived = await db
-        .prepare("SELECT 1 AS present FROM review_bots WHERE id = ?1 AND deleted_at IS NULL AND archived_at IS NOT NULL")
-        .bind(input.botId)
-        .first<{ present: number }>();
-      return archived === null ? "ok" : "archived";
+              .bind(input.botId, input.workspaceId, input.monthlyRp, input.now);
+      const [probed, written] = await db.batch([probe, write]);
+      if (countOf(probed!) !== 1) return "archived";
+      // Live and unchanged: a clear of an absent override is a no-op, and the
+      // INSERT path always writes when the bot is live.
+      return (written?.meta.changes ?? 0) > 0 || input.monthlyRp === null ? "ok" : "archived";
     },
 
     /** Every override one bot carries, for the owner's editor. */
@@ -2553,6 +2554,31 @@ const APP_SCOPE_READ_SQL = `
 const REVIEW_BOT_SCOPE_READ_SQL = `
   SELECT scope, shared_at, workspace_id, archived_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
 
+/**
+ * The target's state as a BATCH STATEMENT, not a read after it: a guarded write
+ * that changed nothing cannot say why, and re-reading afterwards is unsound —
+ * an archive followed by a restore would report `ok` for a write that never
+ * happened. `present` separates a DELETED target (the caller's own missing-row
+ * answer) from an ARCHIVED one, which is a refusal.
+ */
+const LIVENESS_PROBE_SQL = `
+  SELECT EXISTS (SELECT 1 FROM review_bots b
+                  WHERE b.id = ? AND b.deleted_at IS NULL AND b.archived_at IS NULL) AS live,
+         EXISTS (SELECT 1 FROM review_bots b WHERE b.id = ? AND b.deleted_at IS NULL) AS present`;
+
+/** The App's probe on the same rule (`github_apps` has no archive state). */
+const APP_LIVENESS_PROBE_SQL = `
+  SELECT EXISTS (SELECT 1 FROM github_apps b WHERE b.id = ? AND b.deleted_at IS NULL) AS live,
+         EXISTS (SELECT 1 FROM github_apps b WHERE b.id = ? AND b.deleted_at IS NULL) AS present`;
+
+/** One probe row: `live` = writable now, `present` = the row exists at all. */
+type LivenessRow = { live: number; present: number };
+
+function archivedOf(result: AppsStoreBatchResult | undefined): boolean {
+  const [row] = (result?.results ?? []) as LivenessRow[];
+  return row !== undefined && row.live !== 1 && row.present === 1;
+}
+
 const BOT_SCOPE_LIST_SQL = `
   SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at,
          rb.scope AS bot_scope, rb.shared_at AS bot_shared_at,
@@ -2672,6 +2698,8 @@ async function scopeTransition(
   input: { id: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
   sql: {
     read: string;
+    /** The in-batch liveness proof: `live` = 1 only while the target accepts a write. */
+    probe: string;
     shareAudit: string;
     share: string;
     unshareAudit: string;
@@ -2688,17 +2716,23 @@ async function scopeTransition(
   if (current.scope === scope) return { outcome: "ok", scope, sharedAt: current.shared_at };
   if (scope === "owned" && input.confirm !== true) return { outcome: "confirm_required" };
 
-  const [, write] =
+  // The liveness probe rides the batch, so `archived` is the state the write
+  // saw: an archive followed by a restore before a later read would otherwise
+  // report a refusal as anything but what it was.
+  const [probed, , write] =
     scope === "shared"
       ? await db.batch([
+          db.prepare(sql.probe).bind(id, id),
           db.prepare(sql.shareAudit).bind(crypto.randomUUID(), actor, id, now, now),
           db.prepare(sql.share).bind(id, now),
         ])
       : await db.batch([
+          db.prepare(sql.probe).bind(id, id),
           db.prepare(sql.unshareAudit).bind(crypto.randomUUID(), actor, id, now),
           db.prepare(sql.unshare).bind(id),
         ]);
 
+  if (archivedOf(probed)) return { outcome: "archived" };
   if ((write?.meta.changes ?? 0) > 0) {
     return { outcome: "ok", scope, sharedAt: scope === "shared" ? now : null };
   }
@@ -2708,9 +2742,9 @@ async function scopeTransition(
     .bind(id)
     .first<{ scope: BotScope; shared_at: string | null; archived_at?: string | null }>();
   if (persisted === null) return { outcome: "bot_not_found" };
-  // The share/unshare statements carry `archived_at IS NULL`, so a bot archived
-  // between the read above and the batch changes zero rows and lands here.
-  if (persisted.archived_at != null) return { outcome: "archived" };
+  // The probe already proved the row live when the batch ran, so the remaining
+  // causes are a same-value transition that raced this one, or a guard the
+  // statement itself refuses (a non-official workspace's share).
   if (persisted.scope === scope) return { outcome: "ok", scope, sharedAt: persisted.shared_at };
   return { outcome: "outside_official_workspace" };
 }
@@ -2729,6 +2763,7 @@ export async function setAppScope(
     { ...input, id: input.appId },
     {
       read: APP_SCOPE_READ_SQL,
+      probe: APP_LIVENESS_PROBE_SQL,
       shareAudit: APP_SCOPE_SHARE_AUDIT_SQL,
       share: APP_SCOPE_SHARE_SQL,
       unshareAudit: APP_SCOPE_UNSHARE_AUDIT_SQL,
@@ -2773,6 +2808,7 @@ export async function setReviewBotScope(
     { ...input, id: input.botId },
     {
       read: REVIEW_BOT_SCOPE_READ_SQL,
+      probe: LIVENESS_PROBE_SQL,
       shareAudit: REVIEW_BOT_SCOPE_SHARE_AUDIT_SQL,
       share: REVIEW_BOT_SCOPE_SHARE_SQL,
       unshareAudit: REVIEW_BOT_SCOPE_UNSHARE_AUDIT_SQL,
