@@ -96,7 +96,6 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
     available: true,
     multiplier: 1,
     month_used_rp: 0,
-    monthly_rp: null,
     effective_monthly_rp: null,
     archived: false,
     default_chain: null,
@@ -1237,5 +1236,71 @@ describe("the creator face carries no chain (ADR)", () => {
     expect(markup).not.toContain(t("en", "apps.chain.addBot"));
     expect(markup).not.toContain(t("en", "apps.chain.moveUp", { bot: "Mstar Standard" }));
     expect(await chainRows(markup)).toEqual([]);
+  });
+});
+
+/**
+ * F1-4: archive stops a bot from being NEWLY mounted. The chooser is a read of
+ * every usable bot, so it must drop the archived ones; a row the chain already
+ * carries is rendered from the chain itself and stays reorderable/removable.
+ */
+describe("the mount chooser never offers an archived bot (mounted behaviour)", () => {
+  const usableBot = (id: string, name: string, archived: boolean) => ({
+    id,
+    name,
+    description: null,
+    workspace_id: "ws_0123456789abcdefghijkl",
+    workspace_name: "Default",
+    owned: true,
+    can_manage: true,
+    scope: "owned" as const,
+    multiplier: 1,
+    month_used_rp: 0,
+    archived,
+  });
+
+  test("an archived bot is absent from the add list; a live one is present", async () => {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/default/apps/1");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("/api/apps/1")) {
+        return Response.json({
+          ...managePayload,
+          viewer_relation: "installed",
+          can_manage: true,
+          installation: null,
+          pending_installations: [],
+          chain: [],
+        });
+      }
+      if (url.endsWith("/api/review-bots")) {
+        return Response.json({
+          workspace_id: "ws_0123456789abcdefghijkl",
+          plan_monthly_rp: null,
+          bots: [usableBot("bot-live", "Live Bot", false), usableBot("bot-old", "Archived Bot", true)],
+        });
+      }
+      if (url.endsWith("/models")) return Response.json({ groups: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
+      // The chooser renders only once its add disclosure is opened.
+      const summary = container.querySelector('[data-slot="installed-chain"] summary');
+      expect(summary?.textContent?.trim()).toBe(t("en", "appDetail.installed.addBot"));
+      await act(async () => {
+        summary?.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+      });
+      expect(container.querySelector('[aria-label="Add Live Bot"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Add Archived Bot"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 });

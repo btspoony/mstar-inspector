@@ -728,6 +728,9 @@ function assignScopeSwitch(kind: "app" | "bot") {
     const noun = kind === "app" ? "app" : "bot";
     if (outcome.outcome === "bot_not_found") return c.json({ error: `${noun} not found` }, 404);
     if (outcome.outcome === "forbidden") return c.json({ error: "forbidden" }, 403);
+    if (outcome.outcome === "archived") {
+      return c.json({ error: `${noun} is archived — restore it before changing its scope` }, 409);
+    }
     if (outcome.outcome === "outside_official_workspace") {
       return c.json({ error: `${noun} is outside the official workspace` }, 409);
     }

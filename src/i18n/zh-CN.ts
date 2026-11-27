@@ -883,6 +883,7 @@ export const zhCN: Dictionary = {
       fieldDuplicated: "{field} 字段被提交了多次 — 请以单个值重新提交表单。未保存任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       botReadOnly: "该机器人已共享——其配置在此只读。",
+      botArchived: "该机器人已归档——恢复后才能更改其配置。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
       usageProbeOffVendorHost:

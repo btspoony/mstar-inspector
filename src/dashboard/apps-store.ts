@@ -503,6 +503,7 @@ function installChainCopy(
         WHERE oc.github_app_id = ?1
           AND oc.workspace_id = aw.workspace_id
           AND changes() > 0
+          AND rb.archived_at IS NULL
           AND (rb.scope = 'shared' OR rb.workspace_id = ?2)
           AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
                            WHERE ib.github_app_id = oc.github_app_id
@@ -598,6 +599,7 @@ function installChainForCreatedStates(
          JOIN app_workspaces aw ON aw.app_id = oc.github_app_id AND aw.workspace_id = oc.workspace_id
          JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
         WHERE s.github_app_id = ?1 AND s.created_at = ?2${scope}
+          AND rb.archived_at IS NULL
           AND (rb.scope = 'shared' OR rb.workspace_id = s.workspace_id)
           AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
                            WHERE ib.github_app_id = oc.github_app_id
@@ -1303,7 +1305,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       const res = await db
         .prepare(
           `UPDATE review_bots SET sandbox_image_id = ?, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
+           WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`,
         )
         .bind(image.id, id)
         .run();
@@ -1560,14 +1562,15 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       ownerWorkspaceId: string;
       monthlyRp: number | null;
       now: string;
-    }): Promise<"ok" | "not_owner" | "invalid"> {
+    }): Promise<"ok" | "not_owner" | "invalid" | "archived"> {
       const owner = await db
-        .prepare("SELECT workspace_id FROM review_bots WHERE id = ?1 AND deleted_at IS NULL")
+        .prepare("SELECT workspace_id, archived_at FROM review_bots WHERE id = ?1 AND deleted_at IS NULL")
         .bind(input.botId)
-        .first<{ workspace_id: string }>();
+        .first<{ workspace_id: string; archived_at: string | null }>();
       // The caller passes the OWNER it resolved; the store re-checks it against
       // the row, so a caller that bypasses the route cannot write.
       if (owner === null || owner.workspace_id !== input.ownerWorkspaceId) return "not_owner";
+      if (owner.archived_at !== null) return "archived";
       if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
         return "invalid";
       }
@@ -1607,11 +1610,12 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * belongs to the workspace whose `app_installations` row it is, and a shared
      * App's chain is its owner's to write (D34, D35).
      *
-     * A NEW bot must be shared or owned by that workspace, and that predicate is
-     * checked INSIDE the write batch, so an owner unsharing one between the
-     * request and the batch cannot slip in. A RETAINED id — one the install
-     * already mounts — is inserted regardless of its current scope: the UI shows
-     * such a row as skipped and the operator chose to keep it.
+     * A NEW bot must be live (not archived) and shared or owned by that
+     * workspace, and that predicate is checked INSIDE the write batch, so an
+     * owner unsharing or archiving one between the request and the batch cannot
+     * slip in. A RETAINED id — one the install already mounts — is inserted
+     * regardless of its current scope or archive state: the UI shows such a row
+     * as skipped and the operator chose to keep it.
      */
     async replaceInstallChain(
       input: { appId: string; workspaceId: string; botIds: readonly string[] },
@@ -1657,6 +1661,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                 WHERE j.value IN (SELECT value FROM json_each(?4))
                    OR EXISTS (SELECT 1 FROM review_bots b
                                WHERE b.id = j.value AND b.deleted_at IS NULL
+                                 AND b.archived_at IS NULL
                                  AND (b.scope = 'shared' OR b.workspace_id = ?2))`,
             )
             .bind(input.appId, input.workspaceId, requested, retainedJson),
@@ -1705,17 +1710,21 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           owned: boolean;
           available: boolean;
           multiplier: number;
-          monthlyRp: number | null;
           /**
            * The ceiling the relay enforces for THIS workspace: its
-           * `bot_quota_overrides` row when one exists, else `monthlyRp`.
+           * `bot_quota_overrides` row when one exists, else the bot's own
+           * default. The default alone never leaves the store — it is the
+           * owner's pricing, not the viewer's ceiling.
            */
           effectiveMonthlyRp: number | null;
           archived: boolean;
-          /** The bot's DEFAULT chain selector string; `null` = none configured. */
+          /**
+           * The bot's DEFAULT chain selector string; `null` = none configured
+           * OR the row is not available to this workspace (see the read).
+           */
           defaultChain: string | null;
-          /** The runtime harness id the bot's reviews execute under. */
-          runtime: string;
+          /** The bot's runtime harness id; `null` under the same rule. */
+          runtime: string | null;
         }>
       >
     > {
@@ -1724,13 +1733,24 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       // are the same reads, but calling them per row would turn one statement
       // into N+1 for a whole Apps page. The override's column is NOT NULL, so
       // COALESCE expresses "override else default" exactly.
+      //
+      // The bot's DEFAULT selector and its runtime harness are the owner's
+      // configuration: a retained row whose bot stopped being available here
+      // (unshared, or owned by someone else) still shows its mount and its
+      // history, but not the configuration written after this workspace's
+      // relation ended. The availability predicate is the same one the mapper
+      // applies, so the two cannot drift.
+      const available = `(r.scope = 'shared' OR r.workspace_id = ?1)`;
       const res = await db
         .prepare(
           `SELECT ib.github_app_id AS app_id, ib.position, ib.bot_id, r.name, r.description,
                   r.workspace_id AS bot_workspace_id, r.scope, ws.name AS provider_workspace,
-                  r.multiplier, r.monthly_rp, r.archived_at, r.sandbox_image_id,
-                  (SELECT bc.chain FROM bot_model_chains bc
-                    WHERE bc.bot_id = r.id AND bc.name = 'default') AS default_chain,
+                  r.multiplier, r.monthly_rp, r.archived_at,
+                  CASE WHEN ${available} AND r.archived_at IS NULL THEN r.sandbox_image_id END
+                    AS sandbox_image_id,
+                  CASE WHEN ${available} AND r.archived_at IS NULL
+                       THEN (SELECT bc.chain FROM bot_model_chains bc
+                              WHERE bc.bot_id = r.id AND bc.name = 'default') END AS default_chain,
                   COALESCE((SELECT o.monthly_rp FROM bot_quota_overrides o
                              WHERE o.bot_id = r.id AND o.workspace_id = ?1), r.monthly_rp)
                     AS effective_monthly_rp
@@ -1753,7 +1773,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           multiplier: number;
           monthly_rp: number | null;
           archived_at: string | null;
-          sandbox_image_id: string;
+          sandbox_image_id: string | null;
           default_chain: string | null;
           effective_monthly_rp: number | null;
         }>();
@@ -1768,11 +1788,10 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           owned: boolean;
           available: boolean;
           multiplier: number;
-          monthlyRp: number | null;
           effectiveMonthlyRp: number | null;
           archived: boolean;
           defaultChain: string | null;
-          runtime: string;
+          runtime: string | null;
         }>
       >();
       for (const row of res.results) {
@@ -1789,7 +1808,6 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           // will never run (D29).
           available: row.scope === "shared" || row.bot_workspace_id === workspaceId,
           multiplier: row.multiplier,
-          monthlyRp: row.monthly_rp,
           effectiveMonthlyRp: row.effective_monthly_rp,
           // A read-only fact: an archived bot stays mounted and listed, the
           // relay just never selects it (T1's chain filter owns that rule).
@@ -2491,13 +2509,21 @@ export type BotScopeOutcome =
   | { outcome: "outside_official_workspace" }
   | { outcome: "confirm_required" }
   /** F12: the caller does not own the bot, or lacks the owner/admin role. */
-  | { outcome: "forbidden" };
+  | { outcome: "forbidden" }
+  /** The bot is archived: restore is the only transition it accepts. */
+  | { outcome: "archived" };
 
 /**
  * A bot profile/pricing/archive write's outcome. Same value-not-message rule as
  * {@link BotScopeOutcome}: the route maps the value to a frozen status.
  */
-export type BotWriteOutcome = "ok" | "bot_not_found" | "forbidden" | "invalid";
+export type BotWriteOutcome =
+  | "ok"
+  | "bot_not_found"
+  | "forbidden"
+  | "invalid"
+  /** The bot is archived: archive/restore are its only transitions. */
+  | "archived";
 
 /**
  * One live App/bot pair as the operator console lists it (contract § 8.3).
@@ -2737,6 +2763,11 @@ export async function setReviewBotScope(
   if (input.authority.role !== "owner" && input.authority.role !== "admin") {
     return { outcome: "forbidden" };
   }
+  const archived = await db
+    .prepare(`SELECT 1 AS present FROM review_bots WHERE id = ? AND archived_at IS NOT NULL`)
+    .bind(input.botId)
+    .first<{ present: number }>();
+  if (archived !== null) return { outcome: "archived" };
   return scopeTransition(
     db,
     { ...input, id: input.botId },
@@ -2759,14 +2790,18 @@ async function botWriteAuthority(
   db: AppsStoreD1,
   botId: string,
   authority: { workspaceId: string; role: WorkspaceRole },
+  mode: "active" | "archive" = "active",
 ): Promise<BotWriteOutcome> {
   const owner = await db
-    .prepare(`SELECT workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+    .prepare(`SELECT workspace_id, archived_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
     .bind(botId)
-    .first<{ workspace_id: string }>();
+    .first<{ workspace_id: string; archived_at: string | null }>();
   if (owner === null) return "bot_not_found";
   if (owner.workspace_id !== authority.workspaceId) return "forbidden";
   if (authority.role !== "owner" && authority.role !== "admin") return "forbidden";
+  // An archived bot takes no configuration writes; flipping the flag itself is
+  // the one transition it accepts.
+  if (mode === "active" && owner.archived_at !== null) return "archived";
   return "ok";
 }
 
@@ -2782,14 +2817,18 @@ async function writeBotFace(
   now: string,
   sets: string[],
   values: unknown[],
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  // `archived_at IS NULL` rides the UPDATE itself: an archive that lands
+  // between the authority read and this statement leaves zero rows changed, so
+  // the caller reports `archived` instead of silently writing a locked bot.
+  const res = await db
     .prepare(
       `UPDATE review_bots SET ${sets.join(", ")}, updated_at = ?
-        WHERE id = ? AND deleted_at IS NULL`,
+        WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`,
     )
     .bind(...values, now, botId)
     .run();
+  return res.meta.changes > 0;
 }
 
 /**
@@ -2821,8 +2860,7 @@ export async function updateBotProfile(
     values.push(input.description);
   }
   if (sets.length === 0) return "invalid";
-  await writeBotFace(db, input.botId, input.now, sets, values);
-  return "ok";
+  return (await writeBotFace(db, input.botId, input.now, sets, values)) ? "ok" : "archived";
 }
 
 /**
@@ -2857,8 +2895,7 @@ export async function updateBotPricing(
     values.push(input.monthlyRp);
   }
   if (sets.length === 0) return "invalid";
-  await writeBotFace(db, input.botId, input.now, sets, values);
-  return "ok";
+  return (await writeBotFace(db, input.botId, input.now, sets, values)) ? "ok" : "archived";
 }
 
 /**
@@ -2874,7 +2911,7 @@ export async function setBotArchived(
     now: string;
   },
 ): Promise<BotWriteOutcome> {
-  const gate = await botWriteAuthority(db, input.botId, input.authority);
+  const gate = await botWriteAuthority(db, input.botId, input.authority, "archive");
   if (gate !== "ok") return gate;
   await db
     .prepare(
@@ -2891,17 +2928,28 @@ export async function setBotArchived(
  * (workspace name, the official-workspace flag, live installation and target
  * counts) — name-ordered, one statement.
  */
-/** F12: the owner workspace a bot write is authorized against — the store is
- * the only reader of `review_bots`, so this lookup lives here too. */
+/**
+ * F12: what a bot write is authorized against — the owning workspace and the
+ * archive flag — read in ONE statement. `review_bots` has one reader module,
+ * so this lookup lives here.
+ */
+export async function readBotWriteTarget(
+  db: AppsStoreD1,
+  botId: string,
+): Promise<{ workspaceId: string; archived: boolean } | null> {
+  const row = await db
+    .prepare(`SELECT workspace_id, archived_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+    .bind(botId)
+    .first<{ workspace_id: string; archived_at: string | null }>();
+  return row === null ? null : { workspaceId: row.workspace_id, archived: row.archived_at !== null };
+}
+
+/** The owning workspace alone, for callers that do not write configuration. */
 export async function readBotOwnerWorkspace(
   db: AppsStoreD1,
   botId: string,
 ): Promise<string | null> {
-  const row = await db
-    .prepare(`SELECT workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
-    .bind(botId)
-    .first<{ workspace_id: string }>();
-  return row?.workspace_id ?? null;
+  return (await readBotWriteTarget(db, botId))?.workspaceId ?? null;
 }
 
 export async function listBotScopes(db: AppsStoreD1): Promise<BotScopeRow[]> {

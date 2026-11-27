@@ -52,7 +52,6 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
     available: true,
     multiplier: 1,
     month_used_rp: 0,
-    monthly_rp: null,
     effective_monthly_rp: null,
     archived: false,
     default_chain: null,
@@ -71,7 +70,6 @@ const CHAIN: AppChainEntry[] = [
     provider_workspace: "platform",
     owned: false,
     month_used_rp: 45,
-    monthly_rp: 1000,
     effective_monthly_rp: 1000,
   }),
   chainRow({ position: 3, bot_id: "bot-archived", name: "Archived Bot", owned: false, month_used_rp: 5, archived: true }),
@@ -209,7 +207,6 @@ function botPayload(overrides: Record<string, unknown> = {}): Record<string, unk
       scope: "owned",
       sandbox_image_id: "omp",
       multiplier: 1,
-      monthly_rp: null,
       last_webhook_at: null,
       github_name: null,
       github_slug: null,
@@ -398,6 +395,11 @@ describe("1. the relation selects the face", () => {
     expect(appDetailFace("both", "installed")).toBe("installed");
     expect(appDetailFace("both", "created")).toBe("creator");
     expect(appDetailFace("both", null)).toBe("creator");
+  });
+
+  test("a single relation is never overridden by ?from=", () => {
+    expect(appDetailFace("installed", "created")).toBe("installed");
+    expect(appDetailFace("created", "installed")).toBe("creator");
   });
 
   test("the rendered faces follow the same rule, not the payload alone", async () => {

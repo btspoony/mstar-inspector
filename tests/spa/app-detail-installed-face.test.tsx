@@ -45,7 +45,6 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
     available: true,
     multiplier: 1,
     month_used_rp: 0,
-    monthly_rp: null,
     effective_monthly_rp: null,
     archived: false,
     default_chain: null,
@@ -78,7 +77,6 @@ const CHAIN: AppChainEntry[] = [
     owned: false,
     multiplier: 4,
     month_used_rp: 45,
-    monthly_rp: 1000,
     effective_monthly_rp: 1000,
     default_chain: "openai/gpt-5-mini",
     runtime: "omp-1.4",
@@ -222,7 +220,7 @@ function renderFace(
   );
 }
 
-describe("face selection — from wins, the relation is the default", () => {
+describe("face selection — the served relation is the authority", () => {
   test("parseAppDetailFrom accepts only the two valid values", () => {
     expect(parseAppDetailFrom("?from=installed")).toBe("installed");
     expect(parseAppDetailFrom("?from=created")).toBe("created");
@@ -230,12 +228,48 @@ describe("face selection — from wins, the relation is the default", () => {
     expect(parseAppDetailFrom("")).toBeNull();
   });
 
-  test("a valid from wins; otherwise installed opens the mount and created/both open the creation", () => {
-    expect(appDetailFace("installed", null)).toBe("installed");
-    expect(appDetailFace("created", null)).toBe("creator");
+  test("from picks a face only when BOTH relations hold", () => {
     expect(appDetailFace("both", null)).toBe("creator");
     expect(appDetailFace("both", "installed")).toBe("installed");
-    expect(appDetailFace("installed", "created")).toBe("creator");
+    expect(appDetailFace("both", "created")).toBe("creator");
+    expect(appDetailFace("installed", null)).toBe("installed");
+    expect(appDetailFace("created", null)).toBe("creator");
+  });
+
+  /**
+   * The wayfinding param is not an authorization: an admitted installer who
+   * opens `?from=created` must NOT receive the creator face (tabs, share,
+   * credentials, enable/delete), and an owner who opens `?from=installed` must
+   * not be downgraded into the consumer mount.
+   */
+  test("installed-only + from=created still renders the installed face", async () => {
+    const html = renderFace(managerPayload(), "created");
+    await withMarkup(html, (container) => {
+      expect(container.querySelector('[data-slot="tabs"]')).toBeNull();
+      expect(container.querySelector('[data-slot="installed-chain"]')).not.toBeNull();
+      // The creator-only controls are absent, not merely disabled.
+      expect(container.querySelector('[data-slot="app-share"]')).toBeNull();
+    });
+    expect(html).not.toContain("Credentials");
+    expect(html).not.toContain("Share this app");
+    expect(html).not.toContain("Delete");
+    expect(html).not.toContain("24h");
+  });
+
+  test("created-only + from=installed still renders the creator face", async () => {
+    const payload: SettingsManagePayload = {
+      ...managerPayload(),
+      viewer_relation: "created",
+      installation: null,
+      pending_installations: [],
+    };
+    const html = renderFace(payload, "installed");
+    await withMarkup(html, (container) => {
+      expect(container.querySelector('[data-slot="tabs"]')).not.toBeNull();
+      expect(container.querySelector('[data-slot="installed-chain"]')).toBeNull();
+    });
+    expect(html).toContain("Stored credentials");
+    expect(html).toContain("Share this app");
   });
 });
 
@@ -367,7 +401,6 @@ describe("installed face — manager", () => {
         name: "Overridden",
         owned: false,
         month_used_rp: 45,
-        monthly_rp: 1000,
         effective_monthly_rp: 5000,
       }),
     ]);
@@ -383,7 +416,6 @@ describe("installed face — manager", () => {
         name: "Override only",
         owned: false,
         month_used_rp: 45,
-        monthly_rp: null,
         effective_monthly_rp: 5000,
       }),
     ]);
@@ -398,7 +430,6 @@ describe("installed face — manager", () => {
         name: "Uncapped",
         owned: false,
         month_used_rp: 45,
-        monthly_rp: null,
         effective_monthly_rp: null,
       }),
     ]);
@@ -458,7 +489,7 @@ describe("installed face — member", () => {
   });
 });
 
-describe("installed face — the from param decides the face", () => {
+describe("installed face — the from param only chooses between two faces", () => {
   test("a both-relation App opened with from=installed renders the mount (no tab bar)", async () => {
     const markup = renderFace({ ...managerPayload(), viewer_relation: "both" }, "installed");
     await withMarkup(markup, (container) => {
@@ -467,8 +498,8 @@ describe("installed face — the from param decides the face", () => {
     });
   });
 
-  test("an installed-relation App opened with from=created renders the creator face (tab bar)", async () => {
-    const markup = renderFace(managerPayload(), "created");
+  test("a both-relation App opened with from=created renders the creator face (tab bar)", async () => {
+    const markup = renderFace({ ...managerPayload(), viewer_relation: "both" }, "created");
     await withMarkup(markup, (container) => {
       expect(container.querySelector('[data-slot="tabs-list"]')).not.toBeNull();
       expect(container.querySelector('[data-slot="installed-chain"]')).toBeNull();

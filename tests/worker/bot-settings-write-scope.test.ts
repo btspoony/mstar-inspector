@@ -212,3 +212,61 @@ describe("the bot settings payload's share facts", () => {
     expect(body).not.toHaveProperty("can_configure_bot");
   });
 });
+
+/**
+ * F1-2: the EDITOR reads are the owner's. A manager of a workspace that only
+ * consumes a shared bot must not receive provider ids, declared custom
+ * providers (with live key ids), previews or key-usage probes — those read the
+ * owner's credentials. The narrow `/bot` summary remains the consumer's face.
+ */
+describe("the bot editor's reads require the owning workspace", () => {
+  type Read = { name: string; path: string; method: "GET" | "POST"; form?: Record<string, string> };
+
+  const READS: Read[] = [
+    { name: "model options", path: "/api/review-bots/" + HOME_BOT_ROW + "/models", method: "GET" },
+    {
+      name: "provider preview",
+      path: "/api/review-bots/" + HOME_BOT_ROW + "/provider-models/preview?provider=anthropic",
+      method: "GET",
+    },
+    {
+      name: "key usage",
+      path: "/api/review-bots/" + HOME_BOT_ROW + "/keys/usage",
+      method: "POST",
+      form: { provider: "zai", keyId: "0".repeat(16) },
+    },
+  ];
+
+  async function read(ref: string, login: string, entry: Read): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://worker.local/dashboard/${ref}${entry.path}`, {
+        method: entry.method,
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
+        ...(entry.form === undefined ? {} : { body: new URLSearchParams(entry.form) }),
+      }),
+      envFor(),
+    );
+  }
+
+  test("a consumer workspace's admin gets the read-only refusal from every editor read", async () => {
+    world();
+    for (const entry of READS) {
+      const res = await read(OTHER, "erin", entry);
+      expect(res.status, entry.name).toBe(403);
+      expect(await res.json(), entry.name).toMatchObject({ key: READ_ONLY_KEY });
+    }
+  });
+
+  test("the owning workspace's admin still gets the full shape", async () => {
+    world();
+    const models = await read(OFFICIAL, "dana", READS[0]!);
+    expect(models.status).toBe(200);
+    const body = (await models.json()) as { groups: unknown };
+    expect(Array.isArray(body.groups)).toBe(true);
+
+    // The preview answers a shape only once it reached the provider; with no
+    // stored key it refuses a declaration it cannot read — never a 403.
+    const preview = await read(OFFICIAL, "dana", READS[1]!);
+    expect(preview.status).not.toBe(403);
+  });
+});

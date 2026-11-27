@@ -573,19 +573,19 @@ export type AppChainEntry = {
   available: boolean;
   multiplier: number;
   month_used_rp: number;
-  /** The bot's own monthly cap; `null` = no cap of its own. */
-  monthly_rp: number | null;
   /**
    * The ceiling the relay enforces for this workspace: its
-   * `bot_quota_overrides` row when one exists, else `monthly_rp`.
+   * `bot_quota_overrides` row when one exists, else the bot's own default. The
+   * bot's raw default itself is never served — it is the owner's pricing.
    */
   effective_monthly_rp: number | null;
   /** The bot is archived: mounted and listed, never selected by the relay. */
   archived: boolean;
-  /** The bot's DEFAULT model chain selector string; `null` = none configured. */
+  /** The bot's DEFAULT model chain selector; `null` = none configured or not
+   * visible to this workspace (the row outlived the relation). */
   default_chain: string | null;
-  /** The runtime harness id the bot's reviews execute under. */
-  runtime: string;
+  /** The runtime harness id; `null` under the same rule as `default_chain`. */
+  runtime: string | null;
 };
 
 /**
@@ -614,15 +614,13 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.available === "boolean" &&
     typeof value.multiplier === "number" &&
     typeof value.month_used_rp === "number" &&
-    (value.monthly_rp === null || typeof value.monthly_rp === "number") &&
     (value.effective_monthly_rp === null ||
       (typeof value.effective_monthly_rp === "number" &&
         Number.isSafeInteger(value.effective_monthly_rp) &&
         value.effective_monthly_rp > 0)) &&
     typeof value.archived === "boolean" &&
     (value.default_chain === null || typeof value.default_chain === "string") &&
-    typeof value.runtime === "string" &&
-    value.runtime.length > 0
+    (value.runtime === null || (typeof value.runtime === "string" && value.runtime.length > 0))
   );
 }
 

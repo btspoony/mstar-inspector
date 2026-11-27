@@ -573,3 +573,138 @@ describe("bot writers refuse in the store itself", () => {
     });
   }
 });
+
+/**
+ * Item F1-5: archive is a LOCK, not a deletion. Every configuration write —
+ * profile, pricing, overrides, share, the legacy settings ops and the key
+ * routes — refuses until the bot is restored, and restore is the transition
+ * that reopens them.
+ */
+describe("an archived bot refuses every configuration write until it is restored", () => {
+  async function archive(): Promise<void> {
+    const res = await patch(OFFICIAL, HOME_BOT_ROW, "archive", "dana", { archived: true });
+    expect(res.status).toBe(200);
+  }
+
+  async function restore(): Promise<void> {
+    const res = await patch(OFFICIAL, HOME_BOT_ROW, "archive", "dana", { archived: false });
+    expect(res.status).toBe(200);
+  }
+
+  function setArchivedAt(value: string | null): void {
+    db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = ?").run(value, HOME_BOT_ROW);
+  }
+
+  function overrides(): Array<{ workspace_id: string }> {
+    return db.raw
+      .query("SELECT workspace_id FROM bot_quota_overrides WHERE bot_id = ?")
+      .all(HOME_BOT_ROW) as Array<{ workspace_id: string }>;
+  }
+
+  test("profile and pricing are 409 while archived, and both accept after restore", async () => {
+    world();
+    await archive();
+
+    const profile = await patch(OFFICIAL, HOME_BOT_ROW, "profile", "dana", { name: "renamed" });
+    expect(profile.status).toBe(409);
+    expect(await profile.json()).toMatchObject({ key: "settings.error.botArchived" });
+    expect(stored(HOME_BOT_ROW).name).toBe("bot-home");
+
+    const pricing = await patch(OFFICIAL, HOME_BOT_ROW, "pricing", "dana", { multiplier: 3 });
+    expect(pricing.status).toBe(409);
+    expect(stored(HOME_BOT_ROW).multiplier).toBe(1);
+
+    await restore();
+    expect((await patch(OFFICIAL, HOME_BOT_ROW, "profile", "dana", { name: "renamed" })).status).toBe(200);
+    expect(stored(HOME_BOT_ROW).name).toBe("renamed");
+    expect((await patch(OFFICIAL, HOME_BOT_ROW, "pricing", "dana", { multiplier: 3 })).status).toBe(200);
+    expect(stored(HOME_BOT_ROW).multiplier).toBe(3);
+  });
+
+  test("the per-workspace override write is 409 while archived and accepts after restore", async () => {
+    world();
+    const write = async (monthlyRp: number) =>
+      worker.fetch(
+        new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${HOME_BOT_ROW}/quota-overrides`, {
+          method: "PATCH",
+          headers: {
+            Cookie: `${SESSION_COOKIE}=${await createSessionValue("dana", null, SESSION_SECRET)}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ workspaceId: OTHER, monthlyRp }),
+        }),
+        envFor(),
+      );
+
+    await archive();
+    const refused = await write(900);
+    expect(refused.status).toBe(409);
+    expect(overrides()).toEqual([]);
+
+    await restore();
+    expect((await write(900)).status).toBe(200);
+    expect(overrides()).toEqual([{ workspace_id: OTHER }]);
+  });
+
+  test("the bot share switch is 409 while archived and accepts after restore", async () => {
+    world();
+    setArchivedAt("2026-02-01T00:00:00.000Z");
+    const share = async () =>
+      worker.fetch(
+        new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${HOME_BOT_ROW}/scope`, {
+          method: "PATCH",
+          headers: {
+            Cookie: `${SESSION_COOKIE}=${await createSessionValue("dana", null, SESSION_SECRET)}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ scope: "owned", confirm: true }),
+        }),
+        envFor(),
+      );
+    const before = stored(HOME_BOT_ROW);
+
+    expect((await share()).status).toBe(409);
+    expect(stored(HOME_BOT_ROW).name).toBe(before.name);
+
+    setArchivedAt(null);
+    expect((await share()).status).toBe(200);
+  });
+
+  test("the legacy settings op and the key routes are 409 while archived", async () => {
+    world();
+    setArchivedAt("2026-02-01T00:00:00.000Z");
+    for (const [path, form] of [
+      [
+        `/dashboard/${OFFICIAL}/review-bots/${HOME_BOT_ROW}/settings`,
+        { op: "save-sandbox-image", sandbox_image_id: "omp" },
+      ],
+      [`/dashboard/${OFFICIAL}/api/review-bots/${HOME_BOT_ROW}/keys/verify`, { provider: "", key: "" }],
+      [`/dashboard/${OFFICIAL}/review-bots/${HOME_BOT_ROW}/settings/key/delete`, { provider: "zai", key_id: "nope" }],
+    ] as const) {
+      const res = await worker.fetch(
+        new Request(`https://worker.local${path}`, {
+          method: "POST",
+          headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("dana", null, SESSION_SECRET)}` },
+          body: new URLSearchParams(form),
+        }),
+        envFor(),
+      );
+      expect(res.status, path).toBe(409);
+    }
+    // Nothing was written: the bot and its configuration tables are untouched.
+    expect(stored(HOME_BOT_ROW).archived_at).not.toBeNull();
+  });
+
+  test("the store itself refuses each write for an archived bot, without a route in front of it", async () => {
+    world();
+    setArchivedAt("2026-02-01T00:00:00.000Z");
+    const authority = { workspaceId: OFFICIAL, role: "owner" as const };
+    const now = "2026-02-02T00:00:00.000Z";
+
+    expect(await updateBotProfile(db, { botId: HOME_BOT_ROW, name: "x", authority, now })).toBe("archived");
+    expect(await updateBotPricing(db, { botId: HOME_BOT_ROW, multiplier: 2, authority, now })).toBe("archived");
+    // Restore stays possible: it is the one transition an archived bot takes.
+    expect(await setBotArchived(db, { botId: HOME_BOT_ROW, archived: false, authority, now })).toBe("ok");
+    expect(stored(HOME_BOT_ROW).archived_at).toBeNull();
+  });
+});

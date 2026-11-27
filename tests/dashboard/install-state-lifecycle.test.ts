@@ -434,7 +434,6 @@ describe("the chain read batches its spend", () => {
         owned: false,
         available: true,
         multiplier: 2.5,
-        monthlyRp: null,
         effectiveMonthlyRp: null,
         archived: false,
         defaultChain: null,
@@ -446,6 +445,67 @@ describe("the chain read batches its spend", () => {
     db.raw.run("UPDATE review_bots SET scope = 'owned' WHERE id = 'app-a'");
     const revoked = (await createReviewBotsStore(db).listInstallChainBots(OWNER)).get("app-a")!;
     expect(revoked[0]!.available).toBe(false);
+    db.raw.close();
+  });
+
+  /**
+   * A retained chain row keeps the MOUNT and its history; it does not keep the
+   * configuration the owner wrote after this workspace's relation ended. The
+   * default selector and the runtime harness are owner configuration, so they
+   * are withheld once the bot is unshared or archived.
+   */
+  test("a retained row withholds the default chain and the runtime once its bot is not available", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER);
+    seedApp(db, "app-a", { workspaceId: OTHER, scope: "shared" });
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-a', '${OWNER}', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-a', '${OWNER}', 1, 'app-a');
+       INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
+         VALUES ('app-a', 'default', 'anthropic/claude', 1, '${TS}', '${TS}');`,
+    );
+
+    const live = (await createReviewBotsStore(db).listInstallChainBots(OWNER)).get("app-a")!;
+    expect(live[0]).toMatchObject({ available: true, defaultChain: "anthropic/claude", runtime: "omp" });
+
+    // Unshared: the mount stays, its configuration does not.
+    db.raw.run("UPDATE review_bots SET scope = 'owned', sandbox_image_id = 'omp-2' WHERE id = 'app-a'");
+    const unshared = (await createReviewBotsStore(db).listInstallChainBots(OWNER)).get("app-a")!;
+    expect(unshared[0]).toMatchObject({
+      position: 1,
+      botId: "app-a",
+      available: false,
+      archived: false,
+      // Availability and history survive; the new configuration does not.
+      multiplier: 1,
+      defaultChain: null,
+      runtime: null,
+    });
+    db.raw.close();
+  });
+
+  test("an archived row lists its mount but never its configuration", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-a");
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-a', '${OWNER}', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-a', '${OWNER}', 1, 'app-a');
+       INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
+         VALUES ('app-a', 'default', 'anthropic/claude', 1, '${TS}', '${TS}');
+       UPDATE review_bots SET archived_at = '${TS}' WHERE id = 'app-a';`,
+    );
+
+    const chain = (await createReviewBotsStore(db).listInstallChainBots(OWNER)).get("app-a")!;
+    expect(chain[0]).toMatchObject({
+      available: true,
+      archived: true,
+      defaultChain: null,
+      runtime: null,
+    });
     db.raw.close();
   });
 });

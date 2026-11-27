@@ -1417,7 +1417,6 @@ describe("the install state's read faces (D43, D35)", () => {
         available: true,
         multiplier: 1,
         month_used_rp: 0,
-        monthly_rp: null,
         effective_monthly_rp: null,
         archived: false,
         default_chain: null,
@@ -1450,7 +1449,6 @@ describe("the install state's read faces (D43, D35)", () => {
         available: true,
         multiplier: 1,
         month_used_rp: 0,
-        monthly_rp: null,
         effective_monthly_rp: null,
         archived: false,
         default_chain: null,
@@ -1478,10 +1476,11 @@ describe("the install state's read faces (D43, D35)", () => {
     );
 
     const res = (await (await get(DETAIL(MALLORY_APP_ID), cookie, makeEnv(db))).json()) as {
-      chain: Array<{ monthly_rp: number | null; effective_monthly_rp: number | null }>;
+      chain: Array<{ effective_monthly_rp: number | null }>;
     };
-    // Both figures are served: the bot's default stays, the effective is the override.
-    expect(res.chain[0]).toMatchObject({ monthly_rp: 1000, effective_monthly_rp: 5000 });
+    // Only the viewer's effective ceiling is served — never the owner's default.
+    expect(res.chain[0]).toMatchObject({ effective_monthly_rp: 5000 });
+    expect(res.chain[0]).not.toHaveProperty("monthly_rp");
   });
 
   test("with no override the effective ceiling is the bot's default, and neither is a ceiling at all", async () => {
@@ -1493,18 +1492,18 @@ describe("the install state's read faces (D43, D35)", () => {
     const chainOf = async () => {
       const response = await get(DETAIL(MALLORY_APP_ID), cookie, makeEnv(db));
       const body = (await response.json()) as {
-        chain: Array<{ monthly_rp: number | null; effective_monthly_rp: number | null }>;
+        chain: Array<{ effective_monthly_rp: number | null }>;
       };
       return body.chain[0]!;
     };
 
     // No override, bot default set.
     db.raw.run(`UPDATE review_bots SET monthly_rp = 2000 WHERE id = '${appRow.id}'`);
-    expect(await chainOf()).toMatchObject({ monthly_rp: 2000, effective_monthly_rp: 2000 });
+    expect(await chainOf()).toMatchObject({ effective_monthly_rp: 2000 });
 
     // Neither an override nor a default: unlimited.
     db.raw.run(`UPDATE review_bots SET monthly_rp = NULL WHERE id = '${appRow.id}'`);
-    expect(await chainOf()).toMatchObject({ monthly_rp: null, effective_monthly_rp: null });
+    expect(await chainOf()).toMatchObject({ effective_monthly_rp: null });
   });
 
   test("a chainless App serves an empty chain, which the SPA renders as its dash", async () => {

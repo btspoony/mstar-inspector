@@ -17,7 +17,6 @@ const chainRow = {
   available: true,
   multiplier: 1,
   month_used_rp: 40,
-  monthly_rp: null,
   effective_monthly_rp: null,
   archived: false,
   default_chain: "deepseek/deepseek-chat",
@@ -361,6 +360,17 @@ describe("parseSettings — viewer_relation on every App-detail face", () => {
       expect(parsed, name).not.toBeNull();
       expect(parsed?.chain?.[0]?.default_chain, name).toBeNull();
       expect(parsed?.chain?.[0]?.runtime, name).toBe("omp");
+    }
+  });
+
+  test("a withheld default chain and runtime parse as null (the row outlived its relation)", () => {
+    for (const [name, face] of faces) {
+      const parsed = parseSettings({
+        ...face,
+        chain: [{ ...chainRow, available: false, default_chain: null, runtime: null }],
+      });
+      expect(parsed, name).not.toBeNull();
+      expect(parsed?.chain?.[0]?.runtime, name).toBeNull();
     }
   });
 

@@ -272,3 +272,64 @@ describe("chain rows carry archived", () => {
     expect(row.chain.map((entry) => entry.archived)).toEqual([true]);
   });
 });
+
+/**
+ * F1-3: project only what the reader may see. A retained mount keeps its
+ * availability and its history; the owner's default selector, runtime harness
+ * and raw price never reach a consumer once the bot stops being available.
+ */
+describe("an unshared mount keeps availability and history, not configuration", () => {
+  test("the installer's chain row drops default_chain and runtime, keeps the mount", async () => {
+    const db = await world();
+    db.raw.run(
+      `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
+       VALUES ('${APP_ID}', 'default', 'anthropic/claude', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+       UPDATE review_bots SET monthly_rp = 4000 WHERE id = '${APP_ID}'`,
+    );
+
+    const before = (await (await get(db, TENANT_DETAIL, "mallory")).json()) as {
+      chain: Array<Record<string, unknown>>;
+    };
+    expect(before.chain[0]).toMatchObject({
+      available: true,
+      default_chain: "anthropic/claude",
+      runtime: "omp",
+      effective_monthly_rp: 4000,
+    });
+
+    // The owner stops sharing. The install keeps the mount; nothing it wrote
+    // afterwards is served here any more.
+    db.raw.run(`UPDATE review_bots SET scope = 'owned', sandbox_image_id = 'omp-9' WHERE id = '${APP_ID}'`);
+    const after = (await (await get(db, TENANT_DETAIL, "mallory")).json()) as {
+      chain: Array<Record<string, unknown>>;
+    };
+    expect(after.chain[0]).toMatchObject({
+      bot_id: APP_ID,
+      available: false,
+      archived: false,
+      default_chain: null,
+      runtime: null,
+    });
+    // The mount and its name survive: a reader can still see what is mounted.
+    expect(after.chain[0]).toMatchObject({ name: "app-relation", provider_workspace: "Default" });
+  });
+
+  test("a consumer's /bot payload carries no raw ceiling, and the owner's does", async () => {
+    const db = await world();
+    db.raw.run(`UPDATE review_bots SET monthly_rp = 4000 WHERE id = '${APP_ID}'`);
+    const botPath = (ws: string) => `/dashboard/${ws}/api/review-bots/${APP_ID}/bot`;
+
+    const consumer = (await (await get(db, botPath(TENANT_WS), "carol")).json()) as {
+      app: Record<string, unknown>;
+      overview: { effective_ceiling: number | null };
+    };
+    expect(consumer.app).not.toHaveProperty("monthly_rp");
+    // The ceiling the relay enforces HERE is still stated — that is the reader's fact.
+    expect(consumer.overview.effective_ceiling).toBe(4000);
+
+    const owner = (await (await get(db, botPath(OWNER_WS), "dana")).json()) as {
+      app: Record<string, unknown>;
+    };
+    expect(owner.app.monthly_rp).toBe(4000);
+  });
+});

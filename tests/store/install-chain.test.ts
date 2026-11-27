@@ -144,6 +144,64 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
     db.raw.close();
   });
 
+  /**
+   * Archive stops the relay from selecting a bot, so an ARCHIVED bot is never a
+   * NEW mount. A row the chain already holds is different: it stays mounted
+   * (reorderable and removable) until an operator takes it out.
+   */
+  test("an archived bot is refused as a NEW mount, atomically", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-archived", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a"] });
+
+    db.raw.prepare("UPDATE review_bots SET archived_at = '2026-02-01T00:00:00.000Z' WHERE id = 'bot-archived'").run();
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-archived", "bot-a"],
+      }),
+    ).toBe("bot_unavailable");
+    // The guard rolled the DELETE back with the rest: the previous chain stands.
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-a" }]);
+    db.raw.close();
+  });
+
+  test("a RETAINED archived row survives a reorder", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-archived", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({
+      appId: "app-1",
+      workspaceId: "default",
+      botIds: ["bot-a", "bot-archived"],
+    });
+
+    // Archiving a bot an install ALREADY mounts must not silently unmount it.
+    db.raw.prepare("UPDATE review_bots SET archived_at = '2026-02-01T00:00:00.000Z' WHERE id = 'bot-archived'").run();
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-archived", "bot-a"],
+      }),
+    ).toBe("ok");
+    expect(chainOf(db, "app-1", "default")).toEqual([
+      { position: 1, bot_id: "bot-archived" },
+      { position: 2, bot_id: "bot-a" },
+    ]);
+    db.raw.close();
+  });
+
   test("a bot that stops being shared BETWEEN the request and the batch is refused", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "provider");

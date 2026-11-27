@@ -2026,13 +2026,6 @@ function canWriteBotScope(
   return app.workspace_id === scope.workspaceId;
 }
 
-function canReadBotScope(
-  app: Pick<GithubAppRow, "workspace_id" | "scope">,
-  scope: WorkspaceScope,
-): boolean {
-  return app.workspace_id === scope.workspaceId || app.scope === "shared";
-}
-
 async function resolveScopedApp(
   apps: ReturnType<typeof createReviewBotsStore>,
   appIdParam: string,
@@ -2211,7 +2204,6 @@ const appListRoute = async (c: DashboardContext) => {
           available: bot.available,
           multiplier: bot.multiplier,
           month_used_rp: spend.get(bot.botId) ?? 0,
-          monthly_rp: bot.monthlyRp,
           effective_monthly_rp: bot.effectiveMonthlyRp,
           archived: bot.archived,
           default_chain: bot.defaultChain,
@@ -2442,6 +2434,8 @@ export type BotRouteRow = {
   github_avatar_url: null;
   github_metadata_synced_at: null;
   review_enabled: null;
+  /** Archived: configuration writes are refused until it is restored. */
+  archived: boolean;
 };
 
 function botRouteRow(bot: BotScopedRow): BotRouteRow {
@@ -2464,6 +2458,7 @@ function botRouteRow(bot: BotScopedRow): BotRouteRow {
     github_avatar_url: null,
     github_metadata_synced_at: null,
     review_enabled: null,
+    archived: bot.archived_at !== null,
   };
 }
 
@@ -3466,7 +3461,10 @@ const appBotRoute = async (c: DashboardContext) => {
       shared_at: bot.shared_at,
       sandbox_image_id: app.sandbox_image_id,
       multiplier: bot.multiplier,
-      monthly_rp: bot.monthly_rp,
+      // The bot's own ceiling is the OWNER's pricing. A consumer and a plain
+      // member read the ceiling the relay enforces on them — `overview.
+      // effective_ceiling` — and never the owner's raw default behind it.
+      ...(canManage ? { monthly_rp: bot.monthly_rp } : {}),
       last_webhook_at: app.last_webhook_at ?? null,
       github_name: app.github_name ?? null,
       github_slug: app.github_slug ?? null,
@@ -3563,6 +3561,7 @@ function scopeSwitchRoute(kind: ScopeSwitchKind) {
           });
     if (outcome.outcome === "bot_not_found") return c.json({ error: copy.notFound }, 404);
     if (outcome.outcome === "forbidden") return c.json({ error: "forbidden" }, 403);
+    if (outcome.outcome === "archived") return botArchivedResponse(c);
     if (outcome.outcome === "outside_official_workspace") {
       return c.json({ error: copy.outsideOfficial }, 409);
     }
@@ -3615,6 +3614,7 @@ const botQuotaOverrideRoute = async (c: DashboardContext): Promise<Response> => 
     now: new Date().toISOString(),
   });
   if (outcome === "not_owner") return c.json({ error: "only the bot's owner writes its ceilings" }, 403);
+  if (outcome === "archived") return botArchivedResponse(c);
   if (outcome === "invalid") {
     return c.json({ error: "monthlyRp must be a whole number of RP greater than 0, or null" }, 400);
   }
@@ -3729,6 +3729,7 @@ function botFaceWriteRoute(kind: BotFaceWriteKind) {
     }
     if (outcome === "bot_not_found") return c.json({ error: copy.notFound }, 404);
     if (outcome === "forbidden") return c.json({ error: "forbidden" }, 403);
+    if (outcome === "archived") return botArchivedResponse(c);
     if (outcome === "invalid") return invalid();
     return c.json({ ok: true });
   };
@@ -3916,7 +3917,8 @@ async function loadDeclaredVocabulary(
 const appProviderModelsPreviewRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
+  const refused = requireBotEditor(c, gate);
+  if (refused !== null) return refused;
   const providerId = (c.req.query("provider") ?? "").trim();
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
@@ -3962,7 +3964,8 @@ const providerCatalogRoute = async (c: DashboardContext) => {
 const appModelsRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
+  const refused = requireBotEditor(c, gate);
+  if (refused !== null) return refused;
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
     const [verified, custom] = await orderedReads([
@@ -4025,6 +4028,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
+  if (gate.app.archived) return botArchivedResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const plainKey = typeof form.key === "string" ? form.key.trim() : "";
@@ -4109,7 +4113,8 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
 const appKeyUsageRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
+  const refused = requireBotEditor(c, gate);
+  if (refused !== null) return refused;
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const keyId = typeof form.keyId === "string" ? form.keyId.trim() : "";
@@ -4171,6 +4176,24 @@ function botReadOnlyResponse(c: DashboardContext): Response {
   return c.json({ key: "settings.error.botReadOnly", message: t("en", "settings.error.botReadOnly") }, 403);
 }
 
+/**
+ * The editor's own gate: the model options, provider declarations, preview and
+ * key-usage probes read the bot OWNER's configuration — provider ids, live
+ * keys, endpoint URLs. A manager of a workspace that merely CONSUMES the bot
+ * never reads them; the narrow `/bot` summary is the consumer's face.
+ */
+function requireBotEditor(
+  c: DashboardContext,
+  gate: { app: BotRouteRow; scope: WorkspaceScope },
+): Response | null {
+  return canWriteBotScope(gate.app, gate.scope) ? null : botReadOnlyResponse(c);
+}
+
+/** Archive is a lock, not a deletion: every configuration write refuses until it is restored. */
+function botArchivedResponse(c: DashboardContext): Response {
+  return c.json({ key: "settings.error.botArchived", message: t("en", "settings.error.botArchived") }, 409);
+}
+
 const appSettingsSaveRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
@@ -4179,6 +4202,8 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
   if (BOT_SCOPED_SETTINGS_OPS.has(op) && !canWriteBotScope(gate.app, gate.scope)) {
     return botReadOnlyResponse(c);
   }
+  // Archive is a lock: no legacy configuration op writes an archived bot.
+  if (BOT_SCOPED_SETTINGS_OPS.has(op) && gate.app.archived) return botArchivedResponse(c);
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   if (op === "add-key") {
     const provider = typeof form.provider === "string" ? form.provider.trim() : "";
@@ -4762,6 +4787,7 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
+  if (gate.app.archived) return botArchivedResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const keyId = typeof form.key_id === "string" ? form.key_id.trim() : "";
@@ -5003,7 +5029,12 @@ async function rpPerCreditRead(db: DashboardDb, workspaceId: string): Promise<nu
   return profile.rpPerCredit;
 }
 
-/** One chain row of the App detail's `bots` tab. */
+/**
+ * One chain row of the App detail's `bots` tab. Only what the VIEWER may see:
+ * the bot's own ceiling never leaves the server, and its default selector and
+ * runtime harness are withheld once the bot is no longer available here (or is
+ * archived) — the mount and its recorded spend stay.
+ */
 export type AppChainEntry = {
   position: number;
   bot_id: string;
@@ -5014,19 +5045,17 @@ export type AppChainEntry = {
   available: boolean;
   multiplier: number;
   month_used_rp: number;
-  /** The bot's own monthly cap (F5); `null` = no cap of its own. */
-  monthly_rp: number | null;
   /**
    * The ceiling the relay enforces for the VIEWER's workspace: its
-   * `bot_quota_overrides` row when one exists, else `monthly_rp`.
+   * `bot_quota_overrides` row when one exists, else the bot's own default.
    */
   effective_monthly_rp: number | null;
   /** The bot is archived: mounted and listed, never selected by the relay. */
   archived: boolean;
-  /** The bot's DEFAULT model chain selector string; `null` = none configured. */
+  /** The bot's DEFAULT model chain selector; `null` = none configured or not visible here. */
   default_chain: string | null;
-  /** The runtime harness id the bot's reviews execute under. */
-  runtime: string;
+  /** The bot's runtime harness id; `null` under the same rule. */
+  runtime: string | null;
 };
 
 /**
@@ -5066,7 +5095,6 @@ async function appChainRead(
     available: bot.available,
     multiplier: bot.multiplier,
     month_used_rp: spend.get(bot.botId) ?? 0,
-    monthly_rp: bot.monthlyRp,
     effective_monthly_rp: bot.effectiveMonthlyRp,
     archived: bot.archived,
     default_chain: bot.defaultChain,

@@ -133,12 +133,13 @@ export function parseAppDetailFrom(search: string): AppDetailFrom | null {
 }
 
 /**
- * Face selection: a valid `from` wins; otherwise the served relation decides —
- * an installed-only App opens as a mount, while a created or both-relation App
- * opens as the owner's creation (the creator face is the owner's default).
+ * Face selection. The served relation is the authority: an installed-only App
+ * is a mount and a created-only App is its owner's creation, whatever the URL
+ * says. `from` only picks between faces when BOTH relations hold, and without
+ * it that case opens as the owner's creation (the creator face is the default).
  */
 export function appDetailFace(relation: ViewerRelation, from: AppDetailFrom | null): AppDetailFace {
-  if (from !== null) return from === "installed" ? "installed" : "creator";
+  if (relation === "both" && from !== null) return from === "installed" ? "installed" : "creator";
   return relation === "installed" ? "installed" : "creator";
 }
 
@@ -235,8 +236,17 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     let live = true;
     void loadUsableBots(base)
       .then((payload) => {
-        // Names only: the editor adds a bot by id and labels it by name.
-        if (live) setMountable(payload.bots.map((bot) => ({ id: bot.id, name: bot.name })));
+        // Names only: the editor adds a bot by id and labels it by name. An
+        // ARCHIVED bot is never a NEW mount — the relay would not select it —
+        // so it stays out of the chooser; a row already in the chain keeps
+        // rendering from the chain read.
+        if (live) {
+          setMountable(
+            payload.bots
+              .filter((bot) => !bot.archived)
+              .map((bot) => ({ id: bot.id, name: bot.name })),
+          );
+        }
       })
       .catch(() => {
         // A failed read simply offers no "add" list; the chain stays editable.
@@ -475,7 +485,9 @@ export function InstalledChainSection({
     },
     {
       header: t(locale, "settings.runtimeHarness"),
-      cell: (row) => <span className="font-mono text-muted-foreground">{row.runtime}</span>,
+      // Withheld once the bot is no longer visible here: the mount stays, its
+      // post-withdrawal configuration does not.
+      cell: (row) => <span className="font-mono text-muted-foreground">{row.runtime ?? "—"}</span>,
     },
     {
       header: t(locale, "apps.chain.columnMultiplier"),
@@ -492,7 +504,8 @@ export function InstalledChainSection({
             {/* The ceiling rides the figure (ADR § Units): an own bot is unbounded,
                 a shared bot states the cap the RELAY enforces for this workspace
                 (its override, else the bot's default), and says so when there is
-                none at all. `monthly_rp` alone would misstate an override. */}
+                none at all. The bot's raw default is never served to a viewer —
+                `effective_monthly_rp` is the only ceiling this face has. */}
             {row.owned
               ? t(locale, "credits.unlimitedOwn", { used })
               : row.effective_monthly_rp === null

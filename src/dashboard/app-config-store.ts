@@ -160,7 +160,7 @@
  *     bot_id is a caller bug, never a silent no-op.
  */
 import { createSecretbox } from "./secretbox";
-import { readBotOwnerWorkspace } from "./apps-store";
+import { readBotWriteTarget } from "./apps-store";
 import type { WorkspaceRole } from "./workspace-store";
 import { builtinProbeCanRejectKey, customProbeCanRejectKey } from "./provider-verify";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
@@ -989,11 +989,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       throw new BotWriteForbiddenError(targetId);
     }
     // `review_bots` has ONE reader module (apps-store); the guard asks it
-    // rather than opening a second read site.
-    const owner = await readBotOwnerWorkspace(db, targetId);
-    if (owner === null || owner !== authority.workspaceId) {
+    // rather than opening a second read site. An archived bot is refused like
+    // another workspace's: its only transition is archive/restore.
+    const owner = await readBotWriteTarget(db, targetId);
+    if (owner === null || owner.workspaceId !== authority.workspaceId) {
       throw new BotWriteForbiddenError(targetId);
     }
+    if (owner.archived) throw new BotWriteForbiddenError(targetId);
   }
 
   type KeyTable = {

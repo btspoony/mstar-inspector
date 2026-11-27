@@ -343,6 +343,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       "blocked_reason",
       "can_manage",
       "target_id",
+      "viewer_relation",
       "workspace_id",
     ]);
     expect(body.workspace_id).toBe("default");
