@@ -25,6 +25,7 @@ const OWNED = {
   scope: "owned" as const,
   multiplier: 1,
   month_used_rp: 1240,
+  effective_ceiling: null,
   archived: false,
 };
 
@@ -39,6 +40,7 @@ const SHARED = {
   scope: "shared" as const,
   multiplier: 4,
   month_used_rp: 90,
+  effective_ceiling: 5000,
   archived: false,
 };
 
