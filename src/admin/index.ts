@@ -80,6 +80,7 @@ import {
   DURATION_REPORT_CAP_MIN_MS,
 } from "../contracts/duration-report";
 import { readReviewDurationReport } from "./duration-report";
+import { readBotMultipliers } from "./bot-multipliers";
 import {
   findDataUpgrade,
   listDataUpgrades,
@@ -1114,6 +1115,7 @@ export const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "patch", path: "/api/flags", handler: setFlag },
   { method: "get", path: "/api/runtime", handler: readRuntime },
   { method: "get", path: "/api/runtime/duration-report", handler: readDurationReport },
+  { method: "get", path: "/api/runtime/bot-multipliers", handler: readBotMultipliers },
   { method: "patch", path: "/api/runtime", handler: setRuntime },
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/api/users", handler: readUsers },
