@@ -43,15 +43,16 @@ The page header carries the display name, creator, status and the metric band. T
 
 - The sidebar gains a bots entry: `/bots` lists every bot this workspace can use as TWO sections — 我创建的机器人 and 共享给我的机器人 — not a filter over one table; each row opens `/bots/<botId>`.
 - `/bots/<botId>` is one route with two readings, and the reading decides the tab bar:
-  - **Owner workspace's owner/admin** gets `PageHeader` (name, provider workspace) and `MetricBand` (multiplier, 本月已用, mounted-App count), then two tabs. 概览 is read-only: 使用情况 as a `FlowSection` (本月已用, 每月上限, 剩余, 计费来源, UTC calendar-month basis), 能力摘要 (default chain, runtime, multiplier as text), 挂载于, and the sharing state. 配置 is the writable side: 共享与定价 (the share switch, the multiplier and the monthly ceiling as one decision), 模型提供方 (one aggregate header per provider, its keys behind a disclosure), 模型链 (`ChainEditor`), 席位 and 运行时.
-  - **Any other workspace** gets the same header and metric band, a read-only notice, and 使用情况 / 能力摘要 / 挂载于 — with **no tab bar at all**. A one-item tab bar would be a control that does nothing. 共享与定价, 模型提供方, 模型链, 席位 and 运行时 are **absent**, not disabled: a consumer must not see the owner's provider keys, pricing or chain mechanics.
+  - **Owner workspace's owner/admin** gets `PageHeader` (name, provider workspace) and `MetricBand` (multiplier, 本月已用, mounted-App count), then two tabs. 概览 is read-only: 使用情况 as a `FlowSection` (本月已用, 每月上限, 剩余, 计费来源, UTC calendar-month basis), 能力摘要 (default chain, runtime, multiplier as text), 挂载于, and the sharing state. 配置 is the writable side: 共享与定价 (the share switch, the multiplier, the monthly ceiling and the per-workspace ceiling overrides as one decision), 模型提供方 (one aggregate header per provider, its keys behind a disclosure), 模型链 (`ChainEditor`), 席位 and 运行时.
+  - **Any other workspace** gets the same header and metric band, a read-only notice, and 使用情况 / 能力摘要 / 挂载于 — with **no tab bar at all**. A one-item tab bar would be a control that does nothing. 共享与定价, 模型提供方, 模型链, 席位 and 运行时 are **absent**, not disabled: a consumer must not see the owner's provider keys, pricing or chain mechanics. The multiplier stays visible to a consumer, because it is what makes the cost predictable before mounting the bot.
+- 共享与定价 carries a 按工作区例外 list (`workspace`, ceiling, clear). Overrides are editable while sharing is off — they simply do not take effect until it is on, and the section says so — so an owner can price before publishing.
 - 配置 never repeats 能力摘要 or 挂载于; the metric band stays as its only context. Read-only facts have one home, so the two tabs cannot drift.
 - The App detail keeps only the mount: each chain row links to the bot's detail and states that bot's default model chain, runtime and multiplier. The App detail header carries no bot-settings action, and the creator face carries no chain.
 - The chain has one control surface per face. Move, remove and add live on the table row itself; no second copy of the chain renders beside it. The section header carries 添加机器人, matching the action placement other surfaces use.
 
 ### Units: Credits outside, RP never
 
-RP is the platform's internal accounting unit (1,000 RP = 1 Credit). Every user-facing amount, ceiling and spend figure renders in **Credits** with two decimals; RP appears in no label, column, tooltip or empty state. A figure labelled 本月 is always 本月已用, and states its ceiling (`已用 / 上限`) or `不限（自有机器人）` — the reader must never guess whether the number is spend or remaining balance.
+RP is the platform's internal accounting unit (1,000 RP = 1 Credit). Every user-facing amount, ceiling and spend figure renders in **Credits** with exactly two decimals — the display quantum is **0.01 Credit**, and every surface rounds the same stored value the same way, so a list, a metric band and a usage section agree on the month. RP appears in no label, column, tooltip or empty state. A figure labelled 本月 is always 本月已用, and states its ceiling (`已用 / 上限`) or `不限（自有机器人）` — the reader must never guess whether the number is spend or remaining balance.
 
 ### Degraded reads degrade one control, not the page
 
@@ -73,7 +74,8 @@ A failed model-option read removes model *selection* only, and only on the bot's
 - The installed face contains App identity, install/bind state and the mount chain; its App facts are read-only, its chain carries exactly one set of move/remove/add controls for the installing workspace's owner/admin with 添加机器人 in the section header, and a member sees no controls. It contains no credentials, share, delete, enable, metadata-refresh or delivery surface, and no 24h rejection metric.
 - The creator face has exactly three tabs; the bots tab and every chain control are gone from it; 应用设置 renders one merged GitHub App section (metadata plus credential state), one operations block and the share switch, with no repository block.
 - `/bots` exists in the sidebar and renders two sections (我创建的机器人, 共享给我的机器人); `/bots/<botId>` gives the owner 概览/配置 and gives every other workspace a tab-bar-less 概览.
-- The 配置 tab contains 共享与定价 (share switch, multiplier, monthly ceiling), 模型提供方, 模型链, 席位 and 运行时, and contains no copy of 能力摘要 or 挂载于.
+- The 配置 tab contains 共享与定价 (share switch, multiplier, monthly ceiling, 按工作区例外 list), 模型提供方, 模型链, 席位 and 运行时, and contains no copy of 能力摘要 or 挂载于.
+- A per-workspace override is visible only to the owner/admin, states its workspace and ceiling, and is removable; while sharing is off the section says the overrides do not take effect.
 - The read-only bot face contains no provider block, no key list, no seat control, no chain control and no tab bar — asserted by absence, not by disabling.
 - No user-visible string contains `RP`; every amount, ceiling and spend figure renders in Credits with two decimals, and every 本月 label reads 本月已用 with its ceiling or 不限.
 - The App detail header contains no bot-settings action; the App detail renders no identity fact twice.
