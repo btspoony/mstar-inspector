@@ -180,7 +180,7 @@ export const zhCN: Dictionary = {
       title: "共享与定价",
       switch: "共享给其他工作区",
       multiplier: "倍率",
-      multiplierInvalid: "请输入大于 0 的倍率。",
+      multiplierInvalid: "请输入 0.01 至 1,000 之间的倍率。",
       monthlyCap: "每月上限",
       monthlyCapHint: "单个工作区每月可消耗的 Credits 上限；留空为不限。",
       inactiveHint: "共享开关当前为关闭：倍率、每月上限与按工作区例外在共享开启前均不生效，可先在此预配置。",

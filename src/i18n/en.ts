@@ -204,7 +204,7 @@ export const en = {
       title: "Share & pricing",
       switch: "Share with other workspaces",
       multiplier: "Multiplier",
-      multiplierInvalid: "Enter a multiplier greater than 0.",
+      multiplierInvalid: "Enter a multiplier between 0.01 and 1,000.",
       monthlyCap: "Monthly ceiling",
       monthlyCapHint: "The Credits a single workspace may spend per month; blank = no ceiling.",
       inactiveHint:

@@ -3659,7 +3659,7 @@ const BOT_FACE_WRITE_COPY: Record<
   pricing: {
     notFound: "unknown bot",
     shape: "body must be { multiplier?, monthly_rp? } with at least one of them",
-    invalid: "multiplier must be greater than 0 when given, and monthly_rp a whole number greater than 0, or null",
+    invalid: "multiplier must be between 0.01 and 1,000 when given, and monthly_rp a whole number greater than 0, or null",
   },
   archive: {
     notFound: "unknown bot",

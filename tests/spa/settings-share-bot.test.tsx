@@ -261,7 +261,11 @@ describe("the bot page's share switch", () => {
       await view.click(view.buttonWith(t(locale, "common.save")));
 
       const rendered = String(view.container.textContent);
-      expect(rendered).toContain(t(locale, "botDetail.share.multiplierInvalid"));
+      const invalid = t(locale, "botDetail.share.multiplierInvalid");
+      expect(rendered).toContain(invalid);
+      // The refusal must name the enforced floor rather than the old "greater than 0" wording.
+      expect(invalid).toContain("0.01");
+      expect(invalid).not.toContain("greater than 0");
       expect(rendered).not.toContain(t(locale, "bots.overrideInvalid"));
     } finally {
       await view.cleanup();
