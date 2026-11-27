@@ -435,6 +435,7 @@ describe("the chain read batches its spend", () => {
         available: true,
         multiplier: 2.5,
         monthlyRp: null,
+        archived: false,
       },
     ]);
 

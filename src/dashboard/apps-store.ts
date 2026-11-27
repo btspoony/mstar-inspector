@@ -1681,6 +1681,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           available: boolean;
           multiplier: number;
           monthlyRp: number | null;
+          archived: boolean;
         }>
       >
     > {
@@ -1688,7 +1689,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .prepare(
           `SELECT ib.github_app_id AS app_id, ib.position, ib.bot_id, r.name, r.description,
                   r.workspace_id AS bot_workspace_id, r.scope, ws.name AS provider_workspace,
-                  r.multiplier, r.monthly_rp
+                  r.multiplier, r.monthly_rp, r.archived_at
              FROM app_install_bots ib
              JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
              JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
@@ -1707,6 +1708,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           provider_workspace: string;
           multiplier: number;
           monthly_rp: number | null;
+          archived_at: string | null;
         }>();
       const byApp = new Map<
         string,
@@ -1720,6 +1722,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           available: boolean;
           multiplier: number;
           monthlyRp: number | null;
+          archived: boolean;
         }>
       >();
       for (const row of res.results) {
@@ -1737,6 +1740,9 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           available: row.scope === "shared" || row.bot_workspace_id === workspaceId,
           multiplier: row.multiplier,
           monthlyRp: row.monthly_rp,
+          // A read-only fact: an archived bot stays mounted and listed, the
+          // relay just never selects it (T1's chain filter owns that rule).
+          archived: row.archived_at !== null,
         });
         byApp.set(row.app_id, list);
       }

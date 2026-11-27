@@ -118,7 +118,7 @@ import {
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
 import { readWorkspaceQuota } from "./quota-faces";
-import { quotaMonth, resolveWorkspaceMonthlyQuota } from "../store/quota-store";
+import { quotaMonth, resolveWorkspaceMonthlyQuota, resolveWorkspaceQuotaProfile } from "../store/quota-store";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -2200,6 +2200,7 @@ const appListRoute = async (c: DashboardContext) => {
           multiplier: bot.multiplier,
           month_used_rp: spend.get(bot.botId) ?? 0,
           monthly_rp: bot.monthlyRp,
+          archived: bot.archived,
         })),
         // `null` = no chain mounted, so nothing is metered. A number is the
         // sum of this workspace's spend through the mounted bots.
@@ -2469,10 +2470,18 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
   try {
     c.header("Cache-Control", "private, no-store");
     const defaults = await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId);
+    // Both facts hold for EVERY viewer, so they precede the role split: the SPA
+    // chooses the face before it learns whether this member manages.
+    const [viewerRelation, rpPerCredit] = await Promise.all([
+      viewerRelationRead(member.db, appRow, member.scope.workspaceId),
+      rpPerCreditRead(member.db, member.scope.workspaceId),
+    ]);
     if (!canManageApp(member.scope)) {
       return c.json({
         can_manage: false,
         workspace_id: member.scope.workspaceId,
+        viewer_relation: viewerRelation,
+        rp_per_credit: rpPerCredit,
         ...(target === null ? {} : { target_id: target.id }),
         blocked: blockedReason !== null,
         blocked_reason: blockedReason,
@@ -2513,6 +2522,8 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: member.scope.workspaceId,
+        viewer_relation: viewerRelation,
+        rp_per_credit: rpPerCredit,
         targets_many: targetsMany,
         target_id: target === null ? null : target.id,
         ...(target === null
@@ -2614,6 +2625,8 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
     return c.json({
       can_manage: true,
       workspace_id: member.scope.workspaceId,
+      viewer_relation: viewerRelation,
+      rp_per_credit: rpPerCredit,
       targets_many: targetsMany,
       ...targetOwned.top,
       app: {
@@ -4827,6 +4840,39 @@ function installationsVisibleTo(
     : apps.listInstallations(app.id);
 }
 
+export type ViewerRelation = "both" | "created" | "installed";
+
+/**
+ * Which of the two App faces a reader came for, resolved from facts that hold
+ * for every member — never from the role, because the SPA picks the face before
+ * it knows whether the viewer manages. `created` = this workspace owns the App,
+ * `installed` = it holds an `app_installations` row for it, `both` = both.
+ */
+async function viewerRelationRead(
+  db: DashboardDb,
+  app: Pick<GithubAppRow, "id" | "workspace_id">,
+  workspaceId: string,
+): Promise<ViewerRelation> {
+  const owned = app.workspace_id === workspaceId;
+  const installed = await db
+    .prepare(`SELECT 1 AS present FROM app_installations WHERE github_app_id = ?1 AND workspace_id = ?2`)
+    .bind(app.id, workspaceId)
+    .first<{ present: number }>();
+  if (owned) return installed === null ? "created" : "both";
+  return "installed";
+}
+
+/**
+ * The profile in force's credit denominator — the same reader the workspace
+ * credit block uses, so the two faces cannot disagree on what a credit costs.
+ * Throws on an empty `quota_profiles` table, exactly as that reader does.
+ */
+async function rpPerCreditRead(db: DashboardDb, workspaceId: string): Promise<number> {
+  const now = new Date();
+  const profile = await resolveWorkspaceQuotaProfile(db, workspaceId, quotaMonth(now).month, now.toISOString());
+  return profile.rpPerCredit;
+}
+
 /** One chain row of the App detail's `bots` tab. */
 export type AppChainEntry = {
   position: number;
@@ -4840,6 +4886,8 @@ export type AppChainEntry = {
   month_used_rp: number;
   /** The bot's own monthly cap (F5); `null` = no cap of its own. */
   monthly_rp: number | null;
+  /** The bot is archived: mounted and listed, never selected by the relay. */
+  archived: boolean;
 };
 
 /**
@@ -4880,6 +4928,7 @@ async function appChainRead(
     multiplier: bot.multiplier,
     month_used_rp: spend.get(bot.botId) ?? 0,
     monthly_rp: bot.monthlyRp,
+    archived: bot.archived,
   }));
 }
 

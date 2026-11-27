@@ -1418,6 +1418,7 @@ describe("the install state's read faces (D43, D35)", () => {
         multiplier: 1,
         month_used_rp: 0,
         monthly_rp: null,
+        archived: false,
       },
     ]);
   });
@@ -1447,6 +1448,7 @@ describe("the install state's read faces (D43, D35)", () => {
         multiplier: 1,
         month_used_rp: 0,
         monthly_rp: null,
+        archived: false,
       },
     ]);
   });
