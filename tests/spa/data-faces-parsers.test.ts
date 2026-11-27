@@ -5,7 +5,7 @@
  * into the page's error face instead of rendering an undefined value.
  */
 import { describe, expect, test } from "bun:test";
-import { formatCredits, parseApps, parseBotSettings, parseSettings } from "../../src/spa/pages/data";
+import { formatCredits, parseApps, parseBotSettings, parseSettings, parseUsableBots } from "../../src/spa/pages/data";
 
 const chainRow = {
   position: 0,
@@ -443,5 +443,155 @@ describe("parseApps — a pending row without can_bind is shown, not dropped", (
   test("a malformed can_bind is still a refusal — absence is the only thing tolerated", () => {
     expect(parseApps(payload([{ ...pending, can_bind: "yes" }]))?.pending_installations).toEqual([]);
     expect(parseApps(payload([{ ...pending, can_bind: null }]))?.pending_installations).toEqual([]);
+  });
+});
+
+/**
+ * QC F4-17: every new amount field is guarded to its WIRE domain, and a
+ * missing REQUIRED ceiling is not "unlimited".
+ *
+ * The producer's own shapes are the input: `overview.effective_ceiling` is
+ * computed on every successful bot read, `rp_per_credit` is the positive whole
+ * number the admin authoring route accepts, and each list row is an object.
+ * A payload that slips a fraction through would render a wrong figure instead
+ * of the page's error face, which is the one outcome a type guard exists to
+ * prevent.
+ */
+describe("amount guards — the parsers apply the writer's domain", () => {
+  const botsPayload = (overrides: Record<string, unknown> = {}) => ({
+    workspace_id: "ws-1",
+    plan_monthly_rp: 20000,
+    rp_per_credit: 1000,
+    bots: [
+      {
+        id: "bot-1",
+        name: "Acme",
+        description: null,
+        workspace_id: "ws-1",
+        workspace_name: "Acme",
+        owned: true,
+        can_manage: true,
+        scope: "owned",
+        multiplier: 1,
+        month_used_rp: 40,
+        effective_ceiling: null,
+        archived: false,
+      },
+    ],
+    ...overrides,
+  });
+
+  test("a malformed rp_per_credit fails every payload that carries one", () => {
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 60, "1000"]) {
+      expect(parseUsableBots(botsPayload({ rp_per_credit: bad })), `bots ${String(bad)}`).toBeNull();
+      expect(parseSettings({ ...settingsPayload, rp_per_credit: bad }), `settings ${String(bad)}`).toBeNull();
+      expect(
+        parseBotSettings({ ...botPayload, rp_per_credit: bad }),
+        `bot ${String(bad)}`,
+      ).toBeNull();
+    }
+    // An absent rate stays valid: that is the documented 1,000 fallback.
+    const { rp_per_credit: _omitted, ...withoutRate } = botsPayload();
+    expect(parseUsableBots(withoutRate)).not.toBeNull();
+  });
+
+  test("a malformed plan ceiling or recorded spend fails the list parse", () => {
+    for (const bad of [0, -1, 1.5, "20000"]) {
+      expect(parseUsableBots(botsPayload({ plan_monthly_rp: bad })), `plan ${String(bad)}`).toBeNull();
+    }
+    for (const bad of [-1, 1.5, Number.NaN, "40"]) {
+      expect(
+        parseUsableBots(botsPayload({ bots: [{ ...botsPayload().bots[0], month_used_rp: bad }] })),
+        `spend ${String(bad)}`,
+      ).toBeNull();
+    }
+  });
+
+  test("a non-object list row is refused, not rendered", () => {
+    const { viewer } = { viewer: { login: "alice", role: "member" } };
+    for (const bad of ["row", 7, null, [], undefined]) {
+      expect(parseApps({ viewer, apps: [bad] }), String(bad)).toBeNull();
+    }
+    // A well-formed row beside a malformed one still fails the whole parse.
+    const good = {
+      github_app_id: 1,
+      github_name: null,
+      github_slug: null,
+      github_avatar_url: null,
+      status: "active",
+      review_enabled: 1,
+      created_by: "alice",
+      health: { latest: null, rejected24h: 0 },
+    };
+    expect(parseApps({ viewer, apps: [good, 42] })).toBeNull();
+    expect(parseApps({ viewer, apps: [good] })).not.toBeNull();
+  });
+
+  test("a list row's month block must carry a recorded spend and a bounded multiplier", () => {
+    const viewer = { login: "alice", role: "member" };
+    const row = {
+      github_app_id: 1,
+      github_name: null,
+      github_slug: null,
+      github_avatar_url: null,
+      status: "active",
+      review_enabled: 1,
+      created_by: "alice",
+      health: { latest: null, rejected24h: 0 },
+      month: { used_rp: 40, owned: false, multiplier: 1 },
+    };
+    expect(parseApps({ viewer, apps: [row] })).not.toBeNull();
+    for (const bad of [
+      { used_rp: 1.5, owned: false, multiplier: 1 },
+      { used_rp: 40, owned: false, multiplier: 0 },
+      { used_rp: 40, owned: false, multiplier: 5000 },
+      { used_rp: 40, owned: "no", multiplier: 1 },
+      "month",
+    ]) {
+      expect(parseApps({ viewer, apps: [{ ...row, month: bad }] }), JSON.stringify(bad)).toBeNull();
+    }
+    // `null` is the "no chain mounted" fact the dash renders.
+    expect(parseApps({ viewer, apps: [{ ...row, month: null }] })).not.toBeNull();
+  });
+
+  test("an overview without effective_ceiling is a failure, while explicit null is 'no ceiling'", () => {
+    const overview = (patch: Record<string, unknown>) => ({
+      provider_workspace: "Acme",
+      month_used_rp: 40,
+      plan_monthly_rp: null,
+      effective_ceiling: null,
+      default_chain: null,
+      mounted_apps: [],
+      ...patch,
+    });
+    expect(parseBotSettings({ ...botPayload, overview: overview({}) })).not.toBeNull();
+
+    const { effective_ceiling: _omitted, ...withoutCeiling } = overview({});
+    // A missing REQUIRED ceiling is NOT unlimited: it fails the parse.
+    expect(parseBotSettings({ ...botPayload, overview: withoutCeiling })).toBeNull();
+    for (const bad of [0, -1, 1.5, "3000", Number.MAX_SAFE_INTEGER + 2]) {
+      expect(parseBotSettings({ ...botPayload, overview: overview({ effective_ceiling: bad }) })).toBeNull();
+    }
+    for (const bad of [-1, 1.5, Number.NaN]) {
+      expect(parseBotSettings({ ...botPayload, overview: overview({ month_used_rp: bad }) })).toBeNull();
+    }
+  });
+
+  test("the bot payload's own pricing fields stay inside the shared domains", () => {
+    for (const bad of [0, -1, 5000]) {
+      expect(
+        parseBotSettings({ ...botPayload, app: { ...botPayload.app, multiplier: bad } }),
+        `multiplier ${String(bad)}`,
+      ).toBeNull();
+    }
+    for (const bad of [0, -1, 1.5]) {
+      expect(
+        parseBotSettings({ ...botPayload, app: { ...botPayload.app, monthly_rp: bad } }),
+        `monthly_rp ${String(bad)}`,
+      ).toBeNull();
+    }
+    // The consumer payload omits both: absence is not a malformed value.
+    const { multiplier: _m, monthly_rp: _r, ...app } = { ...botPayload.app };
+    expect(parseBotSettings({ ...botPayload, app })).not.toBeNull();
   });
 });

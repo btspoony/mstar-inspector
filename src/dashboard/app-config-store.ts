@@ -1036,6 +1036,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    */
   function liveProbeStatement(appId: string): AppConfigStatement {
     return db
+      // shortcut: tenant-bypass — addressed by the bot id the caller already
+      // passed ownership + role on; projects two EXISTS flags only.
       .prepare(
         `SELECT EXISTS (SELECT 1 FROM review_bots b
                          WHERE b.id = ? AND b.deleted_at IS NULL AND b.archived_at IS NULL) AS live,

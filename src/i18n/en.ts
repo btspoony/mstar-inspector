@@ -257,12 +257,6 @@ export const en = {
       addBot: "Add bot",
       archivedSkipped: "Archived — skipped",
     },
-    creator: {
-      tabSettings: "App settings",
-      tabDelivery: "Delivery",
-      tabInstalled: "Installed",
-      appSection: "GitHub App",
-    },
 
     backToApps: "Back to Apps",
     tabSettings: "App settings",

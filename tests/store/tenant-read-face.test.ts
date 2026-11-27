@@ -178,6 +178,12 @@ const MAINTENANCE_SITES: Record<string, number> = {
   // liveness (Apps without a live Bot, chain rows whose Bot is gone); both
   // project COUNT(*) only.
   "admin/data-upgrades/split-integrity.ts": 2,
+  // The bot write boundary's liveness probe: every configuration batch starts
+  // with it and every guarded statement carries the same predicate. It projects
+  // two EXISTS flags (live / present) for the id the caller already passed the
+  // ownership and role check on — no identity, no ownership column, nothing a
+  // reader could scope a different workspace's row by.
+  "dashboard/app-config-store.ts": 1,
 };
 
 /**

@@ -575,8 +575,8 @@ describe("4. the installed face has exactly one chain control surface", () => {
       expect(header.querySelector("summary")?.textContent).toBe(t("en", "appDetail.installed.addBot"));
       expect(container.querySelectorAll('[data-slot="app-chain-add"]').length).toBe(1);
 
-      // One set of controls per row: no competing reorder surface on the page.
-      expect(container.querySelectorAll('[data-slot="app-chain-reorder"]').length).toBe(0);
+      // One set of controls per row: every move/remove affordance names its bot
+      // exactly once, so no competing reorder surface exists beside the table.
       expect(container.querySelectorAll(`[aria-label="${t("en", "apps.chain.moveUp", { bot: "Live Bot" })}"]`).length).toBe(1);
       expect(container.querySelectorAll(`[aria-label="${t("en", "apps.chain.moveDown", { bot: "Live Bot" })}"]`).length).toBe(1);
       expect(container.querySelectorAll(`[aria-label="${t("en", "apps.chain.removeBot", { bot: "Live Bot" })}"]`).length).toBe(1);

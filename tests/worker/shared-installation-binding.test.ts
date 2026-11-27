@@ -341,9 +341,10 @@ describe("shared bot installations are bound to one workspace", () => {
     stubGithub(world());
     const bound = await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A);
     expect(bound.status).toBe(302);
-    // F4: a successful bind lands on the chain it created.
+    // A successful bind lands on the App's installed face — the mount whose new
+    // chain the bind just created.
     expect(bound.headers.get("location")).toBe(
-      `/dashboard/${WS_A}/apps/9501?tab=bots`,
+      `/dashboard/${WS_A}/apps/9501?from=installed`,
     );
     expect(boundTo(db, INSTALLATION_A)).toBe(WS_A);
   });

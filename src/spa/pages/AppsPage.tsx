@@ -102,6 +102,18 @@ export type AppsTab = "installed" | "created";
 
 const APP_TABS: readonly AppsTab[] = ["installed", "created"];
 
+/** The empty eligibility set: the installed-and-pending empty state. */
+const NO_INSTALLED_APPS: ReadonlySet<string> = new Set();
+
+/**
+ * The eligibility set both shared-App choosers filter with: the local ids of
+ * the Apps this workspace already installed (an install-state row's `bot_id` is
+ * the App's own id).
+ */
+export function installedAppIdsOf(installed: readonly { bot_id?: string }[]): ReadonlySet<string> {
+  return new Set(installed.map((app) => app.bot_id).filter((id): id is string => id !== undefined));
+}
+
 /**
  * F1/D8: an App is INSTALLED when this workspace holds an installation
  * relation to it — a live target, or a bound physical installation. Ownership
@@ -342,9 +354,7 @@ export function AppsView({
   const hasCreated = ownedApps.length > 0;
   const activeTab: AppsTab = tab ?? (installed.length > 0 ? "installed" : "created");
   // Apps this workspace already installed are never offered for install again.
-  const installedAppIds: ReadonlySet<string> = new Set(
-    installed.map((app) => app.bot_id).filter((id): id is string => id !== undefined),
-  );
+  const installedAppIds: ReadonlySet<string> = installedAppIdsOf(installed);
   const createAction = (
     <CreateAppChooser
       locale={locale}
@@ -461,10 +471,13 @@ function InstalledTab({
             // F9: browsing shared Apps opens the shared-APP chooser, whose
             // cards are GitHub Apps selected by `scope = 'shared'`. The Bots
             // tab lists bots, which is a different surface. The create control
-            // itself lives in the page header only — one entry per state.
+            // itself lives in the page header only — one entry per state. This
+            // branch renders only with nothing installed, so the chooser's ONE
+            // eligibility rule excludes nothing.
             <SharedAppsDialog
               locale={locale}
               sharedApps={payload.shared_apps ?? []}
+              installedAppIds={NO_INSTALLED_APPS}
               trigger={<Button variant="secondary">{t(locale, "apps.installed.browseShared")}</Button>}
             />
           ) : undefined
@@ -666,25 +679,88 @@ function PendingInstallationLine({
 }
 
 /**
- * F9: the Create dialog's shared-App cards (D22) carry the App's name,
- * description, owner and its capability summary, plus a GitHub Install action
- * that opens in a new tab — the dialog stays open so the reader can come back
- * and bind.
+ * The ONE eligibility rule both shared-App entrypoints apply: an App this
+ * workspace already installed is never offered for install again — no card, no
+ * install action, no bind-after-install hint.
  */
+export function choosableSharedApps(
+  sharedApps: readonly SharedAppCard[],
+  installedAppIds: ReadonlySet<string>,
+): SharedAppCard[] {
+  return sharedApps.filter((app) => !installedAppIds.has(app.id));
+}
+
 /**
- * F9: the shared-APP chooser. Its cards are **GitHub Apps** with
- * `scope = 'shared'`, each showing the App's own name, description and owner
- * plus one capability line per bot its chain mounts at the owner. It never
- * selects by bot id, so a shared App without a bot still appears and a private
- * App with a same-id bot does not.
+ * F9: the ONE shared-App card list (D22) — the App's own name, description,
+ * owner and capability summary plus a GitHub Install action that opens in a
+ * new tab, so the dialog stays open and the reader can come back and bind. Its
+ * cards are **GitHub Apps** with `scope = 'shared'`; it never selects by bot id,
+ * so a shared App without a bot still appears and a private App with a same-id
+ * bot does not.
+ */
+export function SharedAppCardList({
+  locale,
+  apps,
+  emptyCopy,
+}: {
+  locale: SpaBoot["locale"];
+  apps: readonly SharedAppCard[];
+  /** The copy a chooser states when its eligibility rule leaves nothing. */
+  emptyCopy: string;
+}) {
+  if (apps.length === 0) return <p className="text-sm text-muted-foreground">{emptyCopy}</p>;
+  return (
+    <ul className="flex flex-col gap-3" data-slot="shared-apps">
+      {apps.map((app) => {
+        const installHref = appInstallHref(app.github_slug);
+        return (
+          <li key={app.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
+            <span className="text-sm font-semibold">{app.name}</span>
+            {app.github_description ? (
+              <span className="text-sm text-muted-foreground">{app.github_description}</span>
+            ) : null}
+            {app.owner_workspace_name ? (
+              <span className="text-xs text-muted-foreground">
+                {t(locale, "apps.cardOwner", { workspace: app.owner_workspace_name })}
+              </span>
+            ) : null}
+            {app.capability ? (
+              <span className="text-xs text-muted-foreground">{app.capability}</span>
+            ) : null}
+            <span className="flex flex-wrap items-center gap-2 pt-1">
+              {installHref === null ? (
+                <span className="text-xs text-muted-foreground">{t(locale, "settings.installNoSlug")}</span>
+              ) : (
+                <Button asChild variant="secondary" size="sm">
+                  <a href={installHref} target="_blank" rel="noreferrer noopener">
+                    {t(locale, "apps.cardInstall")}
+                  </a>
+                </Button>
+              )}
+              <span className="text-xs text-muted-foreground">{t(locale, "apps.installReturnHint")}</span>
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/**
+ * F9: the installed empty state's browse-shared chooser. Same card list and
+ * same eligibility rule as the header's create dialog; this branch renders only
+ * where nothing is installed, so the rule excludes nothing here.
  */
 export function SharedAppsDialog({
   locale,
   sharedApps,
+  installedAppIds,
   trigger,
 }: {
   locale: SpaBoot["locale"];
   sharedApps: SharedAppCard[];
+  /** Local ids of the Apps this workspace already installed. */
+  installedAppIds: ReadonlySet<string>;
   trigger: ReactNode;
 }) {
   return (
@@ -695,43 +771,11 @@ export function SharedAppsDialog({
           <DialogTitle>{t(locale, "apps.sharedApps.title")}</DialogTitle>
           <DialogDescription>{t(locale, "apps.sharedApps.copy")}</DialogDescription>
         </DialogHeader>
-        {sharedApps.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "apps.sharedApps.empty")}</p>
-        ) : (
-          <ul className="flex flex-col gap-3" data-slot="shared-apps">
-            {sharedApps.map((app) => {
-              const installHref = appInstallHref(app.github_slug);
-              return (
-                <li key={app.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
-                  <span className="text-sm font-semibold">{app.name}</span>
-                  {app.github_description ? (
-                    <span className="text-sm text-muted-foreground">{app.github_description}</span>
-                  ) : null}
-                  {app.owner_workspace_name ? (
-                    <span className="text-xs text-muted-foreground">
-                      {t(locale, "apps.cardOwner", { workspace: app.owner_workspace_name })}
-                    </span>
-                  ) : null}
-                  {app.capability ? (
-                    <span className="text-xs text-muted-foreground">{app.capability}</span>
-                  ) : null}
-                  <span className="flex flex-wrap items-center gap-2 pt-1">
-                    {installHref === null ? (
-                      <span className="text-xs text-muted-foreground">{t(locale, "settings.installNoSlug")}</span>
-                    ) : (
-                      <Button asChild variant="secondary" size="sm">
-                        <a href={installHref} target="_blank" rel="noreferrer noopener">
-                          {t(locale, "apps.cardInstall")}
-                        </a>
-                      </Button>
-                    )}
-                    <span className="text-xs text-muted-foreground">{t(locale, "apps.installReturnHint")}</span>
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+        <SharedAppCardList
+          locale={locale}
+          apps={choosableSharedApps(sharedApps, installedAppIds)}
+          emptyCopy={t(locale, "apps.sharedApps.empty")}
+        />
         <DialogFooter>
           <DialogClose asChild>
             <Button variant="outline">{t(locale, "common.cancel")}</Button>
@@ -764,7 +808,6 @@ function CreateAppChooser({
   /** Local ids of the Apps this workspace already installed. */
   installedAppIds: ReadonlySet<string>;
 }) {
-  const choices = sharedApps.filter((app) => !installedAppIds.has(app.id));
   return (
     <div className="flex flex-wrap items-center gap-2" data-slot="create-app-chooser">
       <Dialog>
@@ -781,43 +824,11 @@ function CreateAppChooser({
           </form>
           <div className="flex flex-col gap-3 border-t border-border pt-3">
             <h3 className="text-sm font-semibold">{t(locale, "apps.createDialog.shared")}</h3>
-            {choices.length > 0 ? (
-              <ul className="flex flex-col gap-3" data-slot="shared-apps">
-                {choices.map((app) => {
-                  const installHref = appInstallHref(app.github_slug);
-                  return (
-                    <li key={app.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
-                      <span className="text-sm font-semibold">{app.name}</span>
-                      {app.github_description ? (
-                        <span className="text-sm text-muted-foreground">{app.github_description}</span>
-                      ) : null}
-                      {app.owner_workspace_name ? (
-                        <span className="text-xs text-muted-foreground">
-                          {t(locale, "apps.cardOwner", { workspace: app.owner_workspace_name })}
-                        </span>
-                      ) : null}
-                      {app.capability ? (
-                        <span className="text-xs text-muted-foreground">{app.capability}</span>
-                      ) : null}
-                      <span className="flex flex-wrap items-center gap-2 pt-1">
-                        {installHref === null ? (
-                          <span className="text-xs text-muted-foreground">{t(locale, "settings.installNoSlug")}</span>
-                        ) : (
-                          <Button asChild variant="secondary" size="sm">
-                            <a href={installHref} target="_blank" rel="noreferrer noopener">
-                              {t(locale, "apps.cardInstall")}
-                            </a>
-                          </Button>
-                        )}
-                        <span className="text-xs text-muted-foreground">{t(locale, "apps.installReturnHint")}</span>
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : (
-              <p className="text-sm text-muted-foreground">{t(locale, "apps.createDialog.noSharedBots")}</p>
-            )}
+            <SharedAppCardList
+              locale={locale}
+              apps={choosableSharedApps(sharedApps, installedAppIds)}
+              emptyCopy={t(locale, "apps.createDialog.noSharedBots")}
+            />
           </div>
           <DialogFooter>
             <DialogClose asChild>

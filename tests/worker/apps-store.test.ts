@@ -820,7 +820,11 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     }
   });
 
-  test("src/ has exactly one INSERT INTO review_bots site (createApp is the only creation path)", () => {
+  // Two creation paths, both in the store and both legitimate: `createApp`
+  // (an App plus its same-id bot) and `createBot` (a standalone bot). The pin
+  // keeps every other module out of the table — an ad-hoc INSERT elsewhere
+  // fails here — so the intent survives the second path.
+  test("src/ holds exactly the two creation-path INSERT INTO review_bots sites, both in apps-store", () => {
     const sites: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -828,13 +832,12 @@ describe("apps-store workspace dual write (migration 0026)", () => {
         if (entry.isDirectory()) walk(path);
         else if (entry.name.endsWith(".ts")) {
           const hits = readFileSync(path, "utf8").match(/INSERT INTO review_bots\b/g)?.length ?? 0;
-          if (hits > 0) sites.push(`${path}:${hits}`);
+          if (hits > 0) sites.push(`${path.slice(join(import.meta.dir, "../../").length)}:${hits}`);
         }
       }
     };
     walk(join(import.meta.dir, "../../src"));
-    expect(sites).toHaveLength(1);
-    expect(sites[0]).toEndWith(`apps-store.ts:1`);
+    expect(sites).toEqual(["src/dashboard/apps-store.ts:2"]);
   });
 });
 

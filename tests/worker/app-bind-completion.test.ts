@@ -19,6 +19,7 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue, verifyValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
+import { parseAppDetailFrom } from "../../src/spa/pages/AppDetailPage";
 import { parseSettings, type SettingsPayload } from "../../src/spa/pages/data";
 import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
@@ -207,6 +208,29 @@ describe("F2-6 — a first bind FINISHES", () => {
       .query("SELECT 1 AS present FROM app_installations WHERE github_app_id = ? AND workspace_id = ?")
       .get(APP_ROW, CALLER_WS);
     expect(state).not.toBeNull();
+  });
+
+  test("a completed bind lands on the App's installed face, where its new chain is shown", async () => {
+    const db = await orphanWorld();
+    stubGithub();
+    const { callback } = await bindThroughOAuth(db, CALLER_WS, INSTALLATION);
+    expect(callback.status).toBe(302);
+    const landing = callback.headers.get("Location");
+    // The creator settings tab shows neither the chain nor the install state the
+    // caller just finished binding; the retired `?tab=bots` spelling resolves to
+    // exactly that tab. The landing is the installed face.
+    expect(landing).toBe(`/dashboard/${CALLER_WS}/apps/${GITHUB_APP_ID}?from=installed`);
+    const search = new URL(landing!, "https://worker.local").search;
+    expect(parseAppDetailFrom(search)).toBe("installed");
+    // The destination the redirect names really opens for that caller, and it
+    // opens on the face the parameter selects.
+    const detail = await call(db, `/dashboard/${CALLER_WS}/api/apps/${GITHUB_APP_ID}`, {
+      method: "GET",
+      headers: await headers("alice"),
+    });
+    expect(detail.status).toBe(200);
+    const body = (await detail.json()) as Record<string, unknown>;
+    expect(body.viewer_relation).toBe("installed");
   });
 
   test("a mismatched GitHub account is refused and binds nothing", async () => {

@@ -12,7 +12,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
-import { AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
+import { AppsPage, AppsView, choosableSharedApps, installedAppIdsOf } from "../../src/spa/pages/AppsPage";
 import type { AppsPayload, SharedAppCard } from "../../src/spa/pages/data";
 import { withLocation } from "./browser-stub";
 import { installDom, withMarkup } from "./dom";
@@ -391,5 +391,76 @@ describe("a history entry carrying the legacy bots tab redirects", () => {
       globalThis.fetch = realFetch;
       cleanup();
     }
+  });
+});
+
+/**
+ * QC F4-15: ONE shared-App card list and ONE eligibility rule, used by both
+ * entrypoints. These tests pin the ENTRYPOINTS' behaviour — the header's create
+ * dialog beside rows, and the installed empty state's browse action — not the
+ * template's shape.
+ */
+describe("both shared-App entrypoints apply one eligibility rule", () => {
+  test("the browse-shared chooser offers every shared App when nothing is installed", async () => {
+    // The installed tab with nothing installed: its empty state carries the
+    // browse action, and opening it renders the same card list.
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps?tab=installed");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(payload([], { shared_apps: [SHARED_INSTALLED, SHARED_FRESH] })), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(AppsPage, { boot: BOOT })));
+      await act(async () => {});
+      const trigger =
+        [...win.document.querySelectorAll("button")].find(
+          (node) => node.textContent === t("en", "apps.installed.browseShared"),
+        ) ?? null;
+      expect(trigger).not.toBeNull();
+      await act(async () => {
+        trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      await act(async () => {});
+      const dialog = win.document.querySelector('[role="dialog"]');
+      expect(dialog).not.toBeNull();
+      expect(dialog?.textContent).toContain("Installed Shared App");
+      expect(dialog?.textContent).toContain("Fresh Shared App");
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("an App the workspace already installed never reaches the header dialog's cards", async () => {
+    const page = await mountWithDialog({
+      viewer: { login: "octocat", role: "admin" },
+      apps: [app({ bot_id: "app-shared-installed", github_slug: "shared-installed", installed: true })],
+      shared_bots: [],
+      shared_apps: [SHARED_INSTALLED, SHARED_FRESH],
+    });
+    try {
+      const dialog = page.dialog();
+      expect(dialog?.textContent).toContain("Fresh Shared App");
+      expect(dialog?.textContent).not.toContain("Installed Shared App");
+    } finally {
+      await page.cleanup();
+    }
+  });
+
+  test("the eligibility predicate itself excludes exactly the installed local ids", () => {
+    expect(choosableSharedApps([SHARED_INSTALLED, SHARED_FRESH], new Set(["app-shared-installed"]))).toEqual([
+      SHARED_FRESH,
+    ]);
+    expect(choosableSharedApps([SHARED_INSTALLED, SHARED_FRESH], new Set())).toEqual([
+      SHARED_INSTALLED,
+      SHARED_FRESH,
+    ]);
+    expect(installedAppIdsOf([app({ bot_id: "a" }), app({ bot_id: "b" })])).toEqual(new Set(["a", "b"]));
   });
 });

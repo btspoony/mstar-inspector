@@ -5292,8 +5292,11 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
     botId: app.id,
     githubAppId: app.github_app_id,
     installationId,
-    // F4: a successful bind lands where its new chain is shown.
-    returnTo: `/dashboard/${encodeURIComponent(workspaceRef)}/apps/${app.github_app_id}?tab=bots`,
+    // A successful bind lands on the App's INSTALLED face — the mount whose new
+    // chain the bind just created. The legacy `?tab=bots` spelling resolves to
+    // the creator settings tab, which shows neither the chain nor the install
+    // state the caller just finished binding.
+    returnTo: `/dashboard/${encodeURIComponent(workspaceRef)}/apps/${app.github_app_id}?from=installed`,
     exp: Math.floor(Date.now() / 1000) + BIND_STATE_MAX_AGE_SEC,
   };
   const state = await signValue(JSON.stringify(payload), secrets.sessionSecret);

@@ -1,6 +1,6 @@
 
 import { FREE_SLOT_REFUSAL, WORKSPACE_CREATION_CLOSED_REFUSAL } from "../../dashboard/entitlement";
-import { isBotMultiplier, isRpCeiling, RP_CEILING_MAX } from "../../contracts/rp-limits";
+import { isBotMultiplier, isRpAmount, isRpCeiling, isRpPerCredit, RP_CEILING_MAX } from "../../contracts/rp-limits";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 
 export type Role = "admin" | "member";
@@ -131,6 +131,20 @@ export type AppsPayload = {
   rp_per_credit?: number;
 };
 
+/**
+ * One list row's month block, or `null` when the field is absent/nil. `used_rp`
+ * is a recorded spend (a whole number, zero allowed) and the multiplier is the
+ * chain's product — the same domains the writer and the detail parsers apply.
+ */
+function isAppsRowMonth(value: unknown): value is { used_rp: number; owned: boolean; multiplier: number } {
+  return (
+    isRecord(value) &&
+    isRpAmount(value.used_rp) &&
+    typeof value.owned === "boolean" &&
+    isBotMultiplier(value.multiplier)
+  );
+}
+
 /** One unbound physical installation of an App the workspace may install through. */
 export type PendingBindRow = {
   installation_id: number;
@@ -219,7 +233,7 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     typeof value.can_manage === "boolean" &&
     isBotScope(value.scope) &&
     isBotMultiplier(value.multiplier) &&
-    typeof value.month_used_rp === "number" &&
+    isRpAmount(value.month_used_rp) &&
     (value.effective_ceiling === null || isRpCeiling(value.effective_ceiling)) &&
     typeof value.archived === "boolean"
   );
@@ -229,14 +243,19 @@ export function parseUsableBots(data: unknown): UsableBotsPayload | null {
   if (!isRecord(data)) return null;
   if (typeof data.workspace_id !== "string") return null;
   if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
-  if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && typeof data.plan_monthly_rp !== "number") {
+  // `null` is a known unlimited plan; a present number must sit in the RP
+  // ceiling domain, and an absent field is the unknown state the flag marks.
+  if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && !isRpCeiling(data.plan_monthly_rp)) {
     return null;
   }
-  // Same guard the App-detail parser applies: a present rate must be usable.
-  if (data.rp_per_credit !== undefined && !isPositiveFinite(data.rp_per_credit)) return null;
+  // Same guard the App-detail parser applies: a present rate must be the whole
+  // positive number the profile writer accepts, never a fraction or zero.
+  if (data.rp_per_credit !== undefined && !isRpPerCredit(data.rp_per_credit)) return null;
   if (!Array.isArray(data.bots)) return null;
   const bots: UsableBotRow[] = [];
   for (const row of data.bots) {
+    // The row rule itself starts at `isRecord`, so a non-object row is refused
+    // here like any other malformed one — never rendered half-read.
     if (!isUsableBotRow(row)) return null;
     bots.push(row);
   }
@@ -976,11 +995,18 @@ export type BotOverview = {
 function parseBotOverview(value: unknown): BotOverview | null {
   if (!isRecord(value)) return null;
   if (typeof value.provider_workspace !== "string") return null;
-  if (typeof value.month_used_rp !== "number") return null;
-  if (value.plan_monthly_rp !== null && typeof value.plan_monthly_rp !== "number") return null;
-  if (value.effective_ceiling !== undefined && value.effective_ceiling !== null && !isRpCeiling(value.effective_ceiling)) {
+  if (!isRpAmount(value.month_used_rp)) return null;
+  // The plan ceiling is genuinely optional: `null` is a known unlimited plan,
+  // and the field is absent on a payload whose plan could not be resolved.
+  if (value.plan_monthly_rp !== undefined && value.plan_monthly_rp !== null && !isRpCeiling(value.plan_monthly_rp)) {
     return null;
   }
+  // The EFFECTIVE ceiling is REQUIRED: the server computes it on every
+  // successful bot read (`override else bot default`). An absent value would
+  // read as "unlimited" through `?? null`, which is exactly the wrong answer —
+  // only an explicit `null` means this bot has no ceiling for this workspace.
+  if (value.effective_ceiling === undefined) return null;
+  if (value.effective_ceiling !== null && !isRpCeiling(value.effective_ceiling)) return null;
   if (value.default_chain !== null && typeof value.default_chain !== "string") return null;
   if (!Array.isArray(value.mounted_apps)) return null;
   for (const row of value.mounted_apps) {
@@ -997,8 +1023,8 @@ function parseBotOverview(value: unknown): BotOverview | null {
   return {
     provider_workspace: value.provider_workspace,
     month_used_rp: value.month_used_rp,
-    plan_monthly_rp: value.plan_monthly_rp,
-    effective_ceiling: value.effective_ceiling ?? null,
+    plan_monthly_rp: value.plan_monthly_rp ?? null,
+    effective_ceiling: value.effective_ceiling,
     default_chain: value.default_chain,
     mounted_apps: value.mounted_apps.map((row) => ({
       id: row.id,
@@ -2256,17 +2282,22 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
-  if (data.rp_per_credit !== undefined && !isPositiveFinite(data.rp_per_credit)) return null;
-  // Chain rows on the list face pass the same guard as the detail parser: a
-  // malformed row fails the whole parse instead of rendering half a chain.
+  if (data.rp_per_credit !== undefined && !isRpPerCredit(data.rp_per_credit)) return null;
+  if (data.month_plan_rp !== undefined && data.month_plan_rp !== null && !isRpCeiling(data.month_plan_rp)) {
+    return null;
+  }
+  if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
+  // A row is an object first: `isRecord(app)` inside the chain guard alone would
+  // let a non-object row through and render half a list. Chain rows pass the
+  // same guard as the detail parser: a malformed row fails the whole parse
+  // rather than rendering half a chain.
   for (const app of data.apps) {
-    if (
-      isRecord(app) &&
-      app.chain !== undefined &&
-      (!Array.isArray(app.chain) || !app.chain.every(isAppChainEntry))
-    ) {
+    if (!isRecord(app)) return null;
+    if (app.chain !== undefined && (!Array.isArray(app.chain) || !app.chain.every(isAppChainEntry))) {
       return null;
     }
+    if (app.month !== undefined && app.month !== null && !isAppsRowMonth(app.month)) return null;
+    if (app.installations !== undefined && !isPendingInstallationList(app.installations)) return null;
   }
   // A pending row is an installation the workspace really has. A row whose
   // `can_bind` is missing is an OLDER payload: it is kept and shown with the
@@ -2706,10 +2737,6 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-function isPositiveFinite(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0;
-}
-
 /**
  * RP rendered as Credits. The 1,000 fallback is the ADR-documented rate
  * (1 Credit = 1,000 RP) for when the operator profile is unreadable and the
@@ -2722,7 +2749,7 @@ export function formatCredits(rp: number, rpPerCredit?: number): string {
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data)) return null;
   if (!isViewerRelation(data.viewer_relation)) return null;
-  if (data.rp_per_credit !== undefined && !isPositiveFinite(data.rp_per_credit)) return null;
+  if (data.rp_per_credit !== undefined && !isRpPerCredit(data.rp_per_credit)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
@@ -2857,6 +2884,13 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (app.status !== null && typeof app.status !== "string") return null;
   if (!isBotScope(app.scope)) return null;
   if (typeof app.sandbox_image_id !== "string") return null;
+  // The pricing pair is the bot's own stored values: absent on the consumer
+  // payload, and inside the shared RP/multiplier domain when present. A
+  // fraction or an out-of-domain ceiling would fail the mounted-chain parser on
+  // the NEXT reader, so it fails here too.
+  if (app.multiplier !== undefined && app.multiplier !== null && !isBotMultiplier(app.multiplier)) return null;
+  if (app.monthly_rp !== undefined && app.monthly_rp !== null && !isRpCeiling(app.monthly_rp)) return null;
+  if (data.rp_per_credit !== undefined && !isRpPerCredit(data.rp_per_credit)) return null;
   if (
     !isNullableString(app.last_webhook_at) ||
     !isNullableString(app.github_name) ||
@@ -2868,7 +2902,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   ) {
     return null;
   }
-  if (!Array.isArray(data.installations)) return null;
+  if (!isPendingInstallationList(data.installations)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (data.model_chain !== null && typeof data.model_chain !== "string") return null;
   if (!isRecord(data.model_roles) || !Array.isArray(data.model_chains)) return null;

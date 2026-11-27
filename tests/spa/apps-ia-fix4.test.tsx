@@ -111,6 +111,7 @@ const BOT_PAYLOAD = {
     provider_workspace: "Other",
     month_used_rp: 42,
     plan_monthly_rp: null,
+    effective_ceiling: null,
     default_chain: null,
     mounted_apps: [],
   },

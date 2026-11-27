@@ -229,12 +229,6 @@ export const zhCN: Dictionary = {
       addBot: "添加机器人",
       archivedSkipped: "已归档——跳过",
     },
-    creator: {
-      tabSettings: "应用设置",
-      tabDelivery: "投递状态",
-      tabInstalled: "已安装",
-      appSection: "GitHub App",
-    },
     backToApps: "返回应用",
     tabSettings: "应用设置",
     tabDelivery: "投递状态",

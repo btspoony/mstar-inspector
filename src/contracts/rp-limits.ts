@@ -41,3 +41,22 @@ export function isBotMultiplier(value: unknown): value is number {
 export function isRpPrice(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= RP_CEILING_MAX;
 }
+
+/**
+ * A recorded spend: a whole number of RP, zero allowed (nothing metered yet).
+ * A reader that accepted a fraction or a NaN here would print a figure the
+ * ledger can never hold.
+ */
+export function isRpAmount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * The operator profile's credit denominator: the positive whole number
+ * `admin/quota-versions.ts` accepts when a version is authored. A reader that
+ * accepted zero or a fraction would divide by something the writer never
+ * stores — and `formatCredits` would render Infinity or a truncated rate.
+ */
+export function isRpPerCredit(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
