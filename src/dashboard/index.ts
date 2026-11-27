@@ -59,7 +59,9 @@ import {
   type LedgerScope,
   type PullRequestReviewing,
   type BotScope,
-  setBotScope,
+  type BotScopedRow,
+  setAppScope,
+  setReviewBotScope,
 } from "./apps-store";
 import {
   checkGateOf,
@@ -104,12 +106,14 @@ import {
   MemberCapError,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
   checkEntitlement,
+  UNLIMITED_PLAN_ID,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
   sharedBotAvailability,
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
 import { readWorkspaceQuota } from "./quota-faces";
+import { quotaMonth, resolveWorkspaceMonthlyQuota } from "../store/quota-store";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -158,6 +162,7 @@ import {
   parseModelChain,
   type AppConfigBatchFace,
   type AppConfigStore,
+  type BotWriteAuthority,
   type CustomProviderApi,
   type CustomProviderModelMeta,
   type CustomProviderModelsMeta,
@@ -603,7 +608,12 @@ function errorTypeName(err: unknown): string {
 }
 
 function isAppsUniqueViolation(err: unknown, column: "github_app_id"): boolean {
-  return err instanceof Error && err.message.includes(`review_bots.${column}`);
+  // 0115 moved the credential row (and its UNIQUE) to github_apps; the
+  // bot-era prefix stays matched so a pre-migration world still classifies.
+  return (
+    err instanceof Error &&
+    (err.message.includes(`github_apps.${column}`) || err.message.includes(`review_bots.${column}`))
+  );
 }
 
 const DASHBOARD_MOUNT = "/dashboard";
@@ -2039,9 +2049,22 @@ async function liveTargetsForBot(
 }
 
 function appDisplayName(
-  app: Pick<GithubAppRow, "github_name" | "github_slug" | "github_app_id">,
+  app: {
+    name?: string | null;
+    github_name: string | null;
+    github_slug: string | null;
+    github_app_id: number | null;
+  },
 ): string {
-  return app.github_name ?? app.github_slug ?? String(app.github_app_id);
+  // Post-split bot routes carry null placeholders for every App field (F2), so
+  // the BOT's own name is what a notice prints there; an App-shaped row still
+  // resolves through its GitHub metadata, then the bare id.
+  return (
+    app.github_name ??
+    app.github_slug ??
+    app.name ??
+    (app.github_app_id === null ? "the app" : String(app.github_app_id))
+  );
 }
 
 type BlockedReason = "bot_not_shared";
@@ -2072,22 +2095,28 @@ function blockedReasonFor(
  * into chunks of up to 90 bots to stay under D1's bound-parameter cap, so the
  * cost is two statements per chunk: four for any workspace under 90 Apps of
  * each kind.
- * A request lists the workspace's own bots plus every `shared` bot it holds a
- * live target on (`targetedBotIds`) — the target is the entitlement, so a
- * target created on an official bot does not vanish from this list.
+ * A request lists the Apps this workspace owns plus every App its install state
+ * names (D43), so the health column's cost follows the list the caller sees.
  * shortcut: the workspace filter runs over the joined list in memory
  * (single-tenant scale today); upgrade: to a workspace-filtered store query
  * when a workspace can hold enough Apps for the scan to matter.
  */
+/**
+ * D43, final disposition: the App list's MEMBERSHIP IS the install state. A row
+ * appears because `app_installations` has a row for `(App, this workspace)` —
+ * written by `createApp`, the first bind, the revival path and the backfill —
+ * and because this workspace owns the App. Targets and physical installations
+ * decide nothing here: they cannot resurrect an App the workspace has no state
+ * for, and cannot hide one it does (a bound App whose owner stopped sharing
+ * keeps its state and stays listed).
+ */
 async function appsListWithHealth(
   apps: ReturnType<typeof createReviewBotsStore>,
   scope: WorkspaceScope,
-  targetedBotIds: ReadonlySet<string>,
+  installedIds: ReadonlySet<string>,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
   const rows = (await apps.listApps()).filter(
-    (app) =>
-      app.workspace_id === scope.workspaceId ||
-      (app.scope === "shared" && targetedBotIds.has(app.id)),
+    (app) => app.workspace_id === scope.workspaceId || installedIds.has(app.id),
   );
   const owned = rows.filter((app) => canWriteBotScope(app, scope));
   const consumed = rows.filter((app) => !canWriteBotScope(app, scope));
@@ -2105,18 +2134,78 @@ const appListRoute = async (c: DashboardContext) => {
   const apps = createReviewBotsStore(gate.db);
   const targetByBot = new Map(
     (await createTargetsStore(gate.db).listLive(gate.scope.workspaceId)).map((target) => [
-      target.bot_id,
+      target.app_id,
       target,
     ]),
   );
   const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
-  const rows = await appsListWithHealth(apps, gate.scope, new Set(targetByBot.keys()));
+  // D43: the installed set IS the install state, and it is what the LIST is
+  // built from, not a post-filter.
+  const installedIds = new Set(await apps.listInstalledBotIds(gate.scope.workspaceId));
+  const rows = await appsListWithHealth(apps, gate.scope, installedIds);
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await gate.db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(gate.scope.workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  // F1: an App's month state comes from the bots its CHAIN mounts — never from
+  // a same-id bot. No chain means `null`, which the SPA renders as the dash.
+  const chains = await apps.listInstallChainBots(gate.scope.workspaceId);
+  // Every live installation this workspace bound, per App — one statement for
+  // the whole page, never a read per row.
+  const boundInstallations = await apps.listBoundInstallationsByWorkspace(gate.scope.workspaceId);
+  const quota = await readPlanMonthlyRp(
+    gate.db,
+    gate.scope.workspaceId,
+    new Date(),
+    deploymentModeOf(c.env.DEPLOYMENT_MODE),
+  );
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
+    // F10: an UNKNOWN ceiling is an explicit error state, not an omitted field
+    // that a UI could read as "no ceiling".
+    ...(quota.kind === "unknown" ? { quota_error: true } : {}),
+    ...(quota.kind === "unknown" ? {} : { month_plan_rp: quota.kind === "unlimited" ? null : quota.rp }),
     apps: rows.map((app) => {
       const target = targetByBot.get(app.id);
+      const chain = chains.get(app.id) ?? [];
       return {
         github_app_id: app.github_app_id,
+        owned: app.workspace_id === gate.scope.workspaceId,
+        installed: installedIds.has(app.id),
+        // The workspace's own installations of this App, live only.
+        installations: boundInstallations.get(app.id) ?? [],
+        // The ordered chain: position is the array order, and each bot carries
+        // its own name, provider workspace, multiplier and this month's spend.
+        chain: chain.map((bot) => ({
+          position: bot.position,
+          bot_id: bot.botId,
+          name: bot.name,
+          description: bot.description,
+          provider_workspace: bot.providerWorkspace,
+          owned: bot.owned,
+          available: bot.available,
+          multiplier: bot.multiplier,
+          month_used_rp: spend.get(bot.botId) ?? 0,
+          monthly_rp: bot.monthlyRp,
+        })),
+        // `null` = no chain mounted, so nothing is metered. A number is the
+        // sum of this workspace's spend through the mounted bots.
+        month:
+          chain.length === 0
+            ? null
+            : {
+                used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
+                owned: chain.every((bot) => bot.owned),
+                multiplier: chain.reduce((product, bot) => product * bot.multiplier, 1),
+              },
         bot_id: app.id,
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
@@ -2139,8 +2228,104 @@ const appListRoute = async (c: DashboardContext) => {
         },
       };
     }),
+    // F9: the chooser lists shared GitHub AppS, selected by `scope`.
+    shared_apps: await apps.listSharedApps(gate.scope.workspaceId),
     shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
+    // The installed tab's pending-bind rows: every unbound physical
+    // installation of an App this workspace may install through — its own, or a
+    // shared one. Pending is the ABSENCE of a bind, which is a different fact
+    // from install-state membership (D43).
+    pending_installations: await apps.listWorkspacePendingInstallationsNamed(gate.scope.workspaceId),
   });
+};
+
+/**
+ * One ordered read of every bot this workspace may use (D6/D18): its own
+ * first — own-before-shared, name case-insensitively inside each group, the
+ * bot id as tie-break — plus the caller's month spend per bot, batched in
+ * ONE aggregate statement so the read never fans out per row.
+ */
+async function usableBotsRead(
+  db: DashboardDb,
+  workspaceId: string,
+  role: WorkspaceRole,
+  mode: DeploymentMode,
+): Promise<{
+  workspace_id: string;
+  plan_monthly_rp?: number | null;
+  bots: Array<Record<string, unknown>>;
+}> {
+  const rows = await createReviewBotsStore(db).listUsableBots(workspaceId);
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total
+           FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  const quota = await readPlanMonthlyRp(db, workspaceId, new Date(), mode);
+  return {
+    workspace_id: workspaceId,
+    ...(quota.kind === "unknown" ? { quota_error: true } : {}),
+    ...(quota.kind === "unknown" ? {} : { plan_monthly_rp: quota.kind === "unlimited" ? null : quota.rp }),
+    bots: rows.map((bot) => ({
+      id: bot.id,
+      name: bot.name,
+      description: bot.description,
+      workspace_id: bot.workspace_id,
+      workspace_name: bot.workspace_name,
+      owned: bot.workspace_id === workspaceId,
+      can_manage: bot.workspace_id === workspaceId && canManageRole(role),
+      scope: bot.scope,
+      multiplier: bot.multiplier,
+      month_used_rp: spend.get(bot.id) ?? 0,
+    })),
+  };
+}
+
+/**
+ * The consuming workspace's plan ceiling (D31): NULL when the plan is
+ * unlimited, the deployment is self-hosted, or no profile row covers the
+ * plan — every such case reads as "no ceiling", never as an error.
+ */
+async function readPlanMonthlyRp(
+  db: DashboardDb,
+  workspaceId: string,
+  now: Date,
+  mode: DeploymentMode,
+): Promise<{ kind: "ceiling"; rp: number } | { kind: "unlimited" } | { kind: "unknown" }> {
+  // F10: the resolver is deployment-aware (self-hosted has no plan), and a
+  // failed read reports "unknown" — never a fabricated unlimited allowance.
+  if (mode !== "saas") return { kind: "unlimited" };
+  try {
+    const plan = await resolveWorkspacePlan(db, workspaceId, "saas");
+    if (plan.id === UNLIMITED_PLAN_ID) return { kind: "unlimited" };
+    const monthlyRp = (await resolveWorkspaceMonthlyQuota(db, workspaceId, plan.id, now)).monthlyRp;
+    // A NULL quota row is the profile's own "no ceiling" spelling.
+    return monthlyRp === null ? { kind: "unlimited" } : { kind: "ceiling", rp: monthlyRp };
+  } catch {
+    return { kind: "unknown" };
+  }
+}
+
+const usableBotsRoute = async (c: DashboardContext) => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  c.header("Cache-Control", "private, no-store");
+  return c.json(
+    await usableBotsRead(
+      gate.db,
+      gate.scope.workspaceId,
+      gate.scope.role,
+      deploymentModeOf(c.env.DEPLOYMENT_MODE),
+    ),
+  );
 };
 
 async function appStatusAction(
@@ -2163,12 +2348,66 @@ async function appStatusAction(
 }
 
 
+/**
+ * The bot-shaped row bot-configuration routes serve (task 4 F2): the bot's own
+ * columns — scope, shared_at, sandbox image, workspace — and the keys the
+ * payload keeps as PLACEHOLDERS. No App field is sourced through a same-id
+ * join: metadata/operational keys are constant null and `github_app_id` is
+ * null until `install-state-chain` resolves mounts through `app_install_bots`.
+ * For migrated rows, where the ids happen to be equal, the bot id still keys
+ * the bot-scoped config tables, so every bot write keeps working.
+ */
+export type BotRouteRow = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  scope: BotScope;
+  shared_at: string | null;
+  sandbox_image_id: string;
+  created_at: string;
+  github_app_id: number | null;
+  status: null;
+  created_by: null;
+  last_webhook_at: null;
+  github_name: null;
+  github_slug: null;
+  github_description: null;
+  github_html_url: null;
+  github_avatar_url: null;
+  github_metadata_synced_at: null;
+  review_enabled: null;
+};
+
+function botRouteRow(bot: BotScopedRow): BotRouteRow {
+  return {
+    id: bot.id,
+    workspace_id: bot.workspace_id,
+    name: bot.name,
+    scope: bot.scope,
+    shared_at: bot.shared_at,
+    sandbox_image_id: bot.sandbox_image_id,
+    created_at: bot.created_at,
+    github_app_id: null,
+    status: null,
+    created_by: null,
+    last_webhook_at: null,
+    github_name: null,
+    github_slug: null,
+    github_description: null,
+    github_html_url: null,
+    github_avatar_url: null,
+    github_metadata_synced_at: null,
+    review_enabled: null,
+  };
+}
+
 type AppSettingsGate =
   | {
       ok: true;
       session: SessionPayload;
       db: DashboardDb;
-      app: GithubAppRow;
+      /** The bot row with payload placeholders — never App-sourced fields. */
+      app: BotRouteRow;
       target: ReviewTargetRow | null;
       targets_many: boolean;
       user: DashboardUserRow;
@@ -2179,13 +2418,18 @@ type AppSettingsGate =
 async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> {
   const member = await requireMember(c);
   if (!member.ok) return member;
-  const app = await resolveScopedApp(
-    createReviewBotsStore(member.db),
-    c.req.param("appId") ?? "",
-    member.scope,
+  // Bot-configuration routes address the BOT by `review_bots.id` (`:botId`):
+  // an all-digits segment never reaches the query (the store refuses it —
+  // F1), so the two id spaces cannot be confused. Authorization is the bot's
+  // own workspace/scope; the row the payload composes is bot-shaped — no App
+  // field comes through a same-id join (F2).
+  const bot = await createReviewBotsStore(member.db).getScopedBotById(
+    c.req.param("botId") ?? "",
+    member.scope.workspaceId,
   );
-  if (!app) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  const live = await liveTargetsForBot(member.db, member.scope.workspaceId, app.id);
+  if (!bot) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
+  const app = botRouteRow(bot);
+  const live = await liveTargetsForBot(member.db, member.scope.workspaceId, bot.id);
   return {
     ok: true,
     session: member.session,
@@ -2197,6 +2441,220 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
     scope: member.scope,
   };
 }
+
+/**
+ * The App detail's settings face — the same contract as the pre-split
+ * `/api/apps/:appId/settings`: resolution by numeric GitHub App id, REAL App
+ * fields (the bot route's null placeholders stay on the bot routes), the
+ * App's own installations and pending binds, and the bot-scoped sections
+ * keyed by the SAME id (the ids are equal this release — D34 keeps them
+ * independent, so nothing here joins App onto bot).
+ */
+const appDetailSettingsRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const store = createReviewBotsStore(member.db);
+  const githubAppId = parseGithubAppId(c.req.param("appId") ?? "");
+  const appRow = githubAppId === null ? null : await store.getScopedAppByGithubId(githubAppId, member.scope.workspaceId);
+  if (!appRow) return c.json({ error: "unknown app" }, 404);
+  const live = await liveTargetsForBot(member.db, member.scope.workspaceId, appRow.id);
+  const target = live.length === 1 ? live[0]! : null;
+  const targetsMany = live.length > 1;
+  const blockedReason = blockedReasonFor(appRow, member.scope.workspaceId);
+  try {
+    c.header("Cache-Control", "private, no-store");
+    const defaults = await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId);
+    if (!canManageApp(member.scope)) {
+      return c.json({
+        can_manage: false,
+        workspace_id: member.scope.workspaceId,
+        ...(target === null ? {} : { target_id: target.id }),
+        blocked: blockedReason !== null,
+        blocked_reason: blockedReason,
+        installations: await installationsVisibleTo(store, appRow, member.scope.workspaceId),
+        // F3: the chain is a READ of the workspace's install state, visible to
+        // every member — it is what the App mounts, not a credential.
+        chain: await appChainRead(member.db, appRow.id, member.scope.workspaceId),
+        app: {
+          github_app_id: appRow.github_app_id,
+          status: appRow.status,
+          ...(target === null
+            ? {}
+            : { review_enabled: effectiveTargetSettings(target, defaults).reviewEnabled }),
+          created_by: appRow.created_by,
+          created_at: appRow.created_at,
+          github_name: appRow.github_name ?? null,
+          github_slug: appRow.github_slug ?? null,
+          id: appRow.id,
+          github_description: appRow.github_description ?? null,
+          github_html_url: appRow.github_html_url ?? null,
+          github_avatar_url: appRow.github_avatar_url ?? null,
+          ...(blockedReason === null
+            ? { github_metadata_synced_at: appRow.github_metadata_synced_at ?? null }
+            : {}),
+        },
+      });
+    }
+    // No target holds an installation id (the pre-split route already served
+    // `installation: null` here), so the bound row stays unresolved until
+    // install-state-chain owns the binding read.
+    const binding = null;
+    if (blockedReason !== null) {
+      const effective = target === null ? null : effectiveTargetSettings(target, defaults);
+      const checkGate = effective === null ? null : checkGateOf(effective);
+      const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(member.db)).value;
+      return c.json({
+        can_manage: true,
+        blocked: true,
+        blocked_reason: blockedReason,
+        workspace_id: member.scope.workspaceId,
+        targets_many: targetsMany,
+        target_id: target === null ? null : target.id,
+        ...(target === null
+          ? {}
+          : {
+              check_gate:
+                checkGate === null
+                  ? null
+                  : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+            }),
+        app: {
+          github_app_id: appRow.github_app_id,
+          id: appRow.id,
+          status: appRow.status,
+          created_by: appRow.created_by,
+          ...(target === null
+            ? {}
+            : {
+                review_enabled: effective!.reviewEnabled,
+                review_trigger_mode: effective!.triggerMode,
+                review_level: effective!.level,
+                default_review_level: defaultReviewLevel,
+              }),
+          scope: appRow.scope,
+          github_name: appRow.github_name ?? null,
+          github_slug: appRow.github_slug ?? null,
+          github_description: appRow.github_description ?? null,
+          github_html_url: appRow.github_html_url ?? null,
+          github_avatar_url: appRow.github_avatar_url ?? null,
+          github_visibility: appRow.github_visibility ?? null,
+        },
+        installation: binding,
+        // F3: a blocked manager still sees the chain it holds — rows whose bot
+        // is no longer shared render as skipped, not as an absent chain. The
+        // installations are what tells "nothing bound yet" from that.
+        installations: await installationsVisibleTo(store, appRow, member.scope.workspaceId),
+        chain: await appChainRead(member.db, appRow.id, member.scope.workspaceId),
+      });
+    }
+    const effective = target === null ? null : effectiveTargetSettings(target, defaults);
+    const checkGate = effective === null ? null : checkGateOf(effective);
+    const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(member.db)).value;
+    const officialWorkspaceId = await readOfficialWorkspaceId(member.db);
+    const targetOwned =
+      target === null
+        ? { app: {}, top: {} }
+        : {
+            app: {
+              review_enabled: effective!.reviewEnabled,
+              review_trigger_mode: effective!.triggerMode,
+              review_level: effective!.level,
+              default_review_level: defaultReviewLevel,
+            },
+            top: {
+              target_id: target.id,
+              check_gate:
+                checkGate === null
+                  ? null
+                  : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+            },
+          };
+    if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+      return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
+    }
+    // F11: the App face is App-scoped. Nothing here reads a BOT through an
+    // equal id — the split keeps them independent, so a same-id bot's keys,
+    // chains, providers or sandbox would be a different entity's data.
+    // The bot-owned sections therefore stay empty on the App payload; the
+    // bot's configuration lives only on `/bots/:botId`.
+    const catalog = await providerCatalog();
+    const appInstallations = await installationsVisibleTo(store, appRow, member.scope.workspaceId);
+    const appDelivery = await store.deliverySummary(appRow.id, member.scope.workspaceId);
+    const sections = {
+      installations: [] as Array<unknown>,
+      keys: [] as Array<unknown>,
+      model_chain: null as string | null,
+      model_roles: {} as Record<string, string>,
+      model_chains: [] as Array<unknown>,
+      custom_providers: [] as Array<unknown>,
+      configured_providers: [] as Array<unknown>,
+      provider_catalog_version: catalog.version,
+      provider_eligibility: {} as Record<string, string>,
+      model_role_ids: MODEL_ROLE_IDS,
+      custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
+      sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
+      delivery_summary: {
+        latest: appDelivery.latest
+          ? {
+              event_name: appDelivery.latest.event_name,
+              outcome: appDelivery.latest.outcome,
+              status_code: appDelivery.latest.status_code,
+              created_at: appDelivery.latest.created_at,
+            }
+          : null,
+        rejected24h: appDelivery.rejected24h,
+      },
+    };
+    const installations = appInstallations;
+    return c.json({
+      can_manage: true,
+      workspace_id: member.scope.workspaceId,
+      targets_many: targetsMany,
+      ...targetOwned.top,
+      app: {
+        github_app_id: appRow.github_app_id,
+        status: appRow.status,
+        created_by: appRow.created_by,
+        last_webhook_at: appRow.last_webhook_at ?? null,
+        // F11: no same-id bot read — sandbox_image_id is the BOT's column. The
+        // App payload omits it; the bot page is where it is configured.
+
+        github_name: appRow.github_name ?? null,
+        github_slug: appRow.github_slug ?? null,
+        github_visibility: appRow.github_visibility ?? null,
+        scope: appRow.scope,
+        id: appRow.id,
+        github_description: appRow.github_description ?? null,
+        github_html_url: appRow.github_html_url ?? null,
+        github_avatar_url: appRow.github_avatar_url ?? null,
+        github_metadata_synced_at: appRow.github_metadata_synced_at ?? null,
+        ...targetOwned.app,
+      },
+      installation: binding,
+      // F4/D47: the pending-bind hint is a SHARED-App fact. The bind route and
+      // its OAuth callback both refuse an owned App, so a hint for one would
+      // offer an action that always 404s.
+      pending_installations:
+        appRow.scope === "shared"
+          ? await store.listPendingInstallations(appRow.id, member.scope.workspaceId)
+          : [],
+      // F7: the bots this App's chain actually mounts in THIS workspace — the
+      // only App-to-bot relation that exists — in position order, each with its
+      // own facts and this month's spend. One statement, no fan-out; the spend
+      // aggregate is the same single query the Apps page reads.
+      chain: await appChainRead(member.db, appRow.id, member.scope.workspaceId),
+      blocked: false,
+      blocked_reason: null,
+      official_workspace: officialWorkspaceId !== null && officialWorkspaceId === appRow.workspace_id,
+      can_configure_bot: canWriteBotScope(appRow, member.scope),
+      ...sections,
+      installations,
+    });
+  } catch (err) {
+    logSettingsFailure("api_render", appRow.id, err);
+    return c.text("the app settings could not be read from encrypted storage", 500);
+  }
+};
 
 async function requireAppSettings(c: DashboardContext): Promise<AppSettingsGate> {
   const gate = await requireAppVisible(c);
@@ -2237,6 +2695,11 @@ function isOmpRuntimeImage(sandboxImageId: string): boolean {
 
 function repositoryLandingPath(gate: { target: ReviewTargetRow | null }): string | null {
   return gate.target === null ? null : `${REPOS_LIST_REDIRECT}/${gate.target.id}`;
+}
+
+/** F12: the authority a bot-configuration write carries into the store. */
+function botWriteAuthority(gate: { app: { id: string }; scope: WorkspaceScope }): BotWriteAuthority {
+  return { botId: gate.app.id, workspaceId: gate.scope.workspaceId, role: gate.scope.role };
 }
 
 function settingsPostResponse(
@@ -2554,15 +3017,6 @@ async function refreshGithubMetadata(
   }
 }
 
-async function refreshGithubMetadataForRead(
-  app: GithubAppRow,
-  apps: ReturnType<typeof createReviewBotsStore>,
-  encryptionKey: string | undefined,
-): Promise<GithubAppRow> {
-  const refresh = await refreshGithubMetadata(app, apps, encryptionKey, { force: false });
-  return refresh.row;
-}
-
 /**
  * The App-wide read sections. A workspace that does not own the App (a shared
  * bot's consumer) gets none of the App's installations, keys, chains or custom
@@ -2570,17 +3024,21 @@ async function refreshGithubMetadataForRead(
  */
 async function botScopedSections(
   db: DashboardDb,
-  app: GithubAppRow,
+  app: BotRouteRow,
   encryptionKey: string,
   scope: WorkspaceScope,
 ) {
   const apps = createReviewBotsStore(db);
   const store = createAppConfigStore(db, encryptionKey);
   const owner = canWriteBotScope(app, scope);
+  // The mount list is EMPTY on the bot face: physical
+  // github_app_installations are App-side state a bot payload never sources
+  // through a same-id join (D44).
+  const emptyInstallations: Awaited<ReturnType<typeof apps.listInstallations>> = [];
   const [installations, deliverySummary, maskedKeys, modelChain, modelChainSeats, modelChains, customProviders, customKeys] =
     owner
       ? await orderedReads([
-          apps.listInstallations(app.id),
+          Promise.resolve(emptyInstallations),
           apps.deliverySummary(app.id),
           store.listProviderKeys(app.id),
           store.getModelChain(app.id),
@@ -2652,9 +3110,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
   const apps = createReviewBotsStore(gate.db);
-  const app = canReadBotScope(gate.app, gate.scope)
-    ? await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY)
-    : gate.app;
+  // No App metadata refresh here: the refresh writes github_apps columns
+  // through credentials a bot route never resolves (F2). The refresh lives
+  // on the App route /api/apps/:appId/refresh-metadata.
+  const app = gate.app;
   const blockedReason = blockedReasonFor(app, gate.scope.workspaceId);
   const target = gate.target;
   try {
@@ -2689,7 +3148,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
         },
       });
     }
-    const githubVisibility = await apps.getGithubVisibility(app.id);
+    // App-sourced keys are null placeholders on a bot route (F2): visibility
+    // and the mount list resolve with install-state-chain.
+    const githubVisibility = null;
     const installationPayload = null;
     if (blockedReason !== null) {
       const effective = target === null ? null : effectiveTargetSettings(target, defaults);
@@ -2776,7 +3237,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
         github_metadata_synced_at: app.github_metadata_synced_at ?? null,
       },
       installation: installationPayload,
-      pending_installations: await apps.listPendingInstallations(app.id, gate.scope.workspaceId),
+      pending_installations: [],
       blocked: blockedReason !== null,
       blocked_reason: blockedReason,
       official_workspace: officialWorkspaceId !== null && officialWorkspaceId === app.workspace_id,
@@ -2805,37 +3266,85 @@ function parseGithubAppId(appIdParam: string): number | null {
   return Number.isSafeInteger(githubAppId) && githubAppId > 0 ? githubAppId : null;
 }
 
-async function resolveVisibleBot(
-  apps: ReturnType<typeof createReviewBotsStore>,
-  appIdParam: string,
-  scope: WorkspaceScope,
-): Promise<GithubAppTenantRow | null> {
-  const githubAppId = parseGithubAppId(appIdParam);
-  if (githubAppId === null) return null;
-  return apps.getVisibleBotByGithubId(githubAppId, scope.workspaceId);
-}
-
 const appBotRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
-  const app = await resolveVisibleBot(
-    createReviewBotsStore(member.db),
-    c.req.param("appId") ?? "",
-    member.scope,
+  const bot = await createReviewBotsStore(member.db).getVisibleBotById(
+    c.req.param("botId") ?? "",
+    member.scope.workspaceId,
   );
-  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!bot) return c.json({ error: "unknown app" }, 404);
+  // `scope` and `sandbox_image_id` in the payload mean the BOT's own columns;
+  // every App-sourced key is a null placeholder (F2).
+  const app = botRouteRow(bot);
   if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
     return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
   }
-  const sections = await botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope);
+  const month = quotaMonth(new Date());
+  const apps = createReviewBotsStore(member.db);
+  const [sections, provider, spendRow, mountRows, quota, defaultChain] = await Promise.all([
+    botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope),
+    member.db
+      .prepare(`SELECT name FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
+      .bind(bot.workspace_id)
+      .first<{ name: string }>(),
+    member.db
+      .prepare(
+        `SELECT COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND bot_id = ?2 AND occurred_at >= ?3 AND occurred_at < ?4`,
+      )
+      .bind(member.scope.workspaceId, bot.id, month.startIso, month.endIso)
+      .first<{ total: number }>(),
+    // F6: the chain rows, joined to the App's numeric id + display name — the
+    // values the App detail route resolves. Empty until install-state-chain's
+    // writers land, which is an honest "not mounted" answer.
+    member.db
+      .prepare(
+        `SELECT DISTINCT m.github_app_id FROM app_install_bots m
+          WHERE m.workspace_id = ?1 AND m.bot_id = ?2
+          ORDER BY m.github_app_id`,
+      )
+      .bind(member.scope.workspaceId, bot.id)
+      .all<{ github_app_id: string }>(),
+    readPlanMonthlyRp(
+      member.db,
+      member.scope.workspaceId,
+      new Date(),
+      deploymentModeOf(c.env.DEPLOYMENT_MODE),
+    ),
+    // F4: the capability summary reads the DEFAULT chain without owner
+    // authority — no keys, no named chains, nothing secret.
+    apps.readDefaultChainSummary(bot.id),
+  ]);
+  const mountIdentities = await apps.listAppIdentities(
+    mountRows.results.map((row) => row.github_app_id),
+  );
+  // F5: ownership (whose bot it is) is separate from publication scope (who
+  // may use it) and from this viewer's manage permission.
+  const owned = bot.workspace_id === member.scope.workspaceId;
+  const canManage = owned && canManageApp(member.scope);
   return c.json({
-    can_manage: canWriteBotScope(app, member.scope) && canManageApp(member.scope),
+    can_manage: canManage,
+    owned,
+    // The owner's exception layer, read only for the owner: a consumer never sees
+    // another workspace's negotiated ceiling.
+    ...(canManage
+      ? { quota_overrides: await createReviewBotsStore(member.db).listBotQuotaOverrides(bot.id) }
+      : {}),
+    // F10: the top-level flag every consumer branches on. An unknown ceiling is
+    // an ERROR state — never "no ceiling".
+    ...(quota.kind === "unknown" ? { quota_error: true } : {}),
     app: {
       github_app_id: app.github_app_id,
       id: app.id,
+      name: bot.name,
+      description: bot.description,
       status: app.status,
       scope: app.scope,
+      shared_at: bot.shared_at,
       sandbox_image_id: app.sandbox_image_id,
+      multiplier: bot.multiplier,
+      monthly_rp: bot.monthly_rp,
       last_webhook_at: app.last_webhook_at ?? null,
       github_name: app.github_name ?? null,
       github_slug: app.github_slug ?? null,
@@ -2844,48 +3353,151 @@ const appBotRoute = async (c: DashboardContext) => {
       github_avatar_url: app.github_avatar_url ?? null,
       github_metadata_synced_at: app.github_metadata_synced_at ?? null,
     },
+    overview: {
+      provider_workspace: provider?.name ?? bot.workspace_id,
+      month_used_rp: Number(spendRow?.total ?? 0),
+      plan_quota: quota.kind,
+      plan_monthly_rp: quota.kind === "ceiling" ? quota.rp : null,
+      default_chain: defaultChain,
+      mounted_apps: mountIdentities.map((row) => ({
+        id: row.id,
+        github_app_id: row.github_app_id,
+        name: row.name,
+      })),
+      mounted_bot_ids: mountRows.results.map((row) => row.github_app_id),
+    },
     ...sections,
   });
 };
 
-const appBotScopeRoute = async (c: DashboardContext): Promise<Response> => {
+type ScopeSwitchKind = "app" | "bot";
+
+const SCOPE_SWITCH_COPY: Record<
+  ScopeSwitchKind,
+  { notFound: string; outsideOfficial: string }
+> = {
+  app: { notFound: "app not found", outsideOfficial: "app is outside the official workspace" },
+  bot: { notFound: "bot not found", outsideOfficial: "bot is outside the official workspace" },
+};
+
+/**
+ * One share-switch route. `kind` decides WHICH resolution, column and audit
+ * action the write uses: the App switch resolves `:appId` as the numeric
+ * GitHub App id and writes `github_apps.scope`; the bot switch resolves
+ * `:botId` as the `review_bots.id` string and writes `review_bots.scope`.
+ * The two id spaces cannot resolve on the wrong route, so a bot id and an
+ * App id can never be confused.
+ */
+function scopeSwitchRoute(kind: ScopeSwitchKind) {
+  return async (c: DashboardContext): Promise<Response> => {
+    const gate = await requireMember(c);
+    if (!gate.ok) return gate.response;
+    const copy = SCOPE_SWITCH_COPY[kind];
+    let entity: { id: string; workspace_id?: string } | null = null;
+    if (kind === "app") {
+      entity = await resolveScopedApp(
+        createReviewBotsStore(gate.db),
+        c.req.param("appId") ?? "",
+        gate.scope,
+      );
+    } else {
+      entity = await createReviewBotsStore(gate.db).getScopedBotById(
+        c.req.param("botId") ?? "",
+        gate.scope.workspaceId,
+      );
+    }
+    if (!entity) return c.json({ error: "unknown app" }, 404);
+    if (!canManageApp(gate.scope)) return c.json({ error: "forbidden" }, 403);
+    if (!canWriteBotScope(entity as GithubAppRow, gate.scope)) return botReadOnlyResponse(c);
+    let scope: unknown;
+    let confirm: unknown;
+    try {
+      const body = (await c.req.json()) as { scope?: unknown; confirm?: unknown };
+      scope = body.scope;
+      confirm = body.confirm;
+    } catch {
+    }
+    if (scope !== "owned" && scope !== "shared") {
+      return c.json({ error: 'body must be { scope: "owned" | "shared" }' }, 400);
+    }
+    const args = {
+      scope: scope as BotScope,
+      confirm: confirm === true,
+      actor: gate.session.login,
+      now: new Date().toISOString(),
+    };
+    const outcome =
+      kind === "app"
+        ? await setAppScope(gate.db, { appId: entity.id, ...args })
+        : await setReviewBotScope(gate.db, {
+            botId: entity.id,
+            ...args,
+            // F12: the store itself re-checks ownership and the owner/admin
+            // authority, so a caller that bypasses this route cannot write.
+            authority: { workspaceId: gate.scope.workspaceId, role: gate.scope.role },
+          });
+    if (outcome.outcome === "bot_not_found") return c.json({ error: copy.notFound }, 404);
+    if (outcome.outcome === "forbidden") return c.json({ error: "forbidden" }, 403);
+    if (outcome.outcome === "outside_official_workspace") {
+      return c.json({ error: copy.outsideOfficial }, 409);
+    }
+    if (outcome.outcome === "confirm_required") {
+      return c.json({ error: "confirm required" }, 409);
+    }
+    return c.json({ scope: outcome.scope, sharedAt: outcome.sharedAt });
+  };
+}
+
+/**
+ * The per-workspace ceiling writer (F8). Owner-only, one workspace at a time,
+ * `monthlyRp: null` clears the override back to the bot's default.
+ *
+ * This is the writer `bot_quota_overrides` was missing: `selectReviewBot` reads
+ * the table, and until now nothing in the product could populate it.
+ */
+const botQuotaOverrideRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const app = await resolveScopedApp(
-    createReviewBotsStore(gate.db),
-    c.req.param("appId") ?? "",
-    gate.scope,
-  );
-  if (!app) return c.json({ error: "unknown app" }, 404);
   if (!canManageApp(gate.scope)) return c.json({ error: "forbidden" }, 403);
-  if (!canWriteBotScope(app, gate.scope)) return botReadOnlyResponse(c);
-  let scope: unknown;
-  let confirm: unknown;
+  const bot = await createReviewBotsStore(gate.db).getScopedBotById(
+    c.req.param("botId") ?? "",
+    gate.scope.workspaceId,
+  );
+  if (!bot) return c.json({ error: "unknown bot" }, 404);
+  let body: { workspaceId?: unknown; monthlyRp?: unknown } | null = null;
   try {
-    const body = (await c.req.json()) as { scope?: unknown; confirm?: unknown };
-    scope = body.scope;
-    confirm = body.confirm;
+    body = (await c.req.json()) as { workspaceId?: unknown; monthlyRp?: unknown };
   } catch {
+    return c.json({ error: "body must be JSON" }, 400);
   }
-  if (scope !== "owned" && scope !== "shared") {
-    return c.json({ error: 'body must be { scope: "owned" | "shared" }' }, 400);
+  if (body === null || typeof body.workspaceId !== "string" || body.workspaceId.length === 0) {
+    return c.json({ error: "workspaceId must be a non-empty workspace id" }, 400);
   }
-  const outcome = await setBotScope(gate.db, {
-    botId: app.id,
-    scope: scope as BotScope,
-    confirm: confirm === true,
-    actor: gate.session.login,
+  const monthlyRp =
+    body.monthlyRp === null
+      ? null
+      : typeof body.monthlyRp === "number"
+        ? body.monthlyRp
+        : Number.NaN;
+  if (monthlyRp !== null && !Number.isInteger(monthlyRp)) {
+    return c.json({ error: "monthlyRp must be a whole number of RP greater than 0, or null" }, 400);
+  }
+  const outcome = await createReviewBotsStore(gate.db).setBotQuotaOverride({
+    botId: bot.id,
+    workspaceId: body.workspaceId,
+    ownerWorkspaceId: gate.scope.workspaceId,
+    monthlyRp,
     now: new Date().toISOString(),
   });
-  if (outcome.outcome === "bot_not_found") return c.json({ error: "bot not found" }, 404);
-  if (outcome.outcome === "outside_official_workspace") {
-    return c.json({ error: "bot is outside the official workspace" }, 409);
+  if (outcome === "not_owner") return c.json({ error: "only the bot's owner writes its ceilings" }, 403);
+  if (outcome === "invalid") {
+    return c.json({ error: "monthlyRp must be a whole number of RP greater than 0, or null" }, 400);
   }
-  if (outcome.outcome === "confirm_required") {
-    return c.json({ error: "confirm required" }, 409);
-  }
-  return c.json({ scope: outcome.scope, sharedAt: outcome.sharedAt });
+  return c.json({ overrides: await createReviewBotsStore(gate.db).listBotQuotaOverrides(bot.id) });
 };
+
+const appScopeRoute = scopeSwitchRoute("app");
+const botScopeRoute = scopeSwitchRoute("bot");
 
 const DELIVERY_PAGE_LIMIT = 20;
 const DELIVERY_PAGE_OFFSET_MAX = 100_000;
@@ -2933,7 +3545,7 @@ function parseDeliveryQuery(c: DashboardContext): DeliveryQueryResult {
 const appDeliveriesRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
-  const app = await resolveVisibleBot(
+  const app = await resolveScopedApp(
     createReviewBotsStore(member.db),
     c.req.param("appId") ?? "",
     member.scope,
@@ -2963,17 +3575,27 @@ const appDeliveriesRoute = async (c: DashboardContext) => {
 };
 
 const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> => {
-  const gate = await requireAppSettings(c);
-  if (!gate.ok) return gate.response;
-  if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
-  const apps = createReviewBotsStore(gate.db);
-  const refresh = await refreshGithubMetadata(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY, {
+  // App-side operation (the metadata lives on github_apps): resolves the App
+  // by its numeric GitHub App id — not the bot gate, which reads :botId.
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const apps = createReviewBotsStore(member.db);
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  if (!canWriteBotScope(app, member.scope)) return botReadOnlyResponse(c);
+  if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+    return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
+  }
+  const live = await liveTargetsForBot(member.db, member.scope.workspaceId, app.id);
+  const landing = repositoryLandingPath({ target: live.length === 1 ? live[0]! : null });
+  const refresh = await refreshGithubMetadata(app, apps, c.env.DASHBOARD_ENCRYPTION_KEY, {
     force: true,
   });
   if (refresh.status !== "refreshed") {
-    return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.githubMetadataRefreshFailed);
+    return settings400Response(c, landing, SETTINGS_400_KEYS.githubMetadataRefreshFailed);
   }
-  return settingsPostResponse(c, repositoryLandingPath(gate), `Refreshed ${appDisplayName(refresh.row)} from GitHub.`);
+  return settingsPostResponse(c, landing, `Refreshed ${appDisplayName(refresh.row)} from GitHub.`);
 };
 
 type DeclaredVocabulary =
@@ -3125,6 +3747,7 @@ type DeclaredKeyAppendOutcome =
 
 async function appendDeclaredProviderKey(
   store: AppConfigStore,
+  authority: BotWriteAuthority,
   appId: string,
   providerId: string,
   plainKey: string,
@@ -3138,7 +3761,7 @@ async function appendDeclaredProviderKey(
   });
   if (!verified.ok) return { status: "rejected", reason: verified.reason };
   try {
-    await store.addCustomProviderKey(appId, providerId, plainKey, {
+    await store.addCustomProviderKey(authority, appId, providerId, plainKey, {
       base_url: declared.base_url,
       api: declared.api,
     });
@@ -3188,7 +3811,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   if (!PROVIDER_IDS.includes(provider)) {
     try {
-      const outcome = await appendDeclaredProviderKey(store, gate.app.id, provider, plainKey);
+      const outcome = await appendDeclaredProviderKey(store, botWriteAuthority(gate), gate.app.id, provider, plainKey);
       if (outcome.status === "undeclared") {
         return verifyKeyed400(c, SETTINGS_400_KEYS.customProviderUndeclared, { provider });
       }
@@ -3230,7 +3853,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
     if (!verified.ok) {
       return c.json({ ok: false, reason: mapVerifyReason(verified.reason) }, 400);
     }
-    await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
+    await store.saveVerifiedKey(botWriteAuthority(gate), gate.app.id, provider, plainKey, verified.models);
     return c.json({ ok: true, provider, models: verified.models });
   } catch (err) {
     logSettingsFailure("verify_key", gate.app.id, err);
@@ -3352,7 +3975,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (!verified.ok) {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
-      await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
+      await store.saveVerifiedKey(botWriteAuthority(gate), gate.app.id, provider, plainKey, verified.models);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
       if (err instanceof ProviderKeyLimitError) {
@@ -3370,7 +3993,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const raw = typeof form.model_chain === "string" ? form.model_chain : "";
     try {
       if (raw.trim() === "") {
-        await store.setModelChain(gate.app.id, null);
+        await store.setModelChain(botWriteAuthority(gate), gate.app.id, null);
         return settingsPostResponse(c, repositoryLandingPath(gate), `Cleared the model chain for ${appDisplayName(gate.app)} — reviews fail closed until a chain + provider keys are configured (per-App only).`,
         );
       }
@@ -3392,7 +4015,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (failing) {
         return settingsMembershipFailResponse(c, repositoryLandingPath(gate), failing);
       }
-      await store.setModelChain(gate.app.id, raw);
+      await store.setModelChain(botWriteAuthority(gate), gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3434,7 +4057,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
           return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.roleChainUnknown, { role });
         }
       }
-      await store.setModelChainSeats(gate.app.id, refs);
+      await store.setModelChainSeats(botWriteAuthority(gate), gate.app.id, refs);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3471,7 +4094,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsMembershipFailResponse(c, repositoryLandingPath(gate), failing);
     }
     try {
-      await store.upsertModelChain(gate.app.id, name, chain);
+      await store.upsertModelChain(botWriteAuthority(gate), gate.app.id, name, chain);
     } catch (err) {
       logSettingsFailure("add_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3484,7 +4107,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.defaultChainRemoveProtected);
     }
     try {
-      await store.removeModelChain(gate.app.id, name);
+      await store.removeModelChain(botWriteAuthority(gate), gate.app.id, name);
     } catch (err) {
       logSettingsFailure("remove_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3577,6 +4200,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
       await store.upsertCustomProvider(
+        botWriteAuthority(gate),
         gate.app.id,
         { provider_id: providerId, base_url: baseUrl, api: api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
         plainKey,
@@ -3623,7 +4247,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     try {
-      const outcome = await appendDeclaredProviderKey(store, gate.app.id, providerId, plainKey);
+      const outcome = await appendDeclaredProviderKey(store, botWriteAuthority(gate), gate.app.id, providerId, plainKey);
       if (outcome.status === "undeclared") {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.customProviderUndeclared, {
           provider: providerId,
@@ -3751,6 +4375,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
       await store.upsertCustomProvider(
+        botWriteAuthority(gate),
         gate.app.id,
         { provider_id: templateId, base_url: baseUrl, api: declApi, model_ids: declModelIds },
         plainKey,
@@ -3811,7 +4436,13 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       }
     }
     try {
-      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds, statedMeta);
+      await store.updateCustomProviderModels(
+        botWriteAuthority(gate),
+        gate.app.id,
+        providerId,
+        modelIds,
+        statedMeta,
+      );
     } catch (err) {
       logSettingsFailure("update_provider_models", gate.app.id, err);
       if (err instanceof InvalidCustomProviderError) {
@@ -3832,7 +4463,12 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       const vocabulary = await loadDeclaredVocabulary(c, gate, store, providerId);
       if (!vocabulary.ok) return vocabulary.response;
-      await store.updateCustomProviderModels(gate.app.id, providerId, vocabulary.models);
+      await store.updateCustomProviderModels(
+        botWriteAuthority(gate),
+        gate.app.id,
+        providerId,
+        vocabulary.models,
+      );
       return settingsPostResponse(
         c,
         repositoryLandingPath(gate),
@@ -3852,7 +4488,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
     let removed: boolean;
     try {
-      removed = await store.removeCustomProvider(gate.app.id, providerId);
+      removed = await store.removeCustomProvider(botWriteAuthority(gate), gate.app.id, providerId);
     } catch (err) {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3897,8 +4533,8 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
       (row) => row.provider_id === provider,
     );
     removed = declaredCustom
-      ? await store.deleteCustomProviderKey(gate.app.id, provider, keyId)
-      : await store.deleteProviderKey(gate.app.id, provider, keyId);
+      ? await store.deleteCustomProviderKey(botWriteAuthority(gate), gate.app.id, provider, keyId)
+      : await store.deleteProviderKey(botWriteAuthority(gate), gate.app.id, provider, keyId);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
     return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -4080,6 +4716,62 @@ function installationsVisibleTo(
     : apps.listInstallations(app.id);
 }
 
+/** One chain row of the App detail's `bots` tab. */
+export type AppChainEntry = {
+  position: number;
+  bot_id: string;
+  name: string;
+  description: string | null;
+  provider_workspace: string;
+  owned: boolean;
+  available: boolean;
+  multiplier: number;
+  month_used_rp: number;
+  /** The bot's own monthly cap (F5); `null` = no cap of its own. */
+  monthly_rp: number | null;
+};
+
+/**
+ * This workspace's ordered chain on one App, each bot with its own facts and
+ * this month's spend. Two statements for the whole chain — the rows and the
+ * spend aggregate — never a query per bot. Positions are the stored ones, so a
+ * gap (a bot the owner stopped sharing, until the editor removes it) stays
+ * visible rather than closing up.
+ */
+async function appChainRead(
+  db: DashboardDb,
+  appId: string,
+  workspaceId: string,
+): Promise<AppChainEntry[]> {
+  const chains = await createReviewBotsStore(db).listInstallChainBots(workspaceId);
+  const chain = chains.get(appId) ?? [];
+  if (chain.length === 0) return [];
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  return chain.map((bot) => ({
+    position: bot.position,
+    bot_id: bot.botId,
+    name: bot.name,
+    description: bot.description,
+    provider_workspace: bot.providerWorkspace,
+    owned: bot.owned,
+    available: bot.available,
+    multiplier: bot.multiplier,
+    month_used_rp: spend.get(bot.botId) ?? 0,
+    monthly_rp: bot.monthlyRp,
+  }));
+}
+
 const BIND_STATE_COOKIE = "__Host-mstar-bind-state";
 const BIND_STATE_MAX_AGE_SEC = 600;
 const BIND_STATE_KIND = "installation-bind";
@@ -4132,6 +4824,49 @@ async function readBindState(
  * OAuth step-up (`read:org`), and the callback binds only after the user's own
  * token proves they administer the installation's account.
  */
+/**
+ * Replace one install's chain. The editor and the code that reads the order ship
+ * together: `selectReviewBot` walks `position`, and this route is the only thing
+ * that writes it. Positions come out contiguous from 1 because the store clears
+ * and re-inserts in ONE batch — a reorder never leaves a hole a reader could
+ * mistake for an available slot.
+ *
+ * Gated on `can_manage` AND on the store's own installer check: the chain belongs
+ * to the workspace whose `app_installations` row it is.
+ */
+const appChainRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  const body = (await c.req.json().catch(() => null)) as { botIds?: unknown } | null;
+  const botIds = body?.botIds;
+  if (!Array.isArray(botIds) || !botIds.every((id): id is string => typeof id === "string")) {
+    return c.json({ error: "botIds must be a list of bot ids" }, 400);
+  }
+  if (new Set(botIds).size !== botIds.length) {
+    return c.json({ error: "botIds names a bot twice" }, 400);
+  }
+  const apps = createReviewBotsStore(member.db);
+  // The URL segment is the NUMERIC GitHub App id, exactly as the detail GET and
+  // the SPA address it. `app_installations.github_app_id` holds the internal
+  // `github_apps.id`, so the segment must be resolved here — passing it straight
+  // through made every legitimate reorder answer 404.
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  const outcome = await apps.replaceInstallChain({
+    appId: app.id,
+    workspaceId: member.scope.workspaceId,
+    botIds,
+  });
+  if (outcome === "not_installer") return c.json({ error: "unknown app" }, 404);
+  if (outcome === "bot_unavailable") {
+    return c.json({ error: "a bot in the chain is neither shared nor owned by this workspace" }, 400);
+  }
+  // Re-read the chain, not the whole page: the editor renders what the relay
+  // will actually walk.
+  return c.json({ chain: await appChainRead(member.db, app.id, member.scope.workspaceId) });
+};
+
 const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -4164,7 +4899,8 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
     workspaceId: member.scope.workspaceId,
     botId: app.id,
     installationId,
-    returnTo: `/dashboard/${encodeURIComponent(workspaceRef)}/apps/${app.github_app_id}?tab=settings`,
+    // F4: a successful bind lands where its new chain is shown.
+    returnTo: `/dashboard/${encodeURIComponent(workspaceRef)}/apps/${app.github_app_id}?tab=bots`,
     exp: Math.floor(Date.now() / 1000) + BIND_STATE_MAX_AGE_SEC,
   };
   const state = await signValue(JSON.stringify(payload), secrets.sessionSecret);
@@ -4500,7 +5236,7 @@ const targetListRoute = async (c: DashboardContext): Promise<Response> => {
     repo_id: target.repo_id,
     repo_owner: target.repo_owner,
     repo_name: target.repo_name,
-    bot_id: target.bot_id,
+    bot_id: target.app_id,
     app_name: target.app_name,
     review_enabled: effectiveTargetSettings(target, defaults).reviewEnabled ? 1 : 0,
     follow_workspace_defaults: target.follow_workspace_defaults,
@@ -4717,7 +5453,7 @@ async function targetSettingsPayload(
   target: ReviewTargetRow,
   defaults: WorkspaceReviewDefaults,
 ): Promise<{ target: TargetSettingsPayload; effective: TargetEffectivePayload; defaults: ReviewSettingsPayload }> {
-  const app = await createReviewBotsStore(db).getAppById(target.bot_id);
+  const app = await createReviewBotsStore(db).getAppById(target.app_id);
   const effective = effectiveTargetSettings(target, defaults);
   return {
     target: {
@@ -4725,7 +5461,7 @@ async function targetSettingsPayload(
       repo_id: target.repo_id,
       repo_owner: target.repo_owner,
       repo_name: target.repo_name,
-      bot_id: target.bot_id,
+      bot_id: target.app_id,
       app_name: app === null ? "" : appDisplayName(app),
       app_id: app === null ? null : app.github_app_id,
       app_avatar_url: app === null ? null : app.github_avatar_url,
@@ -5002,23 +5738,33 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
     handler: appInstallationRepositoriesRoute,
     access: "write",
   },
-  { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
-  { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
-  { method: "patch", path: "/api/apps/:appId/bot/scope", handler: appBotScopeRoute, access: "write" },
+  { method: "get", path: "/api/review-bots", handler: usableBotsRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId", handler: appDetailSettingsRoute, access: "write" },
+  { method: "get", path: "/api/review-bots/:botId/settings", handler: appSettingsRoute, access: "write" },
+  { method: "get", path: "/api/review-bots/:botId/bot", handler: appBotRoute, access: "write" },
+  { method: "patch", path: "/api/apps/:appId/scope", handler: appScopeRoute, access: "write" },
+  { method: "patch", path: "/api/review-bots/:botId/scope", handler: botScopeRoute, access: "write" },
+  {
+    method: "patch",
+    path: "/api/review-bots/:botId/quota-overrides",
+    handler: botQuotaOverrideRoute,
+    access: "write",
+  },
   { method: "get", path: "/api/apps/:appId/deliveries", handler: appDeliveriesRoute, access: "write" },
-  { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
+  { method: "get", path: "/api/review-bots/:botId/models", handler: appModelsRoute, access: "write" },
   {
     method: "get",
-    path: "/api/apps/:appId/provider-models/preview",
+    path: "/api/review-bots/:botId/provider-models/preview",
     handler: appProviderModelsPreviewRoute,
     access: "write",
   },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/bind-installation", handler: appBindInstallationRoute, access: "write" },
-  { method: "post", path: "/api/apps/:appId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
-  { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },
-  { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
-  { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
+  { method: "patch", path: "/api/apps/:appId/chain", handler: appChainRoute, access: "write" },
+  { method: "post", path: "/api/review-bots/:botId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
+  { method: "post", path: "/api/review-bots/:botId/keys/usage", handler: appKeyUsageRoute, access: "write" },
+  { method: "post", path: "/review-bots/:botId/settings", handler: appSettingsSaveRoute, access: "write" },
+  { method: "post", path: "/review-bots/:botId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/insights/summary", handler: targetInsightsRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests", handler: targetPullRequestsRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/token-usage", handler: targetTokenUsageRoute, access: "write" },
@@ -5080,10 +5826,21 @@ dashboardApp.put(
   workspaceOnly(workspaceCheckMinScoreWriteRoute),
 );
 
+/**
+ * The bot-configuration paths the split deleted (task 4): they answer 404 —
+ * deleted, never aliased — while every other unmatched POST keeps the
+ * placeholder answer the SPA's form fallbacks rely on.
+ */
+const DELETED_BOT_CONFIG_PATH =
+  /^\/[^/]+\/(?:api\/apps\/[^/]+\/(?:settings|models|keys\/(?:verify|usage)|provider-models\/preview|bot(?:\/scope)?)|apps\/[^/]+\/settings(?:\/key\/delete)?)\/?$/;
+
 dashboardApp.post("*", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  if (DELETED_BOT_CONFIG_PATH.test(new URL(c.req.url).pathname.replace(/^\/dashboard/, ""))) {
+    return c.text("unknown app", 404);
+  }
   return c.text("placeholder actions are not implemented", 405);
 });

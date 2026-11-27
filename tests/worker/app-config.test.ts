@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
-import { createTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createTestD1, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import {
   APP_CONFIG_BASE_MIGRATIONS,
   APP_CONFIG_MIGRATIONS,
@@ -104,6 +104,9 @@ function createAppConfigD1(): TestD1 {
 
 const configStore = (db: AppConfigD1) => createAppConfigStore(db, TEST_KEY);
 
+/** F12: the bot-configuration authority these fixtures own. */
+const authority = (botId: string) => ({ botId, workspaceId: "default", role: "owner" as const });
+
 function createBatchRejectingD1(inner: AppConfigD1): AppConfigD1 & { batchCalls(): number } {
   let batchCalls = 0;
   return {
@@ -194,9 +197,9 @@ function createPoolReadRaceD1(inner: AppConfigD1, race: () => Promise<void>): Ap
 
 async function seedApp(
   db: TestD1,
-  opts: { slug: string; createdBy: string; githubAppId?: number },
+  opts: { slug: string; createdBy: string; githubAppId?: number; id?: string },
 ): Promise<GithubAppRow> {
-  const id = crypto.randomUUID();
+  const id = opts.id ?? crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
   const row = await createReviewBotsStore(db).createApp({
     id,
@@ -233,8 +236,8 @@ function seedPrePoolApp(
   return { id };
 }
 
-function seedPreMigrationAppRow(db: DashboardD1, id: string, slug: string): void {
-  (db as unknown as { raw: { prepare(sql: string): { run(...params: unknown[]): unknown } } }).raw
+function seedPreMigrationAppRow(db: TestD1, id: string, slug: string): void {
+  db.raw
     .prepare(
       `INSERT INTO github_apps
          (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
@@ -242,6 +245,9 @@ function seedPreMigrationAppRow(db: DashboardD1, id: string, slug: string): void
        VALUES (?, ?, ?, 1001, ?, 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, id, slug, slug);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
 }
 
 async function seededWorld(): Promise<{ db: ReturnType<typeof createAppConfigD1>; app: GithubAppRow; otherApp: GithubAppRow }> {
@@ -264,7 +270,12 @@ async function seededWorld(): Promise<{ db: ReturnType<typeof createAppConfigD1>
        SELECT 'default', id, 'owner', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'mallory'`,
     )
     .run();
-  const app = await seedApp(db, { slug: "mallorys-app", createdBy: "mallory", githubAppId: 1001 });
+  const app = await seedApp(db, {
+    id: BOT_ID,
+    slug: "mallorys-app",
+    createdBy: "mallory",
+    githubAppId: 1001,
+  });
   const otherApp = await seedApp(db, { slug: "adas-app", createdBy: "ada", githubAppId: 1002 });
   return { db, app, otherApp };
 }
@@ -324,7 +335,10 @@ async function postFormEntries(
 
 
 const APP_ID = 1001;
-const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
+// The primary seeded App's row id — bot-config routes bind the row, not the
+// numeric GitHub App id.
+const BOT_ID = "bot-config-primary";
+const SETTINGS = `/dashboard/default/review-bots/${BOT_ID}/settings`;
 
 
 describe("migration 0006_app_provider_config.sql (on a seeded production-shaped DB)", () => {
@@ -381,8 +395,8 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
   test("no ON DELETE: hard-deleting an app with config rows is refused (soft-delete is the only removal path)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    await configStore(db).setModelChain(app.id, "ark/deepseek-v4-flash");
+    await configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await configStore(db).setModelChain(authority(app.id), app.id, "ark/deepseek-v4-flash");
     expect(() => rawRun(db, "DELETE FROM review_bots WHERE id = ?", app.id)).toThrow(
       /FOREIGN KEY constraint failed/,
     );
@@ -476,7 +490,7 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
     };
     expect(row.created_at).toBe("2026-01-01 00:00:00");
     expect(row.updated_at).toBeNull();
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const afterReset = db.raw.query("SELECT created_at, updated_at FROM bot_provider_keys").get() as {
       created_at: string;
       updated_at: string;
@@ -683,7 +697,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
   test("addProviderKey encrypts INSIDE the store under the per-key AAD (round-trip)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const row = db.raw
       .query("SELECT bot_id, provider, key_id, key_enc, created_at FROM bot_provider_keys")
       .get() as { bot_id: string; provider: string; key_id: string; key_enc: string; created_at: string };
@@ -703,7 +717,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
   test("AAD anchor: the rowKey binds the app, the provider AND the key id — any other AAD fails the GCM tag", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const row = db.raw.query("SELECT key_id, key_enc FROM bot_provider_keys").get() as {
       key_id: string;
       key_enc: string;
@@ -726,8 +740,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const store = configStore(db);
     const one = sk("first-key-aaaa");
     const two = sk("second-key-bbbb");
-    await store.addProviderKey(app.id, "anthropic", one);
-    await store.addProviderKey(app.id, "anthropic", two);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", one);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", two);
     expect(rawCount(db, "bot_provider_keys")).toBe(2);
     const idOne = await keyIdOf(one);
     const idTwo = await keyIdOf(two);
@@ -753,7 +767,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const store = configStore(db);
     const one = sk("first-key-aaaa");
     const two = sk("second-key-bbbb");
-    await store.addProviderKey(app.id, "anthropic", one);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", one);
     rawRun(
       db,
       "UPDATE bot_provider_keys SET created_at = '2026-01-01 00:00:00', updated_at = '2026-02-01 00:00:00' WHERE bot_id = ? AND provider = 'anthropic'",
@@ -764,7 +778,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       created_at: string;
       updated_at: string;
     };
-    await store.addProviderKey(app.id, "anthropic", one);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", one);
     expect(rawCount(db, "bot_provider_keys")).toBe(1);
     const after = db.raw.query("SELECT key_id, key_enc, created_at, updated_at FROM bot_provider_keys").get() as {
       key_id: string;
@@ -777,7 +791,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(after.created_at).toBe(before.created_at);
     expect(after.updated_at).toMatch(SQLITE_TS_RE);
     expect(after.updated_at > before.updated_at).toBe(true);
-    await store.addProviderKey(app.id, "anthropic", two);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", two);
     expect(rawCount(db, "bot_provider_keys")).toBe(2);
     expect((await store.getAppConfig(app.id)).keys.anthropic!.slice().sort()).toEqual([one, two].sort());
   });
@@ -788,16 +802,16 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const store = configStore(db);
     const keys = Array.from({ length: MAX_KEYS_PER_PROVIDER }, (_, i) => sk(`pool-cap-key-${i}-${i}${i}${i}${i}`));
     for (const key of keys) {
-      await store.addProviderKey(app.id, "anthropic", key);
+      await store.addProviderKey(authority(app.id), app.id, "anthropic", key);
     }
     expect(rawCount(db, "bot_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
-    await expect(store.addProviderKey(app.id, "anthropic", sk("pool-cap-key-over-9999"))).rejects.toThrow(
+    await expect(store.addProviderKey(authority(app.id), app.id, "anthropic", sk("pool-cap-key-over-9999"))).rejects.toThrow(
       ProviderKeyLimitError,
     );
     expect(rawCount(db, "bot_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
-    await expect(store.addProviderKey(app.id, "anthropic", keys[0]!)).resolves.toBeUndefined();
+    await expect(store.addProviderKey(authority(app.id), app.id, "anthropic", keys[0]!)).resolves.toBeUndefined();
     expect(rawCount(db, "bot_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
-    await expect(store.addProviderKey(app.id, "openai", sk("pool-openai-1-1111"))).resolves.toBeUndefined();
+    await expect(store.addProviderKey(authority(app.id), app.id, "openai", sk("pool-openai-1-1111"))).resolves.toBeUndefined();
     expect(rawCount(db, "bot_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER + 1);
   });
 
@@ -860,8 +874,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.addProviderKey(app.id, "openai", sk("openai-key-7777"));
-    await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.addProviderKey(authority(app.id), app.id, "openai", sk("openai-key-7777"));
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const list = await store.listProviderKeys(app.id);
     expect(list).toEqual([
       {
@@ -889,8 +903,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.addProviderKey(app.id, "groq", "wxyz");
-    await store.addProviderKey(app.id, "kilo", "xyz");
+    await store.addProviderKey(authority(app.id), app.id, "groq", "wxyz");
+    await store.addProviderKey(authority(app.id), app.id, "kilo", "xyz");
     const list = await store.listProviderKeys(app.id);
     expect(list.map((key) => ({ provider: key.provider, last4: key.last4 }))).toEqual([
       { provider: "groq", last4: "" },
@@ -907,9 +921,9 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const one = sk("first-key-aaaa");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["m1", "m2"]);
     expect(await cachedModels()).toEqual([["m1", "m2"]]);
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["m1", "m2", "m3"]);
     expect(await cachedModels()).toEqual([["m1", "m2", "m3"]]);
   });
 
@@ -921,13 +935,13 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const two = sk("second-key-bbbb");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m2", "m3"]);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["m2", "m3"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["m2", "m3"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["m2", "m3"]);
     expect(await cachedModels()).toEqual([["m2", "m3"]]);
 
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["m1", "m2", "m3"]);
     expect(await cachedModels()).toEqual([["m2", "m3"]]);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["m3"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["m3"]);
     expect(await cachedModels()).toEqual([["m3"]]);
   });
 
@@ -940,11 +954,11 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const three = sk("third-key-cccc");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["shared"]);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["shared"]);
-    await store.saveVerifiedKey(app.id, "anthropic", three, ["shared"]);
-    expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(three))).toBe(true);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["b-only", "shared"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["shared"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["shared"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", three, ["shared"]);
+    expect(await store.deleteProviderKey(authority(app.id), app.id, "anthropic", await keyIdOf(three))).toBe(true);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["b-only", "shared"]);
     expect(await cachedModels()).toEqual([["shared"]]);
   });
 
@@ -956,11 +970,11 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const two = sk("second-key-bbbb");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1"]);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["m1"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["m1"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["m1"]);
     expect(await cachedModels()).toEqual([["m1"]]);
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2"]);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["m1", "m2"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["m1", "m2"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["m1", "m2"]);
     expect(await cachedModels()).toEqual([["m1", "m2"]]);
   });
 
@@ -972,16 +986,16 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const two = sk("second-key-bbbb");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["only-first"]);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["only-second"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["only-first"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["only-second"]);
     expect(await cachedModels()).toEqual([[]]);
     const cached = await store.getVerifiedModels(app.id);
     expect(composeModelOptions(cached, [])).toEqual([
       { provider: "anthropic", source: "probe", selectors: [] },
     ]);
     expect(findFailingSelector(["anthropic/only-first", "anthropic/only-second"], cached, [])).toBeNull();
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["common"]);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["common"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["common"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["common"]);
     expect(await cachedModels()).toEqual([["common"]]);
   });
 
@@ -989,8 +1003,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "anthropic", sk("first-key-aaaa"), ["m1", "m2"]);
-    await store.addProviderKey(app.id, "anthropic", sk("second-key-bbbb"));
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", sk("first-key-aaaa"), ["m1", "m2"]);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", sk("second-key-bbbb"));
     expect((await store.getVerifiedModels(app.id)).map((row) => row.models)).toEqual([[]]);
   });
 
@@ -1000,19 +1014,19 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const store = configStore(db);
     const one = sk("first-key-aaaa");
     const two = sk("second-key-bbbb");
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["claude-sonnet-4-6"]);
-    await store.addProviderKey(app.id, "anthropic", two);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["claude-sonnet-4-6"]);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", two);
     expect(rawCount(db, "bot_provider_models")).toBe(1);
-    expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(one))).toBe(true);
+    expect(await store.deleteProviderKey(authority(app.id), app.id, "anthropic", await keyIdOf(one))).toBe(true);
     expect(rawCount(db, "bot_provider_keys")).toBe(1);
     expect(rawCount(db, "bot_provider_models")).toBe(0);
     expect((await store.getAppConfig(app.id)).keys.anthropic).toEqual([two]);
-    await store.saveVerifiedKey(app.id, "anthropic", two, ["claude-sonnet-4-6"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", two, ["claude-sonnet-4-6"]);
     expect(rawCount(db, "bot_provider_models")).toBe(1);
-    expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(two))).toBe(true);
+    expect(await store.deleteProviderKey(authority(app.id), app.id, "anthropic", await keyIdOf(two))).toBe(true);
     expect(rawCount(db, "bot_provider_keys")).toBe(0);
     expect(rawCount(db, "bot_provider_models")).toBe(0);
-    expect(await store.deleteProviderKey(app.id, "anthropic", "0".repeat(16))).toBe(false);
+    expect(await store.deleteProviderKey(authority(app.id), app.id, "anthropic", "0".repeat(16))).toBe(false);
   });
 
   test("a MISSED per-key delete leaves the cache and every row untouched (the cache clears only on a real removal)", async () => {
@@ -1021,10 +1035,10 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const store = configStore(db);
     const one = sk("first-key-aaaa");
     const two = sk("second-key-bbbb");
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["claude-sonnet-4-6"]);
-    await store.addProviderKey(app.id, "anthropic", two);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", one, ["claude-sonnet-4-6"]);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", two);
     const poolBefore = db.raw.query("SELECT * FROM bot_provider_keys WHERE bot_id = ? ORDER BY key_id").all(app.id);
-    expect(await store.deleteProviderKey(app.id, "anthropic", "0".repeat(16))).toBe(false);
+    expect(await store.deleteProviderKey(authority(app.id), app.id, "anthropic", "0".repeat(16))).toBe(false);
     expect(rawCount(db, "bot_provider_models")).toBe(1);
     expect(db.raw.query("SELECT * FROM bot_provider_keys WHERE bot_id = ? ORDER BY key_id").all(app.id)).toEqual(
       poolBefore,
@@ -1051,7 +1065,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     );
     const carried = db.raw.query("SELECT key_id FROM bot_provider_keys").get() as { key_id: string };
     expect(carried.key_id).toBe("");
-    expect(await configStore(db).deleteProviderKey(app.id, "anthropic", await keyIdOf(legacy))).toBe(true);
+    expect(await configStore(db).deleteProviderKey(authority(app.id), app.id, "anthropic", await keyIdOf(legacy))).toBe(true);
     expect(rawCount(db, "bot_provider_keys")).toBe(0);
   });
 
@@ -1060,9 +1074,9 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const x = await seedApp(db, { slug: "app-x", createdBy: "mallory" });
     const y = await seedApp(db, { slug: "app-y", createdBy: "ada", githubAppId: 1002 });
     const store = configStore(db);
-    await store.addProviderKey(x.id, "anthropic", sk("x-anthropic-key-1111"));
-    await store.addProviderKey(y.id, "anthropic", sk("y-anthropic-key-2222"));
-    await store.addProviderKey(y.id, "openai", sk("y-openai-key-3333"));
+    await store.addProviderKey(authority(x.id), x.id, "anthropic", sk("x-anthropic-key-1111"));
+    await store.addProviderKey(authority(y.id), y.id, "anthropic", sk("y-anthropic-key-2222"));
+    await store.addProviderKey(authority(y.id), y.id, "openai", sk("y-openai-key-3333"));
     const cfgX = await store.getAppConfig(x.id);
     expect(Object.keys(cfgX.keys)).toEqual(["anthropic"]);
     expect(cfgX.keys.anthropic).toEqual([sk("x-anthropic-key-1111")]);
@@ -1077,7 +1091,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
   test("fresh insert: updated_at == created_at — one clock read for both (migration 0012)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const row = db.raw.query("SELECT created_at, updated_at FROM bot_provider_keys").get() as {
       created_at: string;
       updated_at: string;
@@ -1091,13 +1105,13 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
     const key = sk("v1-aaaa");
-    await store.addProviderKey(app.id, "anthropic", key);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", key);
     rawRun(
       db,
       "UPDATE bot_provider_keys SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE bot_id = ? AND provider = 'anthropic'",
       app.id,
     );
-    await store.addProviderKey(app.id, "anthropic", key);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", key);
     expect(rawCount(db, "bot_provider_keys")).toBe(1);
     const row = db.raw.query("SELECT created_at, updated_at FROM bot_provider_keys").get() as {
       created_at: string;
@@ -1123,8 +1137,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    await store.addProviderKey(app.id, "kilo", sk("kilo-key-1234"));
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.addProviderKey(authority(app.id), app.id, "kilo", sk("kilo-key-1234"));
     rawRun(db, "UPDATE bot_provider_keys SET updated_at = NULL WHERE provider = 'kilo'");
     const list = await store.listProviderKeys(app.id);
     expect(list).toHaveLength(2);
@@ -1149,7 +1163,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
   test("addProviderKey accepts a key of exactly 4096 characters (the bound is inclusive)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    await configStore(db).addProviderKey(app.id, "anthropic", "k".repeat(MAX_PROVIDER_KEY_LENGTH));
+    await configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", "k".repeat(MAX_PROVIDER_KEY_LENGTH));
     expect(rawCount(db, "bot_provider_keys")).toBe(1);
   });
 
@@ -1157,7 +1171,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     await expect(
-      configStore(db).addProviderKey(app.id, "anthropic", "k".repeat(MAX_PROVIDER_KEY_LENGTH + 1)),
+      configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", "k".repeat(MAX_PROVIDER_KEY_LENGTH + 1)),
     ).rejects.toThrow(ProviderKeyTooLongError);
     expect(rawCount(db, "bot_provider_keys")).toBe(0);
   });
@@ -1174,9 +1188,9 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const builtinKey = sk("zai-usage-1111");
     const customKey = sk("custom-usage-2222");
     const foreignKey = sk("foreign-usage-3333");
-    await store.addProviderKey(app.id, "zai", builtinKey);
-    await store.upsertCustomProvider(app.id, custom, customKey);
-    await store.addProviderKey(otherApp.id, "zai", foreignKey);
+    await store.addProviderKey(authority(app.id), app.id, "zai", builtinKey);
+    await store.upsertCustomProvider(authority(app.id), app.id, custom, customKey);
+    await store.addProviderKey(authority(otherApp.id), otherApp.id, "zai", foreignKey);
 
     await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(builtinKey))).resolves.toEqual({
       plainKey: builtinKey,
@@ -1187,7 +1201,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       custom: true,
     });
     await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(foreignKey))).resolves.toBeNull();
-    await store.deleteProviderKey(app.id, "zai", await keyIdOf(builtinKey));
+    await store.deleteProviderKey(authority(app.id), app.id, "zai", await keyIdOf(builtinKey));
     await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(builtinKey))).resolves.toBeNull();
   });
 });
@@ -1197,7 +1211,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
   test("setModelChain stores VERBATIM (spaces and :thinking suffixes untouched); getModelChain reads it back", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    await configStore(db).setModelChain(app.id, PLAIN_CHAIN);
+    await configStore(db).setModelChain(authority(app.id), app.id, PLAIN_CHAIN);
     expect(await configStore(db).getModelChain(app.id)).toBe(PLAIN_CHAIN);
     const row = db.raw
       .query("SELECT chain, updated_at FROM bot_model_chains WHERE name = 'default'")
@@ -1210,8 +1224,8 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "first/model");
-    await store.setModelChain(app.id, "second/model");
+    await store.setModelChain(authority(app.id), app.id, "first/model");
+    await store.setModelChain(authority(app.id), app.id, "second/model");
     expect(rawCount(db, "bot_model_chains")).toBe(1);
     expect(await store.getModelChain(app.id)).toBe("second/model");
   });
@@ -1220,33 +1234,33 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "first/model");
-    await store.setModelChain(app.id, null);
+    await store.setModelChain(authority(app.id), app.id, "first/model");
+    await store.setModelChain(authority(app.id), app.id, null);
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
-    await expect(store.setModelChain(app.id, null)).resolves.toBeUndefined();
+    await expect(store.setModelChain(authority(app.id), app.id, null)).resolves.toBeUndefined();
   });
 
   test("setModelChain(\"\") CLEARS the row — same path as null (empty = unset = fail closed)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "first/model");
-    await store.setModelChain(app.id, "");
+    await store.setModelChain(authority(app.id), app.id, "first/model");
+    await store.setModelChain(authority(app.id), app.id, "");
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
-    await expect(store.setModelChain(app.id, "")).resolves.toBeUndefined();
+    await expect(store.setModelChain(authority(app.id), app.id, "")).resolves.toBeUndefined();
   });
 
   test("a whitespace-only chain is blank = clear; a padded real chain upserts VERBATIM", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "   ");
+    await store.setModelChain(authority(app.id), app.id, "   ");
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
     const padded = "  openai/gpt-5 , anthropic/claude-x  ";
-    await store.setModelChain(app.id, padded);
+    await store.setModelChain(authority(app.id), app.id, padded);
     expect(await store.getModelChain(app.id)).toBe(padded);
   });
 
@@ -1260,8 +1274,8 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     });
     const configured = await seedApp(db, { slug: "full", createdBy: "ada", githubAppId: 1002 });
     const store = configStore(db);
-    await store.addProviderKey(configured.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    await store.setModelChain(configured.id, PLAIN_CHAIN);
+    await store.addProviderKey(authority(configured.id), configured.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.setModelChain(authority(configured.id), configured.id, PLAIN_CHAIN);
     const cfg = await store.getAppConfig(configured.id);
     expect(cfg).toEqual({
       appId: configured.id,
@@ -1274,7 +1288,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     rawRun(db, "UPDATE bot_provider_keys SET key_enc = 'v1.primary.aXZpdi.dGFtcGVyZWQ='");
     await expect(store.listProviderKeys(app.id)).rejects.toThrow(/secretbox/);
     await expect(store.getAppConfig(app.id)).rejects.toThrow(/secretbox/);
@@ -1287,7 +1301,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "  ark/deepseek-v4-flash:high ");
+    await store.setModelChain(authority(app.id), app.id, "  ark/deepseek-v4-flash:high ");
     expect(await store.getModelChain(app.id)).toBe("  ark/deepseek-v4-flash:high ");
     const row = db.raw
       .query("SELECT bot_id, name, chain, is_default FROM bot_model_chains WHERE name = 'default'")
@@ -1301,8 +1315,8 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "first/model");
-    await store.setModelChain(app.id, "second/model");
+    await store.setModelChain(authority(app.id), app.id, "first/model");
+    await store.setModelChain(authority(app.id), app.id, "second/model");
     expect(rawCount(db, "bot_model_chains")).toBe(1);
     expect(await store.getModelChain(app.id)).toBe("second/model");
   });
@@ -1311,21 +1325,21 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "first/model");
-    await store.setModelChain(app.id, null);
+    await store.setModelChain(authority(app.id), app.id, "first/model");
+    await store.setModelChain(authority(app.id), app.id, null);
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
-    await expect(store.setModelChain(app.id, "")).resolves.toBeUndefined();
+    await expect(store.setModelChain(authority(app.id), app.id, "")).resolves.toBeUndefined();
   });
 
   test("a whitespace-only chain is blank = clear; a padded real chain upserts VERBATIM", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "   ");
+    await store.setModelChain(authority(app.id), app.id, "   ");
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     const padded = "  openai/gpt-5 , anthropic/claude-x  ";
-    await store.setModelChain(app.id, padded);
+    await store.setModelChain(authority(app.id), app.id, padded);
     expect(await store.getModelChain(app.id)).toBe(padded);
   });
 
@@ -1333,14 +1347,14 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "first/model");
+    await store.setModelChain(authority(app.id), app.id, "first/model");
     rawRun(
       db,
       `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
        VALUES (?, 'rogue', 'x/y', 1, datetime('now'), datetime('now'))`,
       app.id,
     );
-    await store.setModelChain(app.id, "second/model");
+    await store.setModelChain(authority(app.id), app.id, "second/model");
     const defaults = db.raw
       .query("SELECT name, chain FROM bot_model_chains WHERE bot_id = ? AND is_default = 1")
       .all(app.id) as Array<{ name: string; chain: string }>;
@@ -1351,9 +1365,9 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5:thinking");
-    await store.upsertModelChain(app.id, "cheap", "groq/llama-3-3");
+    await store.setModelChain(authority(app.id), app.id, "ark/deepseek-v4-flash");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5:thinking");
+    await store.upsertModelChain(authority(app.id), app.id, "cheap", "groq/llama-3-3");
     const chains = await store.getModelChains(app.id);
     expect(chains.map((c) => ({ name: c.name, chain: c.chain, is_default: c.is_default }))).toEqual([
       { name: "cheap", chain: "groq/llama-3-3", is_default: false },
@@ -1366,12 +1380,12 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "fast", "first/model");
-    await store.upsertModelChain(app.id, "fast", "second/model");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "first/model");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "second/model");
     expect(rawCount(db, "bot_model_chains")).toBe(1);
     expect((await store.getModelChains(app.id))[0]!.chain).toBe("second/model");
     for (const name of ["default", "Default", "UPPER", "has space", "-lead", "a".repeat(65)]) {
-      await expect(store.upsertModelChain(app.id, name, "x/y")).rejects.toThrow(InvalidModelChainNameError);
+      await expect(store.upsertModelChain(authority(app.id), app.id, name, "x/y")).rejects.toThrow(InvalidModelChainNameError);
     }
     expect(rawCount(db, "bot_model_chains")).toBe(1);
   });
@@ -1380,7 +1394,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await expect(store.upsertModelChain(app.id, "fast", "   ")).rejects.toThrow(InvalidModelSelectorError);
+    await expect(store.upsertModelChain(authority(app.id), app.id, "fast", "   ")).rejects.toThrow(InvalidModelSelectorError);
     expect(rawCount(db, "bot_model_chains")).toBe(0);
   });
 
@@ -1388,39 +1402,39 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
-    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
-    await store.setModelChainSeat(app.id, "frontend-dev", "fast");
-    expect(await store.removeModelChain(app.id, "fast")).toBe(true);
+    await store.setModelChain(authority(app.id), app.id, "ark/deepseek-v4-flash");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(authority(app.id), app.id, "frontend-dev", "fast");
+    expect(await store.removeModelChain(authority(app.id), app.id, "fast")).toBe(true);
     expect(rawCount(db, "bot_model_chains")).toBe(1);
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
     expect(await store.getModelChainSeats(app.id)).toEqual({});
-    expect(await store.removeModelChain(app.id, "nope")).toBe(false);
-    await expect(store.removeModelChain(app.id, "default")).rejects.toThrow(InvalidModelChainNameError);
+    expect(await store.removeModelChain(authority(app.id), app.id, "nope")).toBe(false);
+    await expect(store.removeModelChain(authority(app.id), app.id, "default")).rejects.toThrow(InvalidModelChainNameError);
   });
 
   test("setModelChainSeat stores a chain reference; getModelChainSeats reads it back; blank/'default' clears (absent = default)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
-    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "fast");
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
-    await store.setModelChainSeat(app.id, "code-reviewer", "");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "");
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
     expect(await store.getModelChainSeats(app.id)).toEqual({});
-    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
-    await store.setModelChainSeat(app.id, "code-reviewer", "default");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "default");
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
-    await expect(store.setModelChainSeat(app.id, "code-reviewer", "")).resolves.toBeUndefined();
+    await expect(store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "")).resolves.toBeUndefined();
   });
 
   test("setModelChainSeat referencing a missing chain → UnknownModelChainError, zero rows written", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await expect(store.setModelChainSeat(app.id, "code-reviewer", "no-such-chain")).rejects.toThrow(
+    await expect(store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "no-such-chain")).rejects.toThrow(
       UnknownModelChainError,
     );
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
@@ -1431,12 +1445,12 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
     for (const role of ["reviewer", "smol", "mstar-review-seat "]) {
-      await expect(store.setModelChainSeat(app.id, role, "fast")).rejects.toThrow(UnknownModelRoleError);
-      await expect(store.clearModelChainSeat(app.id, role)).rejects.toThrow(UnknownModelRoleError);
-      await expect(store.setModelChainSeats(app.id, { [role]: "fast" })).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.setModelChainSeat(authority(app.id), app.id, role, "fast")).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.clearModelChainSeat(authority(app.id), app.id, role)).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.setModelChainSeats(authority(app.id), app.id, { [role]: "fast" })).rejects.toThrow(UnknownModelRoleError);
     }
     await expect(
-      store.setModelChainSeats(app.id, { "code-reviewer": "fast", reviewer: "fast" }),
+      store.setModelChainSeats(authority(app.id), app.id, { "code-reviewer": "fast", reviewer: "fast" }),
     ).rejects.toThrow(UnknownModelRoleError);
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
   });
@@ -1445,9 +1459,9 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
-    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
-    await store.setModelChainSeats(app.id, {
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "fast");
+    await store.setModelChainSeats(authority(app.id), app.id, {
       "mstar-review-seat": "fast",
       "code-reviewer": "",
       "fullstack-dev": "fast",
@@ -1458,7 +1472,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
       "mstar-review-seat": "fast",
     });
     await expect(
-      store.setModelChainSeats(app.id, { "frontend-dev": "fast", "code-reviewer": "no-such-chain" }),
+      store.setModelChainSeats(authority(app.id), app.id, { "frontend-dev": "fast", "code-reviewer": "no-such-chain" }),
     ).rejects.toThrow(UnknownModelChainError);
     expect(rawCount(db, "bot_model_chain_seats")).toBe(2);
   });
@@ -1467,8 +1481,8 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
-    await store.setModelChainSeat(app.id, "code-reviewer", "  fast  ");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "  fast  ");
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
     expect(rawCount(db, "bot_model_chain_seats")).toBe(1);
     const chainName = db.raw
@@ -1476,10 +1490,10 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
       .get(app.id, "code-reviewer") as { chain_name: string };
     expect(chainName.chain_name).toBe("fast");
     await expect(store.getModelOverridesForConsumer(app.id)).resolves.toEqual({ "code-reviewer": "openai/gpt-5" });
-    await store.setModelChainSeat(app.id, "code-reviewer", "  default  ");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "  default  ");
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
-    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
-    await store.setModelChainSeat(app.id, "code-reviewer", " \t ");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", " \t ");
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
   });
 
@@ -1487,8 +1501,8 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
-    await store.setModelChainSeats(app.id, {
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeats(authority(app.id), app.id, {
       "code-reviewer": "fast ",
       "frontend-dev": "  default  ",
     });
@@ -1501,11 +1515,11 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
-    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "fast");
     const failing = createBatchRejectingD1(db);
     await expect(
-      configStore(failing).setModelChainSeats(app.id, {
+      configStore(failing).setModelChainSeats(authority(app.id), app.id, {
         "mstar-review-seat": "fast",
         "code-reviewer": "",
       }),
@@ -1519,11 +1533,11 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5:thinking, anthropic/claude-x");
-    await store.upsertModelChain(app.id, "cheap", "groq/llama-3-3");
-    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
-    await store.setModelChainSeat(app.id, "mstar-review-seat", "default");
+    await store.setModelChain(authority(app.id), app.id, "ark/deepseek-v4-flash");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5:thinking, anthropic/claude-x");
+    await store.upsertModelChain(authority(app.id), app.id, "cheap", "groq/llama-3-3");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(authority(app.id), app.id, "mstar-review-seat", "default");
     expect(await store.getModelOverridesForConsumer(app.id)).toEqual({
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
@@ -1547,10 +1561,10 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const x = await seedApp(db, { slug: "app-x", createdBy: "mallory" });
     const y = await seedApp(db, { slug: "app-y", createdBy: "ada", githubAppId: 1002 });
     const store = configStore(db);
-    await store.upsertModelChain(x.id, "fast", "openai/gpt-x");
-    await store.setModelChainSeat(x.id, "code-reviewer", "fast");
-    await store.upsertModelChain(y.id, "cheap", "anthropic/claude-y");
-    await store.setModelChainSeat(y.id, "mstar-review-seat", "cheap");
+    await store.upsertModelChain(authority(x.id), x.id, "fast", "openai/gpt-x");
+    await store.setModelChainSeat(authority(x.id), x.id, "code-reviewer", "fast");
+    await store.upsertModelChain(authority(y.id), y.id, "cheap", "anthropic/claude-y");
+    await store.setModelChainSeat(authority(y.id), y.id, "mstar-review-seat", "cheap");
     expect(await store.getModelChains(x.id)).toHaveLength(1);
     expect(await store.getModelChainSeats(x.id)).toEqual({ "code-reviewer": "fast" });
     expect(await store.getModelChainSeats(y.id)).toEqual({ "mstar-review-seat": "cheap" });
@@ -1559,8 +1573,8 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
   test("unknown bot_id → FK violation on insert (fail-loud, same as every write here)", async () => {
     const db = createAppConfigD1();
     await expect(
-      configStore(db).upsertModelChain("no-such-app", "fast", "openai/gpt-5"),
-    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+      configStore(db).upsertModelChain(authority("no-such-app"), "no-such-app", "fast", "openai/gpt-5"),
+    ).rejects.toThrow(/refused/);
   });
 });
 
@@ -1576,7 +1590,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
 
   test("upsert stores the declaration and its key row (secretbox envelope at rest); the list face carries NO key material", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await configStore(db).upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     const decl = db.raw
       .query("SELECT * FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?")
       .get(app.id, CUSTOM.provider_id) as { model_ids: string; created_at: string; updated_at: string };
@@ -1608,7 +1622,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
 
   test("AAD rowKey is the exact string app_custom_provider_keys.key_enc:<app_id>:<provider>:<key_id> — the consumer decrypts with it", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await configStore(db).upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     const row = db.raw
       .query("SELECT key_id, key_enc FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?")
       .get(app.id, CUSTOM.provider_id) as { key_id: string; key_enc: string };
@@ -1630,11 +1644,11 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("re-upserting a provider_id updates the declaration; a re-submitted key stays one slot, a new key adds one", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     db.raw
       .prepare("UPDATE bot_custom_providers SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ? AND provider_id = ?")
       .run(app.id, CUSTOM.provider_id);
-    await store.upsertCustomProvider(app.id, { ...CUSTOM, model_ids: ["deepseek-v4-flash"] }, PLAIN_CUSTOM_KEY);
+    await store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, model_ids: ["deepseek-v4-flash"] }, PLAIN_CUSTOM_KEY);
     const decl = db.raw
       .query("SELECT model_ids, updated_at FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?")
       .get(app.id, CUSTOM.provider_id) as { model_ids: string; updated_at: string };
@@ -1649,7 +1663,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
         `app_custom_provider_keys.key_enc:${app.id}:${CUSTOM.provider_id}:${await keyIdOf(PLAIN_CUSTOM_KEY)}`,
       ),
     ).resolves.toBe(PLAIN_CUSTOM_KEY);
-    await store.upsertCustomProvider(app.id, { ...CUSTOM, model_ids: ["deepseek-v4-flash"] }, sk("custom-ark-7777"));
+    await store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, model_ids: ["deepseek-v4-flash"] }, sk("custom-ark-7777"));
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(2);
     const keys = await store.listCustomProviderKeys(app.id, CUSTOM.provider_id);
     expect(keys.map((key) => key.last4).sort()).toEqual(["7777", "9988"]);
@@ -1658,8 +1672,8 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("an endpoint change is refused while the pool holds a key (A1) — zero writes; an emptied pool re-declares freely", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
-    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk("custom-ark-7777"), CUSTOM);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.addCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, sk("custom-ark-7777"), CUSTOM);
     const selectDeclaration = `SELECT base_url, api, model_ids, created_at, updated_at
        FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`;
     const before = db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id);
@@ -1667,18 +1681,18 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" },
       { ...CUSTOM, api: "anthropic-messages" as const },
     ]) {
-      await expect(store.upsertCustomProvider(app.id, moved, sk("custom-ark-8888"))).rejects.toThrow(
+      await expect(store.upsertCustomProvider(authority(app.id), app.id, moved, sk("custom-ark-8888"))).rejects.toThrow(
         ProviderEndpointLockedError,
       );
     }
     expect(db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id)).toEqual(before);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(2);
-    await store.upsertCustomProvider(app.id, { ...CUSTOM, model_ids: ["deepseek-r1"] }, PLAIN_CUSTOM_KEY);
-    await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(PLAIN_CUSTOM_KEY));
-    await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(sk("custom-ark-7777")));
+    await store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, model_ids: ["deepseek-r1"] }, PLAIN_CUSTOM_KEY);
+    await store.deleteCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, await keyIdOf(PLAIN_CUSTOM_KEY));
+    await store.deleteCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, await keyIdOf(sk("custom-ark-7777")));
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
     await expect(
-      store.upsertCustomProvider(app.id, { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" }, PLAIN_CUSTOM_KEY),
+      store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" }, PLAIN_CUSTOM_KEY),
     ).resolves.toBeUndefined();
     expect((await store.listCustomProviders(app.id))[0]!.base_url).toBe("https://elsewhere.example.com/v1");
   });
@@ -1686,13 +1700,13 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("the consumer face reads a declaration and its pool from ONE snapshot (A2): a remove + re-declare cannot pair endpoint A with key B", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     const MOVED: AppCustomProvider = { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" };
     const MOVED_KEY = sk("custom-moved-6161");
     const racing = configStore(
       createPoolReadRaceD1(db, async () => {
-        await configStore(db).removeCustomProvider(app.id, CUSTOM.provider_id);
-        await configStore(db).upsertCustomProvider(app.id, MOVED, MOVED_KEY);
+        await configStore(db).removeCustomProvider(authority(app.id), app.id, CUSTOM.provider_id);
+        await configStore(db).upsertCustomProvider(authority(app.id), app.id, MOVED, MOVED_KEY);
       }),
     );
     await expect(racing.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
@@ -1703,7 +1717,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("custom-provider keys resolve through the pool table: ordered, maskable, deletable, legacy rows promoted", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await configStore(db).upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       PLAIN_CUSTOM_KEY,
       `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`,
@@ -1734,7 +1748,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       ),
     ).resolves.toBe(PLAIN_CUSTOM_KEY);
     const second = sk("custom-ark-7777");
-    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, second, CUSTOM);
+    await store.addCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, second, CUSTOM);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(2);
     const keys = await store.listCustomProviderKeys(app.id, CUSTOM.provider_id);
     expect(keys.map((key) => key.keyId)).toEqual([await keyIdOf(PLAIN_CUSTOM_KEY), await keyIdOf(second)]);
@@ -1743,10 +1757,10 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(await store.getCustomProvidersForConsumer(app.id)).toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY, second] },
     ]);
-    expect(await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(second))).toBe(true);
+    expect(await store.deleteCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, await keyIdOf(second))).toBe(true);
     expect((await store.getCustomProvidersForConsumer(app.id))[0]!.api_keys).toEqual([PLAIN_CUSTOM_KEY]);
-    expect(await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, "0".repeat(16))).toBe(false);
-    await expect(store.addCustomProviderKey(app.id, "not-declared", second, CUSTOM)).rejects.toThrow(
+    expect(await store.deleteCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, "0".repeat(16))).toBe(false);
+    await expect(store.addCustomProviderKey(authority(app.id), app.id, "not-declared", second, CUSTOM)).rejects.toThrow(
       InvalidCustomProviderError,
     );
   });
@@ -1754,22 +1768,22 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("removeCustomProvider deletes the declaration AND its key rows; an unknown id is an idempotent no-op", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
-    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk("custom-ark-7777"), CUSTOM);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.addCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, sk("custom-ark-7777"), CUSTOM);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(2);
-    await expect(store.removeCustomProvider(app.id, "nope")).resolves.toBe(false);
-    await expect(store.removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(true);
+    await expect(store.removeCustomProvider(authority(app.id), app.id, "nope")).resolves.toBe(false);
+    await expect(store.removeCustomProvider(authority(app.id), app.id, CUSTOM.provider_id)).resolves.toBe(true);
     await expect(store.listCustomProviders(app.id)).resolves.toEqual([]);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
-    await expect(store.removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(false);
+    await expect(store.removeCustomProvider(authority(app.id), app.id, CUSTOM.provider_id)).resolves.toBe(false);
   });
 
   test("a refused ninth custom key commits NEITHER the key nor the changed declaration", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
-      await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk(`custom-pool-key-${i}-${i}${i}${i}`), CUSTOM);
+      await store.addCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, sk(`custom-pool-key-${i}-${i}${i}${i}`), CUSTOM);
     }
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
     rawRun(
@@ -1784,6 +1798,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const ninth = sk("custom-pool-key-ninth-9999");
     await expect(
       store.upsertCustomProvider(
+        authority(app.id),
         app.id,
         { ...CUSTOM, model_ids: ["changed-model"] },
         ninth,
@@ -1800,7 +1815,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("a crypto failure at declaration time leaves NO declaration behind", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, undefined);
-    await expect(store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY)).rejects.toThrow(/secretbox/);
+    await expect(store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY)).rejects.toThrow(/secretbox/);
     expect(rawCount(db, "bot_custom_providers")).toBe(0);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
   });
@@ -1808,13 +1823,14 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("a declaration removed between the ownership read and the key write leaves no orphan credential", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     const race = () => {
       rawRun(db, "DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?", app.id, CUSTOM.provider_id);
       rawRun(db, "DELETE FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?", app.id, CUSTOM.provider_id);
     };
     await expect(
       configStore(createDeclarationRaceD1(db, race)).addCustomProviderKey(
+        authority(app.id),
         app.id,
         CUSTOM.provider_id,
         sk("custom-orphan-3131"),
@@ -1823,7 +1839,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     ).rejects.toThrow(InvalidCustomProviderError);
     expect(rawCount(db, "bot_custom_providers")).toBe(0);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     await expect(store.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY] },
     ]);
@@ -1832,7 +1848,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("a declaration removed during upsertCustomProvider commits neither the declaration nor the key", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     const racing = configStore(
       createDeclarationRaceD1(db, () => {
         rawRun(db, "DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?", app.id, CUSTOM.provider_id);
@@ -1840,7 +1856,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       }),
     );
     await expect(
-      racing.upsertCustomProvider(app.id, { ...CUSTOM, model_ids: ["changed-model"] }, sk("custom-race-4141")),
+      racing.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, model_ids: ["changed-model"] }, sk("custom-race-4141")),
     ).rejects.toThrow(InvalidCustomProviderError);
     expect(rawCount(db, "bot_custom_providers")).toBe(0);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
@@ -1850,7 +1866,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+      await store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
     }
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT - 1);
     const LOSING = sk("custom-losing-8282");
@@ -1859,6 +1875,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const racing = configStore(
       createLastSlotRaceD1(db, async () => {
         await configStore(db).upsertCustomProvider(
+          authority(app.id),
           app.id,
           { ...CUSTOM, provider_id: target, base_url: "https://winner.example.com/v1", model_ids: ["winner-model"] },
           WINNING,
@@ -1867,6 +1884,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     );
     await expect(
       racing.upsertCustomProvider(
+        authority(app.id),
         app.id,
         { ...CUSTOM, provider_id: target, base_url: "https://loser.example.com/v1", model_ids: ["loser-model"] },
         LOSING,
@@ -1885,12 +1903,13 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db: db2, app: app2 } = await seededWorld();
     const store2 = configStore(db2);
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store2.upsertCustomProvider(app2.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+      await store2.upsertCustomProvider(authority(app2.id), app2.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
     }
     let winnerRow: unknown = null;
     const racing2 = configStore(
       createLastSlotRaceD1(db2, async () => {
         await configStore(db2).upsertCustomProvider(
+          authority(app2.id),
           app2.id,
           { ...CUSTOM, provider_id: target, base_url: "https://winner.example.com/v1", model_ids: ["winner-model"] },
           WINNING,
@@ -1901,7 +1920,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       }),
     );
     await expect(
-      racing2.upsertCustomProvider(app2.id, { ...CUSTOM, provider_id: target }, WINNING),
+      racing2.upsertCustomProvider(authority(app2.id), app2.id, { ...CUSTOM, provider_id: target }, WINNING),
     ).rejects.toThrow("custom provider cap (8) reached");
     expect(winnerRow).not.toBeNull();
     expect(
@@ -1916,7 +1935,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+      await store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
     }
     const WINNING = sk("custom-winner-same-endpoint-7171");
     const LOSING = sk("custom-loser-same-endpoint-6161");
@@ -1924,6 +1943,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const racing = configStore(
       createLastSlotRaceD1(db, async () => {
         await configStore(db).upsertCustomProvider(
+          authority(app.id),
           app.id,
           { ...CUSTOM, provider_id: target, model_ids: ["winner-model"] },
           WINNING,
@@ -1931,7 +1951,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       }),
     );
     await expect(
-      racing.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: target, model_ids: ["loser-model"] }, LOSING),
+      racing.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, provider_id: target, model_ids: ["loser-model"] }, LOSING),
     ).resolves.toBeUndefined();
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     const decl = db.raw
@@ -1945,7 +1965,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       [WINNING, LOSING].sort(),
     );
     await expect(
-      store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-over" }, PLAIN_CUSTOM_KEY),
+      store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, provider_id: "prov-over" }, PLAIN_CUSTOM_KEY),
     ).rejects.toThrow("custom provider cap (8) reached");
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
   });
@@ -1956,10 +1976,10 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const LOSING = sk("custom-losing-9292");
     const racing = configStore(
       createLastSlotRaceD1(db, async () => {
-        await configStore(db).upsertCustomProvider(app.id, CUSTOM, WINNING);
+        await configStore(db).upsertCustomProvider(authority(app.id), app.id, CUSTOM, WINNING);
       }),
     );
-    await expect(racing.upsertCustomProvider(app.id, CUSTOM, LOSING)).resolves.toBeUndefined();
+    await expect(racing.upsertCustomProvider(authority(app.id), app.id, CUSTOM, LOSING)).resolves.toBeUndefined();
     expect(rawCount(db, "bot_custom_providers")).toBe(1);
     const consumer = await configStore(db).getCustomProvidersForConsumer(app.id);
     expect(consumer).toHaveLength(1);
@@ -1972,6 +1992,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const racing2 = configStore(
       createLastSlotRaceD1(db2, async () => {
         await configStore(db2).upsertCustomProvider(
+          authority(app2.id),
           app2.id,
           { ...CUSTOM, base_url: "https://winner.example.com/v1", model_ids: ["winner-model"] },
           WINNING,
@@ -1979,7 +2000,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       }),
     );
     await expect(
-      racing2.upsertCustomProvider(app2.id, { ...CUSTOM, base_url: "https://loser.example.com/v1" }, LOSING),
+      racing2.upsertCustomProvider(authority(app2.id), app2.id, { ...CUSTOM, base_url: "https://loser.example.com/v1" }, LOSING),
     ).rejects.toThrow(ProviderEndpointLockedError);
     expect(await winnerSnap()).toEqual({
       base_url: "https://winner.example.com/v1",
@@ -2001,7 +2022,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const legacy = sk("custom-legacy-delete-5151");
-    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await configStore(db).upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       legacy,
       `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`,
@@ -2019,7 +2040,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const carried = db.raw.query("SELECT key_id FROM bot_custom_provider_keys").get() as { key_id: string };
     expect(carried.key_id).toBe("");
     expect(
-      await configStore(db).deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(legacy)),
+      await configStore(db).deleteCustomProviderKey(authority(app.id), app.id, CUSTOM.provider_id, await keyIdOf(legacy)),
     ).toBe(true);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
   });
@@ -2043,11 +2064,11 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     ];
     for (const patch of bad) {
       await expect(
-        configStore(db).upsertCustomProvider(app.id, { ...CUSTOM, ...patch } as AppCustomProvider, PLAIN_CUSTOM_KEY),
+        configStore(db).upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, ...patch } as AppCustomProvider, PLAIN_CUSTOM_KEY),
       ).rejects.toThrow(InvalidCustomProviderError);
     }
-    await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "")).rejects.toThrow(InvalidCustomProviderError);
-    await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "k".repeat(4097))).rejects.toThrow(ProviderKeyTooLongError);
+    await expect(configStore(db).upsertCustomProvider(authority(app.id), app.id, CUSTOM, "")).rejects.toThrow(InvalidCustomProviderError);
+    await expect(configStore(db).upsertCustomProvider(authority(app.id), app.id, CUSTOM, "k".repeat(4097))).rejects.toThrow(ProviderKeyTooLongError);
     expect(rawCount(db, "bot_custom_providers")).toBe(0);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
   });
@@ -2056,6 +2077,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     await expect(
       configStore(db).upsertCustomProvider(
+        authority(app.id),
         app.id,
         { ...CUSTOM, provider_id: "ark", base_url: "https://evil.example.com/" },
         PLAIN_CUSTOM_KEY,
@@ -2068,20 +2090,25 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     for (let i = 1; i <= MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+      await store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
     }
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     await expect(
-      store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-new" }, PLAIN_CUSTOM_KEY),
+      store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, provider_id: "prov-new" }, PLAIN_CUSTOM_KEY),
     ).rejects.toThrow("custom provider cap (8) reached");
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     await expect(
-      store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-1", model_ids: ["fresh-model"] }, PLAIN_CUSTOM_KEY),
+      store.upsertCustomProvider(authority(app.id), app.id, { ...CUSTOM, provider_id: "prov-1", model_ids: ["fresh-model"] }, PLAIN_CUSTOM_KEY),
     ).resolves.toBeUndefined();
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     const other = await seededWorld();
     await expect(
-      configStore(other.db).upsertCustomProvider(other.app.id, { ...CUSTOM, provider_id: "prov-1" }, PLAIN_CUSTOM_KEY),
+      configStore(other.db).upsertCustomProvider(
+        authority(other.app.id),
+        other.app.id,
+        { ...CUSTOM, provider_id: "prov-1" },
+        PLAIN_CUSTOM_KEY,
+      ),
     ).resolves.toBeUndefined();
     expect(rawCount(other.db, "bot_custom_providers")).toBe(1);
   });
@@ -2089,14 +2116,14 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("unknown bot_id → FK violation on insert (fail-loud, same as every write here)", async () => {
     const db = createAppConfigD1();
     await expect(
-      configStore(db).upsertCustomProvider("no-such-app", CUSTOM, PLAIN_CUSTOM_KEY),
-    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+      configStore(db).upsertCustomProvider(authority("no-such-app"), "no-such-app", CUSTOM, PLAIN_CUSTOM_KEY),
+    ).rejects.toThrow(/refused/);
   });
 
   test("getCustomProvidersForConsumer decrypts the pool through the store face; a tampered row throws (fail-loud)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     await expect(store.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY] },
     ]);
@@ -2112,7 +2139,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
 
   test("listCustomProviders fails loud on a malformed model_ids row (non-array / non-string JSON)", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await configStore(db).upsertCustomProvider(authority(app.id), app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     for (const malformed of ["null", "{}", '"x"', "[1, \"ok\"]"]) {
       db.raw
         .prepare("UPDATE bot_custom_providers SET model_ids = ? WHERE bot_id = ? AND provider_id = ?")
@@ -2181,9 +2208,13 @@ describe("duplication locks", () => {
 
 
 describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => {
+  // The RETIRED spelling is the test subject — the live form route is
+  // `/review-bots/:botId/settings` and never redirects.
+  const RETIRED = `/dashboard/default/apps/${APP_ID}/settings`;
+
   test("HTML navigation GET answers one 302 to the app's settings tab (no shell read)", async () => {
     const { db } = await seededWorld();
-    const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
+    const res = await htmlGet(RETIRED, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}?tab=settings`);
     expect(await res.text()).not.toContain("window.__BOOT__");
@@ -2191,14 +2222,14 @@ describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => 
 
   test("the redirect is address-level: a non-HTML GET takes it too", async () => {
     const { db } = await seededWorld();
-    const res = await get(SETTINGS, "", makeEnv(db));
+    const res = await get(RETIRED, "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}?tab=settings`);
   });
 });
 
 describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
-  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+  const SETTINGS_API = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
   test("manage face: app.sandbox_image_id + sandbox_images ({ id, enabled } rows, enabled entries only)", async () => {
     const { db } = await seededWorld();
@@ -2297,7 +2328,7 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
 });
 
 describe("API settings face — several repositories under one App (targets_many)", () => {
-  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+  const SETTINGS_API = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
   test("two live targets: 200, targets_many true and no target_id (no single policy to name)", async () => {
     const { db, app } = await seededWorld();
@@ -2339,7 +2370,7 @@ describe("API settings face — several repositories under one App (targets_many
     seedTarget(db, app.id, { workspaceId: consumer, name: "two", repoId: 880002, repoName: "two" });
 
     const res = await get(
-      `/dashboard/${consumer}/api/apps/${APP_ID}/settings`,
+      `/dashboard/${consumer}/api/review-bots/${BOT_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
     );
@@ -2357,7 +2388,7 @@ describe("API settings face — several repositories under one App (targets_many
 });
 
 describe("review gate (payload and ops)", () => {
-  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+  const SETTINGS_API = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
   test("manager face: gate and visibility defaults; the member face carries neither", async () => {
     const { db } = await seededWorld();
@@ -2370,7 +2401,8 @@ describe("review gate (payload and ops)", () => {
     };
     expect(body.can_manage).toBe(true);
     expect(body.check_gate).toEqual({ min_score: 60, pass_verdicts: ["ship it"] });
-    expect(body.app.github_visibility).toBe("unknown");
+    // F2: App identity fields are null on the bot-config payload.
+    expect(body.app.github_visibility).toBeNull();
 
     const member = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
     const memberBody = (await member.json()) as Record<string, unknown> & { app: Record<string, unknown> };
@@ -2381,7 +2413,7 @@ describe("review gate (payload and ops)", () => {
 
   test("manager face: an unreadable stored gate serves check_gate null and keeps the rest of the payload", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, `UPDATE review_targets SET check_pass_verdicts = '["lgtm"]' WHERE bot_id = ?`, app.id);
+    rawRun(db, `UPDATE review_targets SET check_pass_verdicts = '["lgtm"]' WHERE app_id = ?`, app.id);
     const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -2598,7 +2630,7 @@ describe("POST /dashboard/default/apps/:appId/settings — save-chain (op=save-c
 
   test("a duplicate model_chain field → 400, zero rows written (never a silent clear)", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).setModelChain(app.id, "existing/model");
+    await configStore(db).setModelChain(authority(app.id), app.id, "existing/model");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await worker.fetch(
       new Request(`https://worker.local${SETTINGS}`, {
@@ -2647,8 +2679,8 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("owner saves the map: chain references stored, plain-text 200", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "ark/deepseek-v4-flash:high");
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "  openai/gpt-5 , anthropic/claude-x  ");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-mstar-review-seat", "ark/deepseek-v4-flash:high");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "  openai/gpt-5 , anthropic/claude-x  ");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -2669,10 +2701,10 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("one save maps AND clears: blanks = the seat uses the default chain (full-map editor semantics)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "new/model");
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
-    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
-    await store.setModelChainSeat(app.id, "frontend-dev", "seat-code-reviewer");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-mstar-review-seat", "new/model");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "seat-code-reviewer");
+    await store.setModelChainSeat(authority(app.id), app.id, "frontend-dev", "seat-code-reviewer");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -2688,9 +2720,9 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("a D1 batch failure mid-save → 500, truthful 'nothing was stored', ZERO rows changed (Phase 5, PR #7 review)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "new/model");
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
-    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-mstar-review-seat", "new/model");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "seat-code-reviewer");
     const failing = createBatchRejectingD1(db);
     const res = await postForm(
       SETTINGS,
@@ -2707,8 +2739,8 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("an all-blank save clears every reference (empty = every seat uses the default chain)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
-    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "seat-code-reviewer");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -2724,8 +2756,8 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("a chain reference naming a chain the App does not have → 400 naming the role, zero rows written (validate-all-first)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
-    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "seat-code-reviewer");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -2745,7 +2777,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("F-001: a padded chain reference canonicalizes to the real chain — never a dangling row (bulk save path)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "openai/gpt-5");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "openai/gpt-5");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -2777,8 +2809,8 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("a duplicate role_* field → 400, zero rows written (AL-23-2 explicit rejection)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
-    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "seat-code-reviewer");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await worker.fetch(
       new Request(`https://worker.local${SETTINGS}`, {
@@ -2797,8 +2829,8 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("a save with NO role fields at all → 400 re-render, zero rows written (never a silent no-op)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
-    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "seat-code-reviewer");
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "save-roles",
     });
@@ -2810,8 +2842,8 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("F-002: a PARTIAL map (missing seat keys) → 400 naming the absent roles, zero writes (full-map contract)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
-    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "seat-code-reviewer");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -2832,7 +2864,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("non-owner member → 403, zero mutation; admin (non-creator) may save — owner-or-admin", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-code-reviewer", "openai/gpt-5");
+    await store.upsertModelChain(authority(app.id), app.id, "seat-code-reviewer", "openai/gpt-5");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
@@ -2873,7 +2905,7 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
   test("add-chain replaces an existing named chain (upsert); the default row is untouched", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
+    await store.setModelChain(authority(app.id), app.id, "ark/deepseek-v4-flash");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const env = makeEnv(db);
     await postForm(SETTINGS, cookie, env, { op: "add-chain", name: "fast", chain: "first/model" });
@@ -2898,7 +2930,7 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
   test("add-chain validates the selector chain like save-chain: garbage → 400, membership miss → 400, zero rows", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY, ["claude-sonnet-4-6"]);
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY, ["claude-sonnet-4-6"]);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const env = makeEnv(db);
     const garbage = await postForm(SETTINGS, cookie, env, { op: "add-chain", name: "fast", chain: " , ," });
@@ -2917,9 +2949,9 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
   test("remove-chain deletes the named chain AND its seat references (seats fall back to default)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
-    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
-    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.setModelChain(authority(app.id), app.id, "ark/deepseek-v4-flash");
+    await store.upsertModelChain(authority(app.id), app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "fast");
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "remove-chain",
       name: "fast",
@@ -2933,7 +2965,7 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
   test("remove-chain rejects the reserved 'default' name → 400, zero rows written", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
+    await store.setModelChain(authority(app.id), app.id, "ark/deepseek-v4-flash");
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "remove-chain",
       name: "default",
@@ -2962,8 +2994,8 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
   test("owner removes ONE stored key by its id: that row goes, its sibling stays", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    await store.addProviderKey(app.id, "anthropic", SECOND_ANTHROPIC_KEY);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", SECOND_ANTHROPIC_KEY);
     const res = await postForm(SETTINGS + "/key/delete", `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       provider: "anthropic",
       key_id: await keyIdOf(PLAIN_ANTHROPIC_KEY),
@@ -2977,7 +3009,7 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
   test("an unmatched key id (or a never-stored provider) is a tolerant warn — zero mutation", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const res = await postForm(SETTINGS + "/key/delete", `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       provider: "openai",
       key_id: await keyIdOf(PLAIN_ANTHROPIC_KEY),
@@ -2989,7 +3021,7 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
 
   test("non-owner member → 403, zero mutation", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const res = await postForm(SETTINGS + "/key/delete", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
       provider: "anthropic",
       key_id: await keyIdOf(PLAIN_ANTHROPIC_KEY),
@@ -3000,7 +3032,7 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
 
   test("admin (non-creator) may remove a key — owner-or-admin", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await configStore(db).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const res = await postForm(SETTINGS + "/key/delete", `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db), {
       provider: "anthropic",
       key_id: await keyIdOf(PLAIN_ANTHROPIC_KEY),
@@ -3012,7 +3044,7 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
 
 
 describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage probe)", () => {
-  const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
+  const USAGE = `/dashboard/default/api/review-bots/${BOT_ID}/keys/usage`;
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
 
   afterEach(() => {
@@ -3052,7 +3084,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     const { db, app, otherApp } = await seededWorld();
     const store = configStore(db);
     const foreignKey = sk("usage-foreign-4444");
-    await store.addProviderKey(otherApp.id, "zai", foreignKey);
+    await store.addProviderKey(authority(otherApp.id), otherApp.id, "zai", foreignKey);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
     const crossApp = await postForm(USAGE, cookie, makeEnv(db), {
@@ -3063,8 +3095,8 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     expect(await crossApp.json()).toEqual({ ok: false, reason: "unknown_key" });
 
     const ownKey = sk("usage-own-5555");
-    await store.addProviderKey(app.id, "zai", ownKey);
-    await store.deleteProviderKey(app.id, "zai", await keyIdOf(ownKey));
+    await store.addProviderKey(authority(app.id), app.id, "zai", ownKey);
+    await store.deleteProviderKey(authority(app.id), app.id, "zai", await keyIdOf(ownKey));
     const deleted = await postForm(USAGE, cookie, makeEnv(db), {
       provider: "zai",
       keyId: await keyIdOf(ownKey),
@@ -3076,7 +3108,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
   test("a stored key answers the provider snapshot — 200 with the limits and NO key material", async () => {
     const { db, app } = await seededWorld();
     const plainKey = sk("usage-zai-6666");
-    await configStore(db).addProviderKey(app.id, "zai", plainKey);
+    await configStore(db).addProviderKey(authority(app.id), app.id, "zai", plainKey);
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
       (async () =>
         new Response(
@@ -3109,6 +3141,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     const { db, app } = await seededWorld();
     const plainKey = sk("usage-proxy-7777");
     await configStore(db).upsertCustomProvider(
+      authority(app.id),
       app.id,
       {
         provider_id: "commandcode",
@@ -3143,6 +3176,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     const { db, app } = await seededWorld();
     const plainKey = sk("usage-vendor-8888");
     await configStore(db).upsertCustomProvider(
+      authority(app.id),
       app.id,
       {
         provider_id: "commandcode",
@@ -3186,8 +3220,9 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     const store = configStore(db);
     const builtinKey = sk("usage-builtin-9999");
     const declarationKey = sk("usage-declaration-0000");
-    await store.addProviderKey(app.id, "commandcode", builtinKey);
+    await store.addProviderKey(authority(app.id), app.id, "commandcode", builtinKey);
     await store.upsertCustomProvider(
+      authority(app.id),
       app.id,
       {
         provider_id: "commandcode",
@@ -3228,6 +3263,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     const { db, app } = await seededWorld();
     const store = configStore(db);
     await store.upsertCustomProvider(
+      authority(app.id),
       app.id,
       {
         provider_id: "broken",
@@ -3239,7 +3275,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     );
     rawRun(db, "UPDATE bot_custom_providers SET model_ids = '{not json' WHERE bot_id = ? AND provider_id = 'broken'", app.id);
     const plainKey = sk("usage-zai-neighbour-2222");
-    await store.addProviderKey(app.id, "zai", plainKey);
+    await store.addProviderKey(authority(app.id), app.id, "zai", plainKey);
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
       (async () =>
         new Response(
@@ -3360,7 +3396,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       model_ids: ["deepseek-v4-flash"],
     });
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), sk("custom-ark-9988"));
+      await store.upsertCustomProvider(authority(app.id), app.id, decl(`prov-${i}`), sk("custom-ark-9988"));
     }
     const fill = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, provider_id: "prov-8" });
     expect(fill.status).toBe(200);
@@ -3389,12 +3425,12 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const { db, app } = await seededWorld();
     const store = configStore(db);
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), sk("custom-ark-seed-1"));
+      await store.upsertCustomProvider(authority(app.id), app.id, decl(`prov-${i}`), sk("custom-ark-seed-1"));
     }
     const WINNING = sk("custom-winner-route-11");
     const LOSING = sk("custom-loser-route-22");
     const raced = createLastSlotRaceD1(db, async () => {
-      await configStore(db).upsertCustomProvider(app.id, decl(target, ["winner-model"]), WINNING);
+      await configStore(db).upsertCustomProvider(authority(app.id), app.id, decl(target, ["winner-model"]), WINNING);
     });
     const res = await postForm(SETTINGS, await mallory(), makeEnv(raced), {
       ...CUSTOM_FORM,
@@ -3414,9 +3450,9 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const { db: db2, app: app2 } = await seededWorld();
     const store2 = configStore(db2);
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store2.upsertCustomProvider(app2.id, decl(`prov-${i}`), sk("custom-ark-seed-2"));
+      await store2.upsertCustomProvider(authority(app2.id), app2.id, decl(`prov-${i}`), sk("custom-ark-seed-2"));
     }
-    await store2.upsertCustomProvider(app2.id, decl(target, ["winner-model"]), sk("custom-winner-route-33"));
+    await store2.upsertCustomProvider(authority(app2.id), app2.id, decl(target, ["winner-model"]), sk("custom-winner-route-33"));
     const late = await postForm(SETTINGS, await mallory(), makeEnv(db2), {
       ...CUSTOM_FORM,
       provider_id: target,
@@ -3446,10 +3482,11 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       model_ids: ["m1"],
     });
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), sk("template-seed-key"));
+      await store.upsertCustomProvider(authority(app.id), app.id, decl(`prov-${i}`), sk("template-seed-key"));
     }
     const raced = createLastSlotRaceD1(db, async () => {
       await configStore(db).upsertCustomProvider(
+        authority(app.id),
         app.id,
         {
           provider_id: "subconscious",
@@ -3471,9 +3508,10 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const { db: db2, app: app2 } = await seededWorld();
     const store2 = configStore(db2);
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store2.upsertCustomProvider(app2.id, decl(`prov-${i}`), sk("template-seed-key-2"));
+      await store2.upsertCustomProvider(authority(app2.id), app2.id, decl(`prov-${i}`), sk("template-seed-key-2"));
     }
     await store2.upsertCustomProvider(
+      authority(app2.id),
       app2.id,
       {
         provider_id: "subconscious",
@@ -3609,6 +3647,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const { db, app } = await seededWorld();
     const store = configStore(db);
     await store.upsertCustomProvider(
+      authority(app.id),
       app.id,
       {
         provider_id: "subconscious",
@@ -3691,7 +3730,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       models_meta: meta,
       has_keys: true,
     });
-    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const payload = await get(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, await mallory(), makeEnv(db));
     expect(payload.status).toBe(200);
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; model_ids: string[] }>;
@@ -3720,7 +3759,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const [decl] = await configStore(db).listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["fresh-a", "fresh-b"]);
     expect(decl!.models_meta).toEqual(meta);
-    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const payload = await get(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; models_meta?: Record<string, unknown> }>;
     };
@@ -3767,7 +3806,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["fresh-a", "fresh-b"]);
     expect(decl!.models_meta).toEqual({ "fresh-a": { contextWindow: 200000 } });
-    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const payload = await get(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; models_meta?: Record<string, unknown> }>;
     };
@@ -3969,7 +4008,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(decl!.models_meta).toBeUndefined();
     expect(decl!.base_url).toBe(before[0]!.base_url);
     expect(decl!.has_keys).toBe(true);
-    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const payload = await get(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; model_ids: string[]; models_meta?: Record<string, unknown> }>;
     };
@@ -4050,6 +4089,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const model = option.models.find((modelId) => group!.table![modelId] !== undefined);
     expect(model).toBeDefined();
     await configStore(db).upsertCustomProvider(
+      authority(app.id),
       app.id,
       {
         provider_id: group!.legacyId,

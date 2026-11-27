@@ -222,7 +222,7 @@ export function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJo
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    botRef: { appId: TEST_APP_ID },
+    botRef: { appId: TEST_APP_ID, botId: TEST_APP_ID },
     targetId: `target-${TEST_APP_ID}`,
     ...overrides,
   };

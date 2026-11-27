@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 
 const SESSION_SECRET = ["test", "bot", "scope", "secret", "32-bytes!"].join("-");
@@ -44,9 +44,8 @@ function seedBot(
   id: string,
   options: { githubAppId: number; workspaceId?: string; deleted?: boolean; name?: string },
 ): void {
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
           status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active',
@@ -54,15 +53,18 @@ function seedBot(
                '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
     )
     .run(id, options.githubAppId, options.name ?? id);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   if (options.workspaceId !== undefined) {
-    db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(id, options.workspaceId);
+    db.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)").run(id, options.workspaceId);
   }
 }
 
 function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
   db.raw
     .prepare(
-      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
        VALUES (?, ?, ?, ?, '2026-01-01T00:00:00.000Z', ${removed ? "'2026-01-03T00:00:00.000Z'" : "NULL"})`,
     )
     .run(crypto.randomUUID(), botId, installationId, `acct-${installationId}`);
@@ -72,7 +74,7 @@ function seedTarget(db: TestD1, botId: string, workspaceId: string, name: string
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, created_by, created_at, updated_at, deleted_at)
+         (id, workspace_id, app_id, name, created_by, created_at, updated_at, deleted_at)
        VALUES (?, ?, ?, ?, 'acme', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
                ${deleted ? "'2026-01-04T00:00:00.000Z'" : "NULL"})`,
     )
@@ -132,7 +134,9 @@ function audits(db: TestD1): Audit[] {
 }
 
 function storedScope(db: TestD1, botId: string): { scope: string; shared_at: string | null } {
-  return db.raw.query("SELECT scope, shared_at FROM review_bots WHERE id = ?").get(botId) as {
+  // The admin App route writes the APP's scope column (github_apps.scope) —
+  // the bot's own switch is the separate /api/review-bots/:botId/scope route.
+  return db.raw.query("SELECT scope, shared_at FROM github_apps WHERE id = ?").get(botId) as {
     scope: string;
     shared_at: string | null;
   };
@@ -226,7 +230,7 @@ describe("PATCH /_internal_admin/api/bots/:botId/scope", () => {
     expect(audits(db)).toEqual([]);
   });
 
-  test("an unknown or soft-deleted bot is 404 bot not found", async () => {
+  test("an unknown or soft-deleted App is 404 app not found", async () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
     seedBot(db, "bot-gone", { githubAppId: 7004, workspaceId: "default", deleted: true });
@@ -237,7 +241,7 @@ describe("PATCH /_internal_admin/api/bots/:botId/scope", () => {
         body: JSON.stringify({ scope: "shared" }),
       });
       expect(res.status).toBe(404);
-      expect(await res.json()).toEqual({ error: "bot not found" });
+      expect(await res.json()).toEqual({ error: "app not found" });
     }
     expect(audits(db)).toEqual([]);
   });
@@ -254,7 +258,7 @@ describe("PATCH /_internal_admin/api/bots/:botId/scope", () => {
       body: JSON.stringify({ scope: "shared" }),
     });
     expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: "bot is outside the official workspace" });
+    expect(await res.json()).toEqual({ error: "app is outside the official workspace" });
     expect(storedScope(db, "bot-elsewhere")).toEqual({ scope: "owned", shared_at: null });
     expect(audits(db)).toEqual([]);
   });
@@ -278,9 +282,9 @@ describe("PATCH /_internal_admin/api/bots/:botId/scope", () => {
     expect(storedScope(db, "bot-share")).toEqual({ scope: "shared", shared_at: body.sharedAt });
     expect(audits(db)).toEqual([
       {
-        action: "runtime.bot_scope.set",
+        action: "runtime.app_scope.set",
         actor_login: OPERATOR,
-        target_type: "bot",
+        target_type: "app",
         target_id: "bot-share",
         detail: {
           before: { scope: "owned", shared_at: null },
@@ -296,7 +300,7 @@ describe("PATCH /_internal_admin/api/bots/:botId/scope", () => {
     seedBot(db, "bot-unshare", { githubAppId: 7007, workspaceId: "default" });
     seedOfficialWorkspace(db, "default");
     db.raw
-      .prepare("UPDATE review_bots SET scope = 'shared', shared_at = '2026-01-05T00:00:00.000Z' WHERE id = ?")
+      .prepare("UPDATE github_apps SET scope = 'shared', shared_at = '2026-01-05T00:00:00.000Z' WHERE id = ?")
       .run("bot-unshare");
 
     const refused = await adminRequest(db, "/api/bots/bot-unshare/scope", {
@@ -317,9 +321,9 @@ describe("PATCH /_internal_admin/api/bots/:botId/scope", () => {
     expect(storedScope(db, "bot-unshare")).toEqual({ scope: "owned", shared_at: null });
     expect(audits(db)).toEqual([
       {
-        action: "runtime.bot_scope.set",
+        action: "runtime.app_scope.set",
         actor_login: OPERATOR,
-        target_type: "bot",
+        target_type: "app",
         target_id: "bot-unshare",
         detail: {
           before: { scope: "shared", shared_at: "2026-01-05T00:00:00.000Z" },
@@ -449,7 +453,7 @@ describe("GET /_internal_admin/api/bots", () => {
     seedBot(db, "bot-a", { githubAppId: 7102, workspaceId: "default", name: "Zulu" });
     seedBot(db, "bot-dead", { githubAppId: 7103, workspaceId: "default", deleted: true, name: "Alpha" });
     db.raw
-      .prepare("UPDATE review_bots SET scope = 'shared', shared_at = '2026-01-05T00:00:00.000Z' WHERE id = 'bot-b'")
+      .prepare("UPDATE github_apps SET scope = 'shared', shared_at = '2026-01-05T00:00:00.000Z' WHERE id = 'bot-b'")
       .run();
     seedInstallation(db, "bot-b", 8101);
     seedInstallation(db, "bot-b", 8102, true);
@@ -473,6 +477,9 @@ describe("GET /_internal_admin/api/bots", () => {
           isOfficial: false,
           scope: "shared",
           sharedAt: "2026-01-05T00:00:00.000Z",
+          // The bot's own switch stayed owned — the two are separate post-split.
+          botScope: "owned",
+          botSharedAt: null,
           installationCount: 1,
           liveTargetCount: 2,
           deletedAt: null,
@@ -486,6 +493,8 @@ describe("GET /_internal_admin/api/bots", () => {
           isOfficial: true,
           scope: "owned",
           sharedAt: null,
+          botScope: "owned",
+          botSharedAt: null,
           installationCount: 1,
           liveTargetCount: 0,
           deletedAt: null,
@@ -518,6 +527,8 @@ describe("GET /_internal_admin/api/bots", () => {
           isOfficial: false,
           scope: "owned",
           sharedAt: null,
+          botScope: "owned",
+          botSharedAt: null,
           installationCount: 0,
           liveTargetCount: 0,
           deletedAt: null,

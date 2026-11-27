@@ -20,7 +20,7 @@ const misaligned = (alias: string) => `t.deleted_at IS NULL
 const prConflict = (alias: string) => `EXISTS (
   SELECT 1 FROM review_targets h JOIN pull_requests o ON o.target_id = h.id
    WHERE h.deleted_at IS NULL
-     AND h.bot_id = (SELECT b.bot_id FROM review_targets b WHERE b.id = ${alias}.target_id)
+     AND h.app_id = (SELECT b.app_id FROM review_targets b WHERE b.id = ${alias}.target_id)
      AND h.repo_owner = ${alias}.owner COLLATE NOCASE AND h.repo_name = ${alias}.repo COLLATE NOCASE
      AND o.owner = ${alias}.owner COLLATE NOCASE AND o.repo = ${alias}.repo COLLATE NOCASE
      AND o.pr_number = ${alias}.pr_number)`;
@@ -40,74 +40,74 @@ const misalignedRows = (after: string) => {
   const floor = (alias: string) =>
     ` AND lower(${alias}.owner) || '/' || lower(${alias}.repo) > ${after}`;
   return `
-  SELECT 'pull_requests' AS src, p.id, t.bot_id, p.owner, p.repo,
+  SELECT 'pull_requests' AS src, p.id, t.app_id, p.owner, p.repo,
          lower(p.owner) || '/' || lower(p.repo) AS group_key
     FROM pull_requests p JOIN review_targets t ON t.id = p.target_id
    WHERE ${misaligned("p")} AND NOT (${prConflict("p")})${floor("p")}
   UNION ALL
-  SELECT 'reviews', r.id, t.bot_id, r.owner, r.repo,
+  SELECT 'reviews', r.id, t.app_id, r.owner, r.repo,
          lower(r.owner) || '/' || lower(r.repo)
     FROM reviews r JOIN review_targets t ON t.id = r.target_id
    WHERE ${misaligned("r")}${floor("r")}
   UNION ALL
-  SELECT 'review_findings', f.id, t.bot_id, f.owner, f.repo,
+  SELECT 'review_findings', f.id, t.app_id, f.owner, f.repo,
          lower(f.owner) || '/' || lower(f.repo)
     FROM review_findings f JOIN review_targets t ON t.id = f.target_id
    WHERE ${misaligned("f")}${floor("f")}
   UNION ALL
-  SELECT 'review_failures', x.id, t.bot_id, x.owner, x.repo,
+  SELECT 'review_failures', x.id, t.app_id, x.owner, x.repo,
          lower(x.owner) || '/' || lower(x.repo)
     FROM review_failures x JOIN review_targets t ON t.id = x.target_id
    WHERE ${misaligned("x")}${floor("x")}`;
 };
 
 const alignmentGroups = (after: string) => `
-  WITH live(src, id, bot_id, owner, repo, group_key) AS (${misalignedRows(after)}),
+  WITH live(src, id, app_id, owner, repo, group_key) AS (${misalignedRows(after)}),
   named(group_key, owner, repo) AS (
     SELECT group_key, MIN(owner), MIN(repo) FROM live GROUP BY group_key),
-  claim(group_key, bots, bot_id) AS (
-    SELECT group_key, COUNT(DISTINCT bot_id), MIN(bot_id) FROM live GROUP BY group_key),
+  claim(group_key, bots, app_id) AS (
+    SELECT group_key, COUNT(DISTINCT app_id), MIN(app_id) FROM live GROUP BY group_key),
   homes(group_key, targets, repo_id) AS (
     SELECT c.group_key, COUNT(t.id), MIN(t.repo_id)
       FROM claim c
       JOIN named n ON n.group_key = c.group_key
       LEFT JOIN review_targets t
         ON t.deleted_at IS NULL
-       AND t.bot_id = CASE WHEN c.bots = 1 THEN c.bot_id END
+       AND t.app_id = CASE WHEN c.bots = 1 THEN c.app_id END
        AND t.repo_owner = n.owner COLLATE NOCASE AND t.repo_name = n.repo COLLATE NOCASE
      GROUP BY c.group_key),
   resolved AS (
     SELECT n.group_key, n.owner, n.repo,
-           CASE WHEN c.bots = 1 THEN c.bot_id END AS bot_id,
-           (SELECT w.workspace_id FROM bot_workspaces w WHERE w.bot_id = c.bot_id) AS workspace_id,
+           CASE WHEN c.bots = 1 THEN c.app_id END AS app_id,
+           (SELECT w.workspace_id FROM app_workspaces w WHERE w.app_id = c.app_id) AS workspace_id,
            COALESCE(h.targets, 0) AS targets,
            h.repo_id AS repo_id,
            (c.bots = 1 AND COALESCE(h.targets, 0) <= 1
             AND (COALESCE(h.targets, 0) = 1
-                 OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = c.bot_id))
+                 OR EXISTS (SELECT 1 FROM app_workspaces w WHERE w.app_id = c.app_id))
             AND (COALESCE(h.targets, 0) = 0 OR h.repo_id IS NULL)
-            AND NOT EXISTS (SELECT 1 FROM bot_installations i
-                             WHERE i.bot_id = c.bot_id AND i.removed_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM github_app_installations i
+                             WHERE i.app_id = c.app_id AND i.removed_at IS NULL
                                AND i.account_login = n.owner COLLATE NOCASE)) AS unbound
       FROM named n
       JOIN claim c ON c.group_key = n.group_key
       LEFT JOIN homes h ON h.group_key = n.group_key)`;
 
 const actionable = (alias: string) =>
-  `${alias}bot_id IS NOT NULL AND ${alias}targets <= 1
+  `${alias}app_id IS NOT NULL AND ${alias}targets <= 1
    AND (${alias}targets = 1 OR ${alias}workspace_id IS NOT NULL)`;
 
 const homeTarget = `SELECT t.id FROM review_targets t
-   WHERE t.deleted_at IS NULL AND t.bot_id = ?1
+   WHERE t.deleted_at IS NULL AND t.app_id = ?1
      AND t.repo_owner = ?2 COLLATE NOCASE AND t.repo_name = ?3 COLLATE NOCASE`;
 
 const INSERT_TARGET = `
   INSERT INTO review_targets
-    (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+    (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
      follow_workspace_defaults, created_by, created_at, updated_at)
   SELECT ?4, w.workspace_id, ?1, ?5, NULL, ?2, ?3, 1, ?6, datetime('now'), datetime('now')
-    FROM bot_workspaces w
-   WHERE w.bot_id = ?1
+    FROM app_workspaces w
+   WHERE w.app_id = ?1
      AND NOT EXISTS (${homeTarget})`;
 
 const repointGroup = (table: string) => `
@@ -117,14 +117,14 @@ const repointGroup = (table: string) => `
                   WHERE t.id = ${table}.target_id AND ${misaligned(table)})
      ${table === "pull_requests" ? `AND NOT (${prConflict(table)})` : ""}
      AND (SELECT COUNT(*) FROM review_targets t
-           WHERE t.deleted_at IS NULL AND t.bot_id = ?1
+           WHERE t.deleted_at IS NULL AND t.app_id = ?1
              AND t.repo_owner = ?2 COLLATE NOCASE AND t.repo_name = ?3 COLLATE NOCASE) = 1`;
 
 type Group = {
   group_key: string;
   owner: string;
   repo: string;
-  bot_id: string | null;
+  app_id: string | null;
   workspace_id: string | null;
   targets: number;
   repo_id: number | null;
@@ -152,7 +152,7 @@ async function planBatch(
   const read = await db
     .prepare(
       `${alignmentGroups("?1")}
-       SELECT group_key, owner, repo, bot_id, workspace_id, targets, repo_id, unbound
+       SELECT group_key, owner, repo, app_id, workspace_id, targets, repo_id, unbound
          FROM resolved ORDER BY group_key LIMIT ?2`,
     )
     .bind(after, GROUPS_PER_BATCH)
@@ -174,7 +174,7 @@ async function planBatch(
       plan.ambiguous += 1;
       continue;
     }
-    if (group.bot_id === null || (group.targets === 0 && group.workspace_id === null)) {
+    if (group.app_id === null || (group.targets === 0 && group.workspace_id === null)) {
       plan.unattributable += 1;
       continue;
     }
@@ -185,7 +185,7 @@ async function planBatch(
         db
           .prepare(INSERT_TARGET)
           .bind(
-            group.bot_id,
+            group.app_id,
             group.owner,
             group.repo,
             crypto.randomUUID(),
@@ -197,7 +197,7 @@ async function planBatch(
     for (const table of LEDGER_TABLES) {
       write.updates.push(plan.statements.length);
       plan.statements.push(
-        db.prepare(repointGroup(table)).bind(group.bot_id, group.owner, group.repo),
+        db.prepare(repointGroup(table)).bind(group.app_id, group.owner, group.repo),
       );
     }
     plan.writes.push(write);
@@ -276,13 +276,13 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
     let bindingFailed = 0;
     for (const { group } of moved) {
       if (group.targets === 1 && group.repo_id !== null) continue;
-      if (group.bot_id === null) {
+      if (group.app_id === null) {
         unbound += 1;
         continue;
       }
       const outcome = await bindRepository(
         db,
-        { botId: group.bot_id, owner: group.owner, repo: group.repo },
+        { botId: group.app_id, owner: group.owner, repo: group.repo },
         context,
       );
       if (outcome === "bound") bound += 1;

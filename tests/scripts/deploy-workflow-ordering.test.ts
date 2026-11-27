@@ -243,7 +243,7 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
         /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+workspace_members\b/i,
       );
       expect(source, `${file}: ${path} must still map Apps`).toMatch(
-        /INSERT\s+INTO\s+bot_workspaces\b/i,
+        /INSERT\s+INTO\s+app_workspaces\b/i,
       );
     });
 

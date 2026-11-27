@@ -28,10 +28,13 @@ const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].j
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-mallory-verify-9988");
 const APP_ID = 1001;
-const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
-const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
-const MODELS = `/dashboard/default/api/apps/${APP_ID}/models`;
-const SETTINGS_JSON = `/dashboard/default/api/apps/${APP_ID}/settings`;
+// Bot-config routes bind the bot ROW id (Task 4: disjoint from the numeric
+// GitHub App id), so the fixture pins a stable row id.
+const BOT_ID = "bot-settings-first";
+const SETTINGS = `/dashboard/default/review-bots/${BOT_ID}/settings`;
+const VERIFY = `/dashboard/default/api/review-bots/${BOT_ID}/keys/verify`;
+const MODELS = `/dashboard/default/api/review-bots/${BOT_ID}/models`;
+const SETTINGS_JSON = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
 type ConfiguredRow = {
   kind: string;
@@ -53,7 +56,7 @@ async function seededWorld() {
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
   seedDefaultMemberships(db, { octocat: "owner", mallory: "owner", hubot: "member" });
-  const id = crypto.randomUUID();
+  const id = BOT_ID;
   const box = createSecretbox(TEST_KEY);
   const app = await createReviewBotsStore(db).createApp({
     id,
@@ -347,8 +350,8 @@ describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
     const seedKey = sk("seed-key-1234");
-    await store.upsertCustomProvider(app.id, decl, seedKey);
-    await store.deleteCustomProviderKey(app.id, decl.provider_id, await keyIdOf(seedKey));
+    await store.upsertCustomProvider({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, decl, seedKey);
+    await store.deleteCustomProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, decl.provider_id, await keyIdOf(seedKey));
     return { db, app, store };
   }
 
@@ -394,10 +397,11 @@ describe("GET /dashboard/api/apps/:appId/models", () => {
   test("returns grouped selector grammar from verified cache + custom declarations", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
-    await store.saveVerifiedKey(app.id, "ark", PLAIN_KEY, ["doubao-seed-2-1-pro"]);
-    await store.saveVerifiedKey(app.id, "copilot", PLAIN_KEY, []);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "ark", PLAIN_KEY, ["doubao-seed-2-1-pro"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "copilot", PLAIN_KEY, []);
     await store.upsertCustomProvider(
+      { botId: app.id, workspaceId: "default", role: "owner" },
       app.id,
       {
         provider_id: "my-custom",
@@ -431,7 +435,7 @@ describe("GET /dashboard/api/apps/:appId/models", () => {
       api: "openai-completions" as const,
       model_ids: ["local-7b"],
     };
-    await store.upsertCustomProvider(app.id, decl, PLAIN_KEY);
+    await store.upsertCustomProvider({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, decl, PLAIN_KEY);
 
     type ModelsBody = { groups: Array<{ provider: string; selectors: string[] }> };
     const before = await getJson(MODELS, "mallory", env);
@@ -440,7 +444,7 @@ describe("GET /dashboard/api/apps/:appId/models", () => {
     const keyedChain = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: "my-custom/local-7b" });
     expect(keyedChain.status).toBe(200);
 
-    await store.deleteCustomProviderKey(app.id, "my-custom", await keyIdOf(PLAIN_KEY));
+    await store.deleteCustomProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "my-custom", await keyIdOf(PLAIN_KEY));
     expect(await store.listCustomProviderKeys(app.id, "my-custom")).toEqual([]);
 
     const after = await getJson(MODELS, "mallory", env);
@@ -466,7 +470,7 @@ describe("GET /dashboard/api/apps/:appId/models", () => {
       { kind: "custom", ...decl },
     ]);
 
-    await store.addCustomProviderKey(app.id, "my-custom", sk("custom-ark-5555"), {
+    await store.addCustomProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "my-custom", sk("custom-ark-5555"), {
       base_url: decl.base_url,
       api: decl.api,
     });
@@ -486,7 +490,7 @@ describe("POST save-chain / save-roles membership", () => {
   test("selector in the verified cache (with variant) saves; unknown cache member 400s and is not stored", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
     const env = makeEnv(db);
     const ok = await postForm(SETTINGS, "mallory", env, {
       op: "save-chain",
@@ -511,9 +515,9 @@ describe("POST save-chain / save-roles membership", () => {
   test("a stored legacy :thinking selector re-saves verbatim against a cache holding only the base", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
     const stored = "anthropic/claude-sonnet-4-6:thinking";
-    await store.setModelChain(app.id, stored);
+    await store.setModelChain({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, stored);
     const env = makeEnv(db);
     const res = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: stored });
     expect(res.status).toBe(200);
@@ -526,7 +530,7 @@ describe("POST save-chain / save-roles membership", () => {
     const noRow = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: "openai/gpt-5:thinking" });
     expect(noRow.status).toBe(200);
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.saveVerifiedKey(app.id, "copilot", PLAIN_KEY, []);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "copilot", PLAIN_KEY, []);
     const probe = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: "copilot/not-listed" });
     expect(probe.status).toBe(200);
   });
@@ -535,6 +539,7 @@ describe("POST save-chain / save-roles membership", () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
+      { botId: app.id, workspaceId: "default", role: "owner" },
       app.id,
       {
         provider_id: "my-custom",
@@ -561,7 +566,7 @@ describe("POST save-chain / save-roles membership", () => {
   test("save-roles references chains: unknown chain 400s, blank still clears", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "anthropic/claude-sonnet-4-6:high");
+    await store.upsertModelChain({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "seat-mstar-review-seat", "anthropic/claude-sonnet-4-6:high");
     const env = makeEnv(db);
     const roles = Object.fromEntries(MODEL_ROLE_IDS.map((role) => [`role_${role}`, ""]));
     const fail = await postForm(SETTINGS, "mallory", env, {
@@ -596,7 +601,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
     expect(db.raw.query("SELECT sandbox_image_id FROM review_bots WHERE id = ?").get(app.id)).toEqual({
       sandbox_image_id: "omp",
     });
-    const payload = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    const payload = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", env);
     const body = (await payload.json()) as {
       app: { sandbox_image_id: string };
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
@@ -1073,7 +1078,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
 describe("GET settings includes delivery_summary for the sidebar", () => {
   test("delivery_summary is present and never includes encrypted columns", async () => {
     const { db } = await seededWorld();
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", makeEnv(db));
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await readSettingsWithCatalog(res, makeEnv(db))) as {
       delivery_summary: { latest: null; rejected24h: number };
@@ -1106,7 +1111,7 @@ describe("GET settings includes delivery_summary for the sidebar", () => {
 
   test("other member GET is 200 with can_manage false and base+health only", async () => {
     const { db } = await seededWorld();
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "hubot", makeEnv(db));
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "hubot", makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       can_manage: boolean;
@@ -1119,8 +1124,9 @@ describe("GET settings includes delivery_summary for the sidebar", () => {
       custom_providers?: unknown;
     };
     expect(body.can_manage).toBe(false);
-    expect(body.app.github_app_id).toBe(APP_ID);
-    expect(body.app.github_slug).toBe("mallorys-app");
+    // F2: bot-config payloads carry null placeholders for App identity.
+    expect(body.app.github_app_id).toBeNull();
+    expect(body.app.github_slug).toBeNull();
     expect(body.keys).toBeUndefined();
     expect(body.configured_providers).toBeUndefined();
     expect(body.provider_catalog).toBeUndefined();
@@ -1145,7 +1151,7 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     configured_providers: ConfiguredRow[];
     provider_catalog: Array<{ id: string; tier: string; eligibility: string }>;
   }> {
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
     return (await readSettingsWithCatalog(res, env)) as {
       configured_providers: ConfiguredRow[];
@@ -1358,8 +1364,8 @@ describe("multi-key provider pools (routes)", () => {
   test("the settings payload carries every row of the provider with its key identity", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
-    await store.addProviderKey(app.id, "anthropic", SECOND_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", SECOND_KEY);
     mockModelsOk(["claude-sonnet-4-6"]);
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
     expect(res.status).toBe(200);
@@ -1388,8 +1394,8 @@ describe("multi-key provider pools (routes)", () => {
   test("verification is per key: verifying one row leaves its sibling untouched", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
-    await store.addProviderKey(app.id, "anthropic", SECOND_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", SECOND_KEY);
     mockModelsOk(["claude-sonnet-4-6"]);
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
     expect(res.status).toBe(200);
@@ -1407,14 +1413,14 @@ describe("multi-key provider pools (routes)", () => {
   test("delete takes the key identity: exactly one row goes and the sibling stays", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
-    await store.addProviderKey(app.id, "anthropic", SECOND_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", SECOND_KEY);
     const res = await postForm(SETTINGS + "/key/delete", "mallory", makeEnv(db), {
       provider: "anthropic",
       key_id: await keyIdOf(PLAIN_KEY),
     });
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Removed the stored anthropic key for mallorys-app");
+    expect(await res.text()).toContain("Removed the stored anthropic key for mallorys-app.");
     const remaining = await store.listProviderKeys(app.id, "anthropic");
     expect(remaining.map((row) => row.keyId)).toEqual([await keyIdOf(SECOND_KEY)]);
   });
@@ -1422,8 +1428,8 @@ describe("multi-key provider pools (routes)", () => {
   test("a delete without a key identity is a zero-write no-op — never a pool wipe", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
-    await store.addProviderKey(app.id, "anthropic", SECOND_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", SECOND_KEY);
     const res = await postForm(SETTINGS + "/key/delete", "mallory", makeEnv(db), { provider: "anthropic" });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("nothing changed");
@@ -1433,7 +1439,7 @@ describe("multi-key provider pools (routes)", () => {
   test("an unknown key identity is a tolerant no-op", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY);
     const res = await postForm(SETTINGS + "/key/delete", "mallory", makeEnv(db), {
       provider: "anthropic",
       key_id: "0".repeat(16),
@@ -1501,7 +1507,7 @@ describe("multi-key provider pools (routes)", () => {
       key: PLAIN_KEY,
     });
     expect(declared.status).toBe(200);
-    await store.addCustomProviderKey(app.id, "my-custom", SECOND_KEY, {
+    await store.addCustomProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "my-custom", SECOND_KEY, {
       base_url: "https://example.com/v1",
       api: "openai-completions",
     });
@@ -1511,7 +1517,7 @@ describe("multi-key provider pools (routes)", () => {
       key_id: await keyIdOf(PLAIN_KEY),
     });
     expect(removed.status).toBe(200);
-    expect(await removed.text()).toContain("Removed the stored my-custom key for mallorys-app");
+    expect(await removed.text()).toContain("Removed the stored my-custom key for mallorys-app.");
     expect(await store.listCustomProviderKeys(app.id, "my-custom")).toMatchObject([
       { keyId: await keyIdOf(SECOND_KEY) },
     ]);
@@ -1530,7 +1536,7 @@ describe("multi-key provider pools (routes)", () => {
   test("the delete route answers a machine-readable outcome: a removal vs the tolerant no-op", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
     const cacheRows = () =>
       (db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_models WHERE bot_id = ?").get(app.id) as { n: number }).n;
     expect(cacheRows()).toBe(1);
@@ -1552,7 +1558,7 @@ describe("multi-key provider pools (routes)", () => {
     expect(matched.status).toBe(200);
     const matchedBody = (await matched.json()) as { changed: boolean; message: string };
     expect(matchedBody.changed).toBe(true);
-    expect(matchedBody.message).toContain("Removed the stored anthropic key for mallorys-app");
+    expect(matchedBody.message).toContain("Removed the stored anthropic key for mallorys-app.");
     expect(cacheRows()).toBe(0);
   });
 
@@ -1583,8 +1589,8 @@ describe("multi-key provider pools (routes)", () => {
       return { base_url: decl.base_url, api: decl.api };
     };
     for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
-      await store.addCustomProviderKey(app.id, "my-custom", sk(`custom-cap-${i}-${i}${i}${i}`), endpointOf("my-custom"));
-      await store.addCustomProviderKey(app.id, "workers-ai", sk(`workers-cap-${i}-${i}${i}${i}`), endpointOf("workers-ai"));
+      await store.addCustomProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "my-custom", sk(`custom-cap-${i}-${i}${i}${i}`), endpointOf("my-custom"));
+      await store.addCustomProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "workers-ai", sk(`workers-cap-${i}-${i}${i}${i}`), endpointOf("workers-ai"));
     }
     const pools = await store.listCustomProviderKeys(app.id);
     expect(pools.filter((row) => row.provider === "my-custom")).toHaveLength(MAX_KEYS_PER_PROVIDER);
@@ -1622,7 +1628,7 @@ describe("multi-key provider pools (routes)", () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
     for (let i = 0; i < MAX_KEYS_PER_PROVIDER; i++) {
-      await store.addProviderKey(app.id, "anthropic", sk(`ant-pool-cap-${i}-${i}${i}${i}${i}`));
+      await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "anthropic", sk(`ant-pool-cap-${i}-${i}${i}${i}${i}`));
     }
     const before = (await store.listProviderKeys(app.id, "anthropic")).map((row) => row.keyId);
     mockModelsOk(["claude-sonnet-4-6"]);
@@ -1694,7 +1700,7 @@ describe("POST settings op=add-custom-provider-key (custom pool append)", () => 
       key: SECOND_KEY,
     });
     expect(added.status).toBe(200);
-    expect(await added.text()).toContain("Added another my-custom key for mallorys-app");
+    expect(await added.text()).toContain("Added another my-custom key for mallorys-app — it is only ever shown masked.");
     expect(spy).toHaveBeenCalledWith(
       "https://example.com/v1/models",
       expect.objectContaining({ method: "GET" }),
@@ -1765,8 +1771,9 @@ describe("POST settings op=add-custom-provider-key (custom pool append)", () => 
       key: SECOND_KEY,
     });
     await verifyStarted.promise;
-    await store.removeCustomProvider(app.id, "my-custom");
+    await store.removeCustomProvider({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "my-custom");
     await store.upsertCustomProvider(
+      { botId: app.id, workspaceId: "default", role: "owner" },
       app.id,
       {
         provider_id: "my-custom",
@@ -1794,7 +1801,7 @@ describe("POST settings op=add-custom-provider-key (custom pool append)", () => 
     const store = createAppConfigStore(db, TEST_KEY);
     const declared = (await store.listCustomProviders(app.id)).find((row) => row.provider_id === "my-custom")!;
     for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
-      await store.addCustomProviderKey(app.id, "my-custom", sk(`custom-append-${i}-${i}${i}${i}`), declared);
+      await store.addCustomProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "my-custom", sk(`custom-append-${i}-${i}${i}${i}`), declared);
     }
     const before = await store.listCustomProviderKeys(app.id, "my-custom");
     expect(before).toHaveLength(MAX_KEYS_PER_PROVIDER);
@@ -1859,7 +1866,7 @@ describe("GET settings provider_catalog display_group (AD-547)", () => {
   };
 
   async function getCatalog(env: Env): Promise<CatalogRow[]> {
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
     const body = (await readSettingsWithCatalog(res, env)) as { provider_catalog: CatalogRow[] };
     return body.provider_catalog;
@@ -1919,7 +1926,7 @@ describe("GET settings provider_catalog usage_probe (per-key usage action)", () 
   type StampRow = { id: string; tier: string; usage_probe: boolean };
 
   async function getCatalogRows(env: Env): Promise<StampRow[]> {
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
     const body = (await readSettingsWithCatalog(res, env)) as { provider_catalog: StampRow[] };
     return body.provider_catalog;
@@ -1988,6 +1995,7 @@ describe("GET settings provider_catalog — one row per provider, protocol as an
     const legacyId = Object.keys(LEGACY_PROVIDER_IDS).find((id) => LEGACY_PROVIDER_IDS[id] === providerId)!;
     const option = entry!.protocols![1]!;
     await createAppConfigStore(db, TEST_KEY).upsertCustomProvider(
+      { botId: app.id, workspaceId: "default", role: "owner" },
       app.id,
       {
         provider_id: legacyId,

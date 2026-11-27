@@ -50,7 +50,7 @@ function insertApp(
   slug: string,
   githubAppId: number,
   deletedAt: string | null = null,
-  parent = "review_bots",
+  parent = "github_apps",
 ): void {
   db.raw
     .prepare(
@@ -108,24 +108,24 @@ describe("scripts/workspace-backfill.sql (replayed every deploy)", () => {
     runFile(db, APP_REPAIR, SCRIPTS_DIR);
 
     expect(countRows(db, "review_bots")).toBe(2);
-    expect(countRows(db, "bot_workspaces")).toBe(countRows(db, "review_bots"));
-    expect(countRows(db, "bot_workspaces")).toBe(2);
+    expect(countRows(db, "app_workspaces")).toBe(countRows(db, "review_bots"));
+    expect(countRows(db, "app_workspaces")).toBe(2);
 
     const orphan = db.raw
       .query(
         `SELECT count(*) AS n FROM review_bots g
-         LEFT JOIN bot_workspaces w ON w.bot_id = g.id
-         WHERE w.bot_id IS NULL`,
+         LEFT JOIN app_workspaces w ON w.app_id = g.id
+         WHERE w.app_id IS NULL`,
       )
       .get() as { n: number };
     expect(orphan.n).toBe(0);
 
     const owners = db.raw
-      .query("SELECT bot_id, workspace_id FROM bot_workspaces ORDER BY bot_id")
-      .all() as Array<{ bot_id: string; workspace_id: string }>;
+      .query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id")
+      .all() as Array<{ app_id: string; workspace_id: string }>;
     expect(owners).toEqual([
-      { bot_id: "app-gone", workspace_id: "default" },
-      { bot_id: "app-live", workspace_id: "default" },
+      { app_id: "app-gone", workspace_id: "default" },
+      { app_id: "app-live", workspace_id: "default" },
     ]);
   });
 
@@ -147,7 +147,7 @@ describe("scripts/workspace-backfill.sql (replayed every deploy)", () => {
     insertApp(db, "app-late", "late-app", 1003);
     runFile(db, APP_REPAIR, SCRIPTS_DIR);
 
-    expect(countRows(db, "bot_workspaces")).toBe(1);
+    expect(countRows(db, "app_workspaces")).toBe(1);
     expect(countRows(db, "workspace_members")).toBe(0);
   });
 
@@ -172,7 +172,7 @@ describe("scripts/workspace-backfill.sql (replayed every deploy)", () => {
 
     expect(defaultMembers(db)).toEqual([]);
     expect(countRows(db, "users")).toBe(2);
-    expect(countRows(db, "bot_workspaces")).toBe(1);
+    expect(countRows(db, "app_workspaces")).toBe(1);
   });
 });
 

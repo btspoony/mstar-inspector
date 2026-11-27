@@ -160,6 +160,8 @@
  *     bot_id is a caller bug, never a silent no-op.
  */
 import { createSecretbox } from "./secretbox";
+import { readBotOwnerWorkspace } from "./apps-store";
+import type { WorkspaceRole } from "./workspace-store";
 import { builtinProbeCanRejectKey, customProbeCanRejectKey } from "./provider-verify";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
@@ -949,8 +951,50 @@ export type AppConfigD1 = {
  * master key (the raw DASHBOARD_ENCRYPTION_KEY value — NOT validated here;
  * lazy first-use, same contract as createSecretbox).
  */
+/** F12: whose bot a configuration write targets, and the authority claimed. */
+export type BotWriteAuthority = {
+  botId: string;
+  workspaceId: string;
+  role: WorkspaceRole;
+};
+
+/** F12: the store's own refusal — a mutation without authority never runs. */
+export class BotWriteForbiddenError extends Error {
+  constructor(botId: string) {
+    super(`bot configuration write refused for ${JSON.stringify(botId)}`);
+    this.name = "BotWriteForbiddenError";
+  }
+}
+
 export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | undefined) {
   const box = createSecretbox(encryptionKey);
+
+  /**
+   * F12: the store boundary guard every bot configuration mutation runs FIRST.
+   * Ownership is `review_bots.workspace_id` (D5/D34 — no App owns a bot), and
+   * the role must be owner or admin.
+   *
+   * `targetId` is the id the mutation ACTUALLY writes, and the authority is
+   * bound to it: an authority naming a bot the caller owns cannot authorize a
+   * write to a different bot. A caller that bypasses the route — a future code
+   * path, a test, a maintenance script — is refused here too.
+   */
+  async function requireBotWrite(
+    authority: BotWriteAuthority | undefined,
+    targetId: string,
+  ): Promise<void> {
+    if (authority === undefined) throw new BotWriteForbiddenError(targetId);
+    if (authority.botId !== targetId) throw new BotWriteForbiddenError(targetId);
+    if (authority.role !== "owner" && authority.role !== "admin") {
+      throw new BotWriteForbiddenError(targetId);
+    }
+    // `review_bots` has ONE reader module (apps-store); the guard asks it
+    // rather than opening a second read site.
+    const owner = await readBotOwnerWorkspace(db, targetId);
+    if (owner === null || owner !== authority.workspaceId) {
+      throw new BotWriteForbiddenError(targetId);
+    }
+  }
 
   type KeyTable = {
     table: "bot_provider_keys" | "bot_custom_provider_keys";
@@ -1268,18 +1312,37 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   return {
-    addProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
+    async addProviderKey(
+      authority: BotWriteAuthority,
+      appId: string,
+      provider: string,
+      plainKey: string,
+    ): Promise<void> {
+      await requireBotWrite(authority, appId);
       return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, { verifiedStatus: null });
     },
 
-    saveVerifiedKey(appId: string, provider: string, plainKey: string, models: string[]): Promise<void> {
+    async saveVerifiedKey(
+      authority: BotWriteAuthority,
+      appId: string,
+      provider: string,
+      plainKey: string,
+      models: string[],
+    ): Promise<void> {
+      await requireBotWrite(authority, appId);
       return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, {
         verifiedStatus: builtinProbeCanRejectKey(provider) ? "ok" : "reachable",
         models,
       });
     },
 
-    async deleteProviderKey(appId: string, provider: string, keyId: string): Promise<boolean> {
+    async deleteProviderKey(
+      authority: BotWriteAuthority,
+      appId: string,
+      provider: string,
+      keyId: string,
+    ): Promise<boolean> {
+      await requireBotWrite(authority, appId);
       await readKeyRows(PROVIDER_KEY_TABLE, appId, provider);
       const res = await db.batch([
         db
@@ -1322,7 +1385,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       return null;
     },
 
-    async setModelChain(appId: string, chain: string | null): Promise<void> {
+    async setModelChain(authority: BotWriteAuthority, appId: string, chain: string | null): Promise<void> {
+      await requireBotWrite(authority, appId);
       if (chain === null || chain.trim() === "") {
         await db
           .prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ?`)
@@ -1411,7 +1475,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       }));
     },
 
-    async upsertModelChain(appId: string, name: string, chain: string): Promise<void> {
+    async upsertModelChain(
+      authority: BotWriteAuthority,
+      appId: string,
+      name: string,
+      chain: string,
+    ): Promise<void> {
+      await requireBotWrite(authority, appId);
       assertModelChainName(name);
       if (chain.trim() === "") {
         throw new InvalidModelSelectorError(chain);
@@ -1429,7 +1499,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         .run();
     },
 
-    async removeModelChain(appId: string, name: string): Promise<boolean> {
+    async removeModelChain(authority: BotWriteAuthority, appId: string, name: string): Promise<boolean> {
+      await requireBotWrite(authority, appId);
       assertModelChainName(name);
       const res = await db.batch([
         db.prepare(`DELETE FROM bot_model_chain_seats WHERE bot_id = ? AND chain_name = ?`).bind(appId, name),
@@ -1442,7 +1513,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       return readModelChainSeats(appId);
     },
 
-    async setModelChainSeat(appId: string, role: string, chainName: string): Promise<void> {
+    async setModelChainSeat(
+      authority: BotWriteAuthority,
+      appId: string,
+      role: string,
+      chainName: string,
+    ): Promise<void> {
+      await requireBotWrite(authority, appId);
       assertModelRole(role);
       const name = chainName.trim();
       if (name === "" || name === DEFAULT_CHAIN_NAME) {
@@ -1453,12 +1530,18 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       await upsertModelChainSeat(appId, role, name);
     },
 
-    async clearModelChainSeat(appId: string, role: string): Promise<void> {
+    async clearModelChainSeat(authority: BotWriteAuthority, appId: string, role: string): Promise<void> {
+      await requireBotWrite(authority, appId);
       assertModelRole(role);
       await deleteModelChainSeat(appId, role);
     },
 
-    async setModelChainSeats(appId: string, refs: Record<string, string>): Promise<void> {
+    async setModelChainSeats(
+      authority: BotWriteAuthority,
+      appId: string,
+      refs: Record<string, string>,
+    ): Promise<void> {
+      await requireBotWrite(authority, appId);
       const entries = Object.entries(refs);
       for (const [role] of entries) {
         assertModelRole(role);
@@ -1490,7 +1573,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     getModelOverridesForConsumer(appId: string): Promise<Record<string, string>> {
       return readModelOverrides(appId);
     },
-    async upsertCustomProvider(appId: string, decl: AppCustomProvider, plainKey: string): Promise<void> {
+    async upsertCustomProvider(
+      authority: BotWriteAuthority,
+      appId: string,
+      decl: AppCustomProvider,
+      plainKey: string,
+    ): Promise<void> {
+      await requireBotWrite(authority, appId);
       assertCustomProvider(decl, plainKey);
       const stored = await db
         .prepare(`SELECT provider_id, base_url, api FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`)
@@ -1583,7 +1672,12 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       }
     },
 
-    async removeCustomProvider(appId: string, providerId: string): Promise<boolean> {
+    async removeCustomProvider(
+      authority: BotWriteAuthority,
+      appId: string,
+      providerId: string,
+    ): Promise<boolean> {
+      await requireBotWrite(authority, appId);
       const res = await db.batch([
         db.prepare(`DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?`).bind(appId, providerId),
         db.prepare(`DELETE FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`).bind(appId, providerId),
@@ -1592,11 +1686,14 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     async updateCustomProviderModels(
+      authority: BotWriteAuthority,
       appId: string,
       providerId: string,
       modelIds: string[],
       modelsMeta?: CustomProviderModelsMeta,
     ): Promise<void> {
+      // F12: this method had no guard at all — it now runs the same one.
+      await requireBotWrite(authority, appId);
       assertCustomProviderModelIds(modelIds);
       if (modelsMeta !== undefined) assertCustomProviderModelsMeta(modelsMeta, modelIds);
       const idsJson = JSON.stringify(modelIds);
@@ -1667,11 +1764,15 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     async addCustomProviderKey(
+      authority: BotWriteAuthority,
       appId: string,
       providerId: string,
       plainKey: string,
       endpoint: { base_url: string; api: string },
     ): Promise<void> {
+      // F12: authority FIRST — before any declaration read can leak whether a
+      // provider exists on a bot this caller does not own.
+      await requireBotWrite(authority, appId);
       const declared = await db
         .prepare(`SELECT provider_id FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`)
         .bind(appId, providerId)
@@ -1685,7 +1786,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       });
     },
 
-    async deleteCustomProviderKey(appId: string, providerId: string, keyId: string): Promise<boolean> {
+    async deleteCustomProviderKey(
+      authority: BotWriteAuthority,
+      appId: string,
+      providerId: string,
+      keyId: string,
+    ): Promise<boolean> {
+      await requireBotWrite(authority, appId);
       await readKeyRows(CUSTOM_KEY_TABLE, appId, providerId);
       const res = await db
         .prepare(`DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ? AND key_id = ?`)

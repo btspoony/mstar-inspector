@@ -1026,14 +1026,13 @@ export type QuotaVersionRow = {
   effectiveTo: string | null;
   state: "current" | "scheduled" | "past";
   base: { quick: number; default: number; deep: number };
-  source: { byok: number; shared: number };
   rpPerCredit: number;
   notes: string | null;
   monthlyRp: Record<string, number | null>;
 };
 
 export type QuotaVersionsData = {
-  judgingVersion: number;
+  judgingVersion: number | null;
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
@@ -1044,7 +1043,6 @@ export type QuotaVersionsData = {
 export type QuotaCandidate = {
   effectiveFrom: string;
   base: { quick: number; default: number; deep: number };
-  source: { byok: number; shared: number };
   rpPerCredit: number;
   monthlyRp: Record<string, number | null>;
 };
@@ -1072,7 +1070,7 @@ function quotaCeilings(value: unknown, what: string): Record<string, number | nu
 export async function readQuotaVersions(): Promise<QuotaVersionsData> {
   const body = map(await fetchJson(`${BASE}/quota-versions`), "quota versions response");
   return {
-    judgingVersion: num(body, "judgingVersion"),
+    judgingVersion: maybeNum(body, "judgingVersion"),
     nextVersion: num(body, "nextVersion"),
     plans: list(body.plans, "plans").map((row) => ({ id: text(row, "id"), name: text(row, "name") })),
     uncoveredPlanIds: planIds(body.uncoveredPlanIds),
@@ -1082,7 +1080,6 @@ export async function readQuotaVersions(): Promise<QuotaVersionsData> {
         throw new Error(`admin API: quota version state is not current|scheduled|past`);
       }
       const base = map(row.base, "base");
-      const source = map(row.source, "source");
       return {
         id: text(row, "id"),
         version: num(row, "version"),
@@ -1090,7 +1087,6 @@ export async function readQuotaVersions(): Promise<QuotaVersionsData> {
         effectiveTo: maybeText(row, "effectiveTo"),
         state,
         base: { quick: num(base, "quick"), default: num(base, "default"), deep: num(base, "deep") },
-        source: { byok: num(source, "byok"), shared: num(source, "shared") },
         rpPerCredit: num(row, "rpPerCredit"),
         notes: maybeText(row, "notes"),
         monthlyRp: quotaCeilings(row.monthlyRp, "monthlyRp"),

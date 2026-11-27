@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedBot, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import {
   readEffectiveTargetSettings,
   type ReviewTargetRow,
@@ -21,7 +21,7 @@ const RUN_START = "2026-11-18T00:00:00.000Z";
 
 function seedBotWorkspace(db: TestD1, botId: string, workspaceId = "default"): void {
   db.raw
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
     .run(botId, workspaceId);
 }
 
@@ -34,7 +34,7 @@ function seedInstallation(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
        VALUES (?, ?, ?, ?, '2026-08-01T00:00:00.000Z', ?)`,
     )
     .run(`inst-${botId}-${installationId}`, botId, installationId, accountLogin, removedAt);
@@ -52,7 +52,7 @@ function seedPr(
   db.raw
     .prepare(
       `INSERT INTO pull_requests
-         (id, bot_id, owner, repo, pr_number, state, last_seen_at, target_id)
+         (id, app_id, owner, repo, pr_number, state, last_seen_at, target_id)
        VALUES (?, ?, ?, ?, ?, 'open', '2026-08-27T00:00:00.000Z', ?)`,
     )
     .run(id, botId, owner, repo, prNumber, targetId);
@@ -61,11 +61,11 @@ function seedPr(
 function seedReview(db: TestD1, id: string, owner: string, repo: string, targetId: string): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews
-         (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, bot_id, target_id)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, app_id, target_id)
        VALUES (?, 1, ?, ?, 1, ?, '2026-08-27T00:00:00.000Z', 'ship it', ?, ?)`,
     )
     .run(id, owner, repo, `sha-${id}`, BOT, targetId);
+  syncReviewBotColumn(db);
 }
 
 function targetOf(db: TestD1, table: string, id: string): string | null {
@@ -78,9 +78,9 @@ function targetOf(db: TestD1, table: string, id: string): string | null {
 function targetRow(
   db: TestD1,
   id: string,
-): { id: string; bot_id: string; repo_owner: string | null; repo_name: string | null; repo_id: number | null } {
+): { id: string; app_id: string; repo_owner: string | null; repo_name: string | null; repo_id: number | null } {
   return db.raw
-    .prepare("SELECT id, bot_id, repo_owner, repo_name, repo_id FROM review_targets WHERE id = ?")
+    .prepare("SELECT id, app_id, repo_owner, repo_name, repo_id FROM review_targets WHERE id = ?")
     .get(id) as never;
 }
 
@@ -158,7 +158,7 @@ describe("ledger-target-alignment item", () => {
     expect(created).not.toBe("target-harness");
     expect(targetRow(db, created)).toEqual({
       id: created,
-      bot_id: BOT,
+      app_id: BOT,
       repo_owner: "42ch-dev",
       repo_name: "nexus",
       repo_id: null,
@@ -221,7 +221,7 @@ describe("ledger-target-alignment item", () => {
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+           (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
             check_min_score, created_by, created_at, updated_at)
          VALUES ('target-inspector-2', 'default', ?, 'btspoony/mstar-inspector', NULL,
                  'btspoony', 'mstar-inspector', 80, 'fixture',
@@ -304,7 +304,7 @@ describe("ledger-target-alignment item", () => {
     db.raw
       .prepare(
         `INSERT INTO pull_requests
-           (id, bot_id, owner, repo, pr_number, state, last_seen_at, target_id)
+           (id, app_id, owner, repo, pr_number, state, last_seen_at, target_id)
          VALUES ('pr-held', ?, 'btspoony', 'mstar-inspector', 42, 'open',
                  '2026-08-27T00:00:00.000Z', 'target-inspector')`,
       )

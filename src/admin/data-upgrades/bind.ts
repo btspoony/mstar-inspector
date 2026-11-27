@@ -3,7 +3,7 @@ import type { UpgradeRunContext } from "../data-upgrades";
 
 const UNCLAIMED_TARGET = `
   SELECT id FROM review_targets
-   WHERE deleted_at IS NULL AND bot_id = ?1
+   WHERE deleted_at IS NULL AND app_id = ?1
      AND repo_owner = ?2 COLLATE NOCASE AND repo_name = ?3 COLLATE NOCASE
      AND repo_id IS NULL`;
 
@@ -11,7 +11,7 @@ const BIND_BY_ID = `
   UPDATE review_targets SET repo_id = ?1, updated_at = datetime('now')
    WHERE id = ?2 AND repo_id IS NULL AND deleted_at IS NULL
      AND NOT EXISTS (SELECT 1 FROM review_targets o
-                      WHERE o.bot_id = review_targets.bot_id AND o.repo_id = ?1
+                      WHERE o.app_id = review_targets.app_id AND o.repo_id = ?1
                         AND o.deleted_at IS NULL AND o.id <> review_targets.id)`;
 
 async function liveInstallations(
@@ -21,8 +21,8 @@ async function liveInstallations(
 ): Promise<number[]> {
   const res = await db
     .prepare(
-      `SELECT installation_id FROM bot_installations
-        WHERE bot_id = ?1 AND removed_at IS NULL AND account_login = ?2 COLLATE NOCASE
+      `SELECT installation_id FROM github_app_installations
+        WHERE app_id = ?1 AND removed_at IS NULL AND account_login = ?2 COLLATE NOCASE
         ORDER BY installation_id`,
     )
     .bind(botId, owner)

@@ -51,7 +51,7 @@ import {
   removedPage,
 } from "../../src/dashboard/views";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { execMigrationScript } from "../store/helpers";
+import { applyMigration as applyMigrationShared, migrationNumber, migrationsAfter, syncReviewBotColumn } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
@@ -1341,7 +1341,7 @@ describe("/dashboard manifest routes", () => {
     ).toBe(true);
     expect(cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`) && !c.includes("Max-Age=0"))).toBe(false);
     const rows = dbOf(env).raw.query(
-      "SELECT id, github_slug, github_app_id, created_by FROM review_bots",
+      "SELECT id, github_slug, github_app_id, created_by FROM github_apps",
     ).all() as Array<{
       id: string;
       github_slug: string | null;
@@ -1937,7 +1937,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     ]);
     expectHoldExpired(callback);
     const db = dbOf(env);
-    const rows = db.raw.query("SELECT * FROM review_bots").all() as Array<{
+    const rows = db.raw.query("SELECT * FROM github_apps").all() as Array<{
       id: string;
       github_slug: string | null;
       github_app_id: number;
@@ -2025,7 +2025,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
 
     expect(refused.status).toBe(409);
     expect(appRowCount(env)).toBe(1);
-    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    expect(relatedRowCount(env, "app_workspaces")).toBe(1);
     expect(relatedRowCount(env, "review_targets")).toBe(0);
     expect(await refused.text()).toContain(appCapCopy(1));
     expectHoldExpired(refused);
@@ -2048,7 +2048,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const statuses = [a.status, b.status].sort();
     expect(statuses).toEqual([302, 409]);
     expect(appRowCount(env)).toBe(1);
-    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    expect(relatedRowCount(env, "app_workspaces")).toBe(1);
     expect(relatedRowCount(env, "review_targets")).toBe(0);
     const refused = a.status === 409 ? a : b;
     expect(await refused.text()).toContain(appCapCopy(1));
@@ -2086,7 +2086,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
 
     expect([a.status, b.status].sort()).toEqual([302, 409]);
     expect(appRowCount(env)).toBe(1);
-    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    expect(relatedRowCount(env, "app_workspaces")).toBe(1);
     const refused = a.status === 409 ? a : b;
     expect(await refused.text()).toContain(appCapCopy(1));
     expectHoldExpired(refused);
@@ -2101,7 +2101,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
 
     expect(refused.status).toBe(409);
     expect(appRowCount(env)).toBe(1);
-    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    expect(relatedRowCount(env, "app_workspaces")).toBe(1);
     expect(await refused.text()).toContain(appCapCopy(1));
     expectHoldExpired(refused);
   });
@@ -2140,9 +2140,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
     await seedApps(env, 1);
     const seeded = dbOf(env)
-      .raw.query("SELECT id FROM review_bots ORDER BY created_at, rowid LIMIT 1")
+      .raw.query("SELECT id FROM github_apps ORDER BY created_at, rowid LIMIT 1")
       .get() as { id: string };
-    dbOf(env).raw.prepare("UPDATE review_bots SET deleted_at = datetime('now') WHERE id = ?").run(seeded.id);
+    dbOf(env).raw.prepare("UPDATE github_apps SET deleted_at = datetime('now') WHERE id = ?").run(seeded.id);
 
     const accepted = await doCommit({ env, holdValue: await freshHold() });
 
@@ -2281,7 +2281,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(committed.status).toBe(302);
     expect(committed.headers.get("Location")).toBe(`/dashboard/default/apps/${CONVERSION.id}/onboarding`);
     expectHoldExpired(committed);
-    const rows = dbOf(brokeEnv).raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ id: string }>;
+    const rows = dbOf(brokeEnv).raw.query("SELECT id FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ id: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.id).toBe(START_APP_ID);
     const replay = await doCommit({ env: { ...env, DB: dbOf(brokeEnv) } as unknown as Env, holdValue });
@@ -2325,7 +2325,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(callback.status).toBe(302);
     expect(callback.headers.get("Location")).toBe(`/dashboard/default/apps/${CONVERSION.id}/onboarding`);
     const rows = db.raw.query(
-      "SELECT id, github_slug, github_app_id FROM review_bots WHERE github_app_id = ?",
+      "SELECT id, github_slug, github_app_id FROM github_apps WHERE github_app_id = ?",
     ).all(CONVERSION.id) as Array<{
       id: string;
       github_slug: string | null;
@@ -2358,7 +2358,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     );
     expect(secondCallback.status).toBe(302);
     const all = db.raw.query(
-      "SELECT id, github_app_id FROM review_bots ORDER BY github_app_id",
+      "SELECT id, github_app_id FROM github_apps ORDER BY github_app_id",
     ).all() as Array<{ id: string; github_app_id: number }>;
     expect(all.map((r) => [r.github_app_id, r.id])).toEqual([
       [CONVERSION.id, first.startAppId],
@@ -2624,7 +2624,7 @@ describe("existing routes unaffected", () => {
 
 
 function applyMigrationFile(db: Database, name: string): void {
-  execMigrationScript(db, readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+  applyMigrationShared(db, [name]);
 }
 
 const DASHBOARD_MIGRATION_SEQUENCE = [
@@ -2678,15 +2678,28 @@ function createDashboardTestD1(
 ): DashboardD1 & { raw: Database } {
   const db = new Database(":memory:");
   db.run("PRAGMA foreign_keys = ON;");
-  for (const [index, name] of DASHBOARD_MIGRATION_SEQUENCE.entries()) {
-    if (index >= through) break;
-    if (index === 2) {
-      db.run(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
-         VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'No blocking issues.')`,
-      );
+  const seedLegacyReview = () =>
+    db.run(
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
+       VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'No blocking issues.')`,
+    );
+  if (through >= DASHBOARD_MIGRATION_SEQUENCE.length) {
+    // The full world is the PRODUCTION chain: the hand-kept prefix stopped in
+    // the bot era, so every migration in directory order runs here (the same
+    // ordering the real deploy uses). The legacy review row is seeded right
+    // after 0002, before any App column exists — as the old prefix did.
+    for (const name of migrationsAfter(0)) {
+      if (migrationNumber(name) > 2 && !db.query("SELECT 1 AS x FROM reviews WHERE id = 'review-1'").get()) {
+        seedLegacyReview();
+      }
+      applyMigrationFile(db, name);
     }
-    applyMigrationFile(db, name);
+  } else {
+    for (const [index, name] of DASHBOARD_MIGRATION_SEQUENCE.entries()) {
+      if (index >= through) break;
+      if (index === 2) seedLegacyReview();
+      applyMigrationFile(db, name);
+    }
   }
   // This shortened sequence skips 0067 (it drops an index 0062 creates), so the
   // workspace review defaults 0067 introduces are added here; the settings and
@@ -2814,10 +2827,10 @@ function dbOf(env: Env): DashboardTestDb {
 }
 
 function appRowCount(env: Env): number {
-  return (dbOf(env).raw.query("SELECT COUNT(*) AS n FROM review_bots").get() as { n: number }).n;
+  return (dbOf(env).raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number }).n;
 }
 
-function relatedRowCount(env: Env, table: "bot_workspaces" | "review_targets"): number {
+function relatedRowCount(env: Env, table: "app_workspaces" | "review_targets"): number {
   return (dbOf(env).raw.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 }
 
@@ -2849,7 +2862,7 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     }).then(async (row) => {
       if (!overrides.deletedAt) return row;
       await dbOf(env).raw
-        .prepare(`UPDATE review_bots SET deleted_at = ? WHERE id = ?`)
+        .prepare(`UPDATE github_apps SET deleted_at = ? WHERE id = ?`)
         .run(overrides.deletedAt, row.id);
       return row;
     });

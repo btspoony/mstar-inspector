@@ -52,7 +52,7 @@ describe("supersede probe head lookup (0110 idx_review_checks_open_head)", () =>
     const detail = plan(
       db,
       `SELECT 1 FROM review_checks
-         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL`,
+         WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL`,
     );
     expect(detail).toMatch(/review_checks USING (COVERING )?INDEX idx_review_checks_open_head/);
     expect(detail).not.toMatch(/^SCAN review_checks$/m);

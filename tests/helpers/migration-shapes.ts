@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { execMigrationScript, migrationsAfter, type TestD1 } from "../store/helpers";
+import { applyMigration, execMigrationScript, migrationsAfter, type TestD1 } from "../store/helpers";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
@@ -16,7 +16,11 @@ export const TAIL_PREREQUISITES = [
   "0010_review_failures.sql",
   "0020_finding_lifecycle.sql",
   "0021_review_checks.sql",
+  // 0047/0048 and the workspace tail reach this below-anchor table; the
+  // shapes that need invites list 0028 themselves.
+  "0023_removed_logins.sql",
   "0029_operator_support.sql",
+  "0030_workspace_membership_cutover.sql",
   "0031_plans_usage.sql",
   "0032_unlimited_plan.sql",
 ] as const;
@@ -30,13 +34,22 @@ export function migrationSql(name: string): string {
 }
 
 /**
- * why: Apply migration files in the given order (wrangler order = filename order),
- * through the same fail-fast executor the shared fixtures use: statement by
- * statement, so a failed statement aborts instead of leaving the file half
- * applied.
+ * why: Apply migration files in the given order, each file in ONE transaction
+ * with foreign-key enforcement on — the way D1 runs it and the only way SQLite
+ * carries child foreign keys onto a renamed parent (the 0056/0115 rename
+ * pair). The autocommit statement-by-statement path builds a schema no
+ * production database has: renames leave references pointing at the pre-split
+ * table (proven: app_workspaces.app_id → review_bots instead of github_apps).
  */
 export function applyMigrations(db: TestD1, names: readonly string[]): void {
-  for (const name of names) execMigrationScript(db.raw, migrationSql(name));
+  // Shapes list migrations in dependency-authoring order, which is NOT always
+  // numeric order — but numeric order IS the dependency order (a migration can
+  // only reference tables created by lower numbers). Sorting here is the one
+  // honest ordering; a mis-sorted list fails before any assertion runs.
+  // Numeric order, each migration once: shapes compose shared prerequisite
+  // lists, so the same file may appear twice in a composed list.
+  const sorted = [...new Set(names)].sort();
+  applyMigration(db.raw, sorted);
 }
 
 const SHAPES: Record<string, readonly string[]> = {};
@@ -116,6 +129,7 @@ export const SPA_PAGE_APIS_MIGRATIONS = shape("spa-page-apis", [
   "0019_github_apps_metadata.sql",
   "0023_removed_logins.sql",
   "0024_provider_multi_key.sql",
+  "0025_provider_model_evidence.sql",
   "0026_workspaces.sql",
   "0027_workspace_backfill.sql",
   "0028_workspace_invites.sql",
@@ -134,12 +148,15 @@ export const SPA_PAGE_APIS_MIGRATIONS = shape("spa-page-apis", [
  * so there they are incidental (kept only so one shape serves both branches).
  */
 export const WEBHOOK_DELIVERIES_MIGRATIONS: readonly string[] = [
+  "0003_dashboard_users.sql",
   "0004_github_apps.sql",
   "0005_reviews_app_id.sql",
   "0007_reviews_app_id_index.sql",
   "0008_github_apps_ops.sql",
   ...TAIL_PREREQUISITES,
   "0026_workspaces.sql",
+  "0023_removed_logins.sql",
+  "0028_workspace_invites.sql",
   "0033_platform_admin.sql",
   "0036_app_identity.sql",
   "0018_app_sandbox_images.sql",
@@ -243,28 +260,38 @@ export const APP_CREDENTIAL_RESOLUTION_MIGRATIONS = shape("app-credential-resolu
   "0003_dashboard_users.sql",
   "0004_github_apps.sql",
   "0005_reviews_app_id.sql",
-  "0007_reviews_app_id_index.sql",
   "0006_app_provider_config.sql",
+  "0007_reviews_app_id_index.sql",
   "0008_github_apps_ops.sql",
   "0009_app_model_roles.sql",
   "0010_review_failures.sql",
   "0011_webhook_deliveries.sql",
   "0012_custom_providers_and_key_updated_at.sql",
+  "0013_findings_review_id_index.sql",
+  "0014_idx_reviews_reviewed_at.sql",
   "0015_provider_verification.sql",
+  "0016_users_login_nocase_unique.sql",
   "0017_app_model_chains.sql",
   "0018_app_sandbox_images.sql",
   "0019_github_apps_metadata.sql",
   "0020_finding_lifecycle.sql",
   "0021_review_checks.sql",
   "0022_app_trigger_mode.sql",
+  "0023_removed_logins.sql",
   "0024_provider_multi_key.sql",
+  "0025_provider_model_evidence.sql",
   "0026_workspaces.sql",
+  "0027_workspace_backfill.sql",
+  "0028_workspace_invites.sql",
   "0029_operator_support.sql",
+  "0030_workspace_membership_cutover.sql",
   "0031_plans_usage.sql",
   "0032_unlimited_plan.sql",
   "0033_platform_admin.sql",
+  "0034_support_grant_indexes.sql",
+  "0035_workspace_invite_expiry_index.sql",
   "0036_app_identity.sql",
-  ...migrationsAfter("0036_app_identity.sql"),
+...migrationsAfter("0036_app_identity.sql"),
 ]);
 
 /**
@@ -301,13 +328,19 @@ export const CONSUMER_POST_CHAINS_MIGRATIONS: readonly string[] = [
   "0020_finding_lifecycle.sql",
   "0021_review_checks.sql",
   "0022_app_trigger_mode.sql",
+  "0023_removed_logins.sql",
   "0024_provider_multi_key.sql",
+  "0025_provider_model_evidence.sql",
   "0026_workspaces.sql",
   "0027_workspace_backfill.sql",
+  "0028_workspace_invites.sql",
   "0029_operator_support.sql",
+  "0030_workspace_membership_cutover.sql",
   "0031_plans_usage.sql",
   "0032_unlimited_plan.sql",
   "0033_platform_admin.sql",
+  "0034_support_grant_indexes.sql",
+  "0035_workspace_invite_expiry_index.sql",
   "0036_app_identity.sql",
   ...migrationsAfter(36),
 ];

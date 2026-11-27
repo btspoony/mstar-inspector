@@ -37,10 +37,10 @@ import {
 } from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
-  recordUsageEvent,
+  chargeUsage,
   type UsageSource,
 } from "../store/usage-store";
-import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
+import { QUOTA_PROFILES_EMPTY_ERROR, quotaMonth, readBotMultiplier } from "../store/quota-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   CHECK_BACKOFF_MS,
@@ -663,7 +663,7 @@ async function applyPendingLifecycleJournals(
   const rows = await db
     .prepare(
       `SELECT id FROM review_publications
-       WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND phase = 'confirmed' AND recovery_state = 'pending'
        ORDER BY created_ms, id LIMIT 10`,
     )
@@ -2387,10 +2387,13 @@ function requireCommenter(deps: ProcessDeps, payload: ReviewJobPayload): ReviewC
 }
 
 function requireRunnerConfig(deps: ProcessDeps, payload: ReviewJobPayload): RunnerConfig {
-  const config = deps.runnerConfigs.get(payload.botRef.appId);
+  // The key is appId:botId — see the writer in consumer.ts: the configuration
+  // belongs to the bot, and one App executing through several bots never reads
+  // another bot's chain.
+  const config = deps.runnerConfigs.get(`${payload.botRef.appId}:${payload.botRef.botId}`);
   if (config === undefined) {
     throw new Error(
-      `review attempt: no runner config is registered for app ${payload.botRef.appId} — the host resolves the App's AI config before it runs an attempt step`,
+      `review attempt: no runner config is registered for app ${payload.botRef.appId} bot ${payload.botRef.botId} — the host resolves the bot's AI config before it runs an attempt step`,
     );
   }
   return config;
@@ -3240,15 +3243,41 @@ async function preparePhase(
   // therefore its own charge.
   const executionToken = `usage-attempt:${attemptId}`;
   const usageOccurredAt = usageNow.toISOString();
+  const usageMonth = quotaMonth(usageNow);
   try {
-    await recordUsageEvent(deps.env.DB, {
+    // One atomic charge: bind the month's version, price the review and append
+    // the usage row in one batch. The three commit together, so a replay binds
+    // nothing (I1), a failed lookup or insert leaves no binding behind, and a
+    // concurrent first metering cannot split the pin from its usage row.
+    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
+    if (multiplier === null) {
+      throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
+    }
+    const { charged } = await chargeUsage(deps.env.DB, {
       reviewId,
       executionToken,
       workspaceId: usageWorkspaceId,
       occurredAt: usageOccurredAt,
-      rp: rpFor(level, usageSource, await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso)),
+      month: usageMonth.month,
+      level,
+      multiplier,
       source: usageSource,
+      botId: payload.botRef.botId,
     });
+    if (!charged) {
+      // The batch appended nothing. Two causes, and only one is benign:
+      //  * the token was already charged — a replay, nothing to do;
+      //  * no profile covers the instant, so the review ran unbilled. That is a
+      //    LOST CHARGE and must reach the failure row the backfill lane reads,
+      //    never be swallowed — so it throws into the catch below.
+      if (!(await hasUsageEventForExecutionToken(deps.env.DB, executionToken))) {
+        throw new Error(QUOTA_PROFILES_EMPTY_ERROR);
+      }
+      deps.log.info(
+        { ...fields, review_id: reviewId, workspace_id: usageWorkspaceId },
+        "usage already charged for this execution token — nothing appended",
+      );
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const applied: true | false | "unknown" = await hasUsageEventForExecutionToken(
@@ -4568,7 +4597,7 @@ async function collectPhase(
     const knownRows = await deps.env.DB
       .prepare(
         `SELECT id, finding_id FROM review_findings
-         WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
            AND finding_id IN (${findingIdPlaceholders})`,
       )
       .bind(

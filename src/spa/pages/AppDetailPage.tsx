@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
   Button,
+  FlowSection,
   StatusBadge,
   Tabs,
   TabsContent,
@@ -19,6 +20,7 @@ import {
   TabsTrigger,
 } from "@design-system";
 import {
+  AppInfoSection,
   AppInstallationsSection,
   AppInstallSection,
   OpsSection,
@@ -27,12 +29,13 @@ import {
   postPinnedOutcome,
 } from "./SettingsPage";
 import { AppDeliveryTab } from "./AppDeliveryTab";
-import { BotSettingsView } from "./BotSettingsPage";
-import { fetchJson } from "../api";
+import { DataTable, type DataTableColumn } from "@/components/DataTable";
+import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
-import { apiBase } from "../workspace-base";
-import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
+import { loadUsableBots } from "./AppsPage";
+import { apiBase, currentOrigin } from "../workspace-base";
+import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
@@ -44,6 +47,7 @@ import {
   parseModels,
   parseSettings,
   type AppDetailSearch,
+  type AppChainEntry,
   type BlockedReason,
   type ModelOptionGroup,
   type SettingsPayload,
@@ -97,7 +101,7 @@ export function AppDetailShell({
  * pathnames.
  */
 export async function loadAppDetail(base: string, appId: string): Promise<SettingsPayload | null> {
-  return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/settings`));
+  return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}`));
 }
 
 async function loadModelGroups(base: string, appId: string): Promise<ModelOptionGroup[]> {
@@ -139,6 +143,10 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const loadSequence = useRef(0);
+  // Every bot this workspace may mount. Read ONCE beside the page: the editor's
+  // "add" list must exclude what the chain already carries, and the server's
+  // ordering (D18) is the order an operator expects.
+  const [mountable, setMountable] = useState<Array<{ id: string; name: string }>>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
@@ -187,6 +195,27 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     [base, appId, locale],
   );
 
+  // F10/D45: an App whose cached GitHub metadata was never synced gets ONE
+  // first-load refresh — a POST to `/api/apps/:appId/refresh-metadata`, the
+  // only sanctioned refresh. The GET stays a pure read.
+  const refreshedRef = useRef(false);
+
+  useEffect(() => {
+    let live = true;
+    void loadUsableBots(base)
+      .then((payload) => {
+        // Names only: the editor adds a bot by id and labels it by name.
+        if (live) setMountable(payload.bots.map((bot) => ({ id: bot.id, name: bot.name })));
+      })
+      .catch(() => {
+        // A failed read simply offers no "add" list; the chain stays editable.
+        if (live) setMountable([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [base]);
+
   useEffect(() => {
     cancelledRef.current = false;
     void load();
@@ -195,6 +224,16 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
       cancelledRef.current = true;
     };
   }, [load]);
+
+  useEffect(() => {
+    if (refreshedRef.current) return;
+    if (payload === null || payload.can_manage !== true || payload.blocked) return;
+    const meta = payload.app as { github_metadata_synced_at?: string | null };
+    if (meta.github_metadata_synced_at !== null && meta.github_metadata_synced_at !== undefined) return;
+    if (payload.app.github_app_id === null) return;
+    refreshedRef.current = true;
+    void refreshAppMetadata(apiBase(), payload.app.github_app_id);
+  }, [payload]);
 
   useEffect(() => {
     const onPop = () => setSearch(parseAppDetailSearch(window.location.search));
@@ -227,6 +266,7 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           modelsLoading={modelsLoading}
           notice={notice}
           search={search}
+          mountable={mountable}
           onReload={load}
           onSearch={commitSearch}
         />
@@ -236,21 +276,308 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
 }
 
 /**
- * The link from a target detail to the App's own settings face. The href is
- * derived from the page's own API base, so it is the real target on both the
- * legacy and the workspace-scoped path; `/bot` answers one redirect to the
- * settings tab.
+ * F7: the way from App detail to the bot configuration. There is NO App→bot
+ * relation to infer (the split keeps them independent), so this links the bots
+ * the App's chain actually mounts in this workspace — and, when the chain is
+ * still empty, the workspace's usable-bot list. It never derives a bot id from
+ * the App id.
  */
-export function BotSettingsLink({ locale, appId }: { locale: SpaBoot["locale"]; appId: string }) {
-  const href = `${apiBase()}/apps/${encodeURIComponent(appId)}/bot`;
+export function BotSettingsLink({
+  locale,
+  mountedBotIds,
+}: {
+  locale: SpaBoot["locale"];
+  mountedBotIds: readonly string[];
+}) {
+  const bots = [...mountedBotIds];
+  if (bots.length === 0) {
+    const listHref = `${apiBase()}/apps?tab=bots`;
+    return (
+      <a
+        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+        href={listHref}
+        onClick={(event) => spaClick(listHref, event)}
+      >
+        {t(locale, "appDetail.botSettingsLink")}
+      </a>
+    );
+  }
   return (
-    <a
-      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-      href={href}
-      onClick={(event) => spaClick(href, event)}
-    >
-      {t(locale, "appDetail.botSettingsLink")}
-    </a>
+    <span className="flex flex-wrap items-center gap-3">
+      {bots.map((botId) => {
+        const href = `${apiBase()}/bots/${encodeURIComponent(botId)}`;
+        return (
+          <a
+            key={botId}
+            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+            href={href}
+            onClick={(event) => spaClick(href, event)}
+          >
+            {t(locale, "appDetail.botSettingsLink")}
+          </a>
+        );
+      })}
+    </span>
+  );
+}
+
+/**
+ * F10/D45: the single first-load metadata refresh. It is a POST so the GET
+ * stays pure; a failure is silent here — the App metadata controls carry the
+ * retry affordance.
+ */
+export async function refreshAppMetadata(base: string, githubAppId: number): Promise<boolean> {
+  try {
+    const res = await fetch(`${base}/api/apps/${githubAppId}/refresh-metadata`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** F11: the chain is the only App→bot relation; its row count is an App fact. */
+function mountedBotCount(chain: readonly AppChainEntry[]): number {
+  return chain.length;
+}
+
+/**
+ * F7 (D29/D35): the App's ordered chain, read-only. Position, bot name, the
+ * shared/mine tag, the multiplier and this month's spend through that bot —
+ * no add, remove or reorder control: the editable order ships with the relay
+ * that reads it. An empty chain names the next step instead of rendering a
+ * blank table.
+ */
+/**
+ * The chain editor: order only, because order is all the relay reads. Every
+ * move rewrites the WHOLE order in one `PATCH /api/apps/:appId/chain`, whose
+ * store clears and re-inserts positions contiguously in one batch. The response
+ * carries the re-read chain, so the table the operator sees is the list the
+ * next delivery will walk.
+ *
+ * It is unreachable unless the store also admits this workspace as the
+ * installer; `can_manage` gates the UI, the store gates the write.
+ */
+function ChainReorderControls({
+  locale,
+  appId,
+  chain,
+  mountableBots,
+  onReordered,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  chain: readonly AppChainEntry[];
+  /** Every bot this workspace may mount; the section subtracts the mounted ones. */
+  mountableBots: readonly { id: string; name: string }[];
+  onReordered: () => Promise<unknown>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  /** One PATCH for all three verbs: add, remove and reorder all rewrite the order. */
+  async function save(order: readonly string[]): Promise<void> {
+    setBusy(true);
+    try {
+      const { status } = await patchJson(`${apiBase()}/api/apps/${encodeURIComponent(appId)}/chain`, {
+        botIds: order,
+      });
+      if (status < 200 || status >= 300) {
+        setNotice({ kind: "error", message: t(locale, "apps.chain.reorderFailed") });
+      } else {
+        setNotice(null);
+        // Re-read the CHAIN, not the page: the editor must never render an order
+        // the relay would not walk.
+        await onReordered();
+      }
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "apps.chain.reorderFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function move(from: number, to: number): void {
+    if (to < 0 || to >= chain.length) return;
+    const order = chain.map((row) => row.bot_id);
+    const [moved] = order.splice(from, 1);
+    if (moved === undefined) return;
+    order.splice(to, 0, moved);
+    void save(order);
+  }
+
+  function remove(botId: string): void {
+    void save(chain.map((row) => row.bot_id).filter((id) => id !== botId));
+  }
+
+  function add(botId: string): void {
+    void save([...chain.map((row) => row.bot_id), botId]);
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <NoticeRegion notice={notice} />
+      <div className="flex flex-wrap items-center gap-2" data-slot="app-chain-reorder">
+        {chain.map((row, index) => (
+          <span key={row.bot_id} className="flex items-center gap-1 rounded-md border border-(--border-default) px-2 py-1">
+            <span className="text-sm font-medium">{row.name}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || index === 0}
+              aria-label={t(locale, "apps.chain.moveUp", { bot: row.name })}
+              onClick={() => move(index, index - 1)}
+            >
+              ↑
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || index === chain.length - 1}
+              aria-label={t(locale, "apps.chain.moveDown", { bot: row.name })}
+              onClick={() => move(index, index + 1)}
+            >
+              ↓
+            </Button>
+            {/* D27: the LAST bot's row stays visible and cannot be removed — the
+                UI never offers an empty chain, though the store would refuse one. */}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || chain.length === 1}
+              aria-label={t(locale, "apps.chain.removeBot", { bot: row.name })}
+              onClick={() => remove(row.bot_id)}
+            >
+              ✕
+            </Button>
+          </span>
+        ))}
+      </div>
+      {mountableBots.length === 0 ? null : (
+        <details data-slot="app-chain-add">
+          <summary className="cursor-pointer text-sm text-muted-foreground">
+            {t(locale, "apps.chain.addBot")}
+          </summary>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {mountableBots.map((bot) => (
+              <Button
+                key={bot.id}
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                aria-label={t(locale, "apps.chain.addNamed", { bot: bot.name })}
+                onClick={() => add(bot.id)}
+              >
+                + {bot.name}
+              </Button>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+export function AppChainSection({
+  locale,
+  appId,
+  chain,
+  canManage,
+  mountableBots,
+  onReordered,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  chain: readonly AppChainEntry[];
+  canManage: boolean;
+  mountableBots: readonly { id: string; name: string }[];
+  onReordered: () => Promise<unknown>;
+}) {
+  if (chain.length === 0) {
+    // An EMPTY chain is still a state a manager must be able to leave: the "add"
+    // affordance renders beside the empty copy, so the FIRST bot is reachable.
+    // A reader gets the copy alone.
+    return (
+      <div className="flex flex-col gap-2" data-slot="app-chain">
+        <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>
+        {canManage && mountableBots.length > 0 ? (
+          <ChainReorderControls
+            locale={locale}
+            appId={appId}
+            chain={chain}
+            mountableBots={mountableBots}
+            onReordered={onReordered}
+          />
+        ) : null}
+      </div>
+    );
+  }
+  const columns: DataTableColumn<AppChainEntry>[] = [
+    {
+      header: t(locale, "apps.chain.columnPosition"),
+      cell: (row) => <span className="tabular-nums text-muted-foreground">{row.position}</span>,
+    },
+    {
+      header: t(locale, "apps.chain.columnBot"),
+      cell: (row) => (
+        <span className="flex flex-wrap items-center gap-2">
+          <span className="font-semibold text-foreground">{row.name}</span>
+          <span className="text-muted-foreground">
+            {t(locale, row.owned ? "apps.chain.tagMine" : "apps.chain.tagShared")}
+          </span>
+          {/* A bot its owner stopped sharing stays mounted as a skipped row. */}
+          {row.available ? null : (
+            <span className="text-(--tone-warn-fg)">{t(locale, "apps.chain.rowUnavailable")}</span>
+          )}
+        </span>
+      ),
+      meta: (row) => (row.description === null || row.description === "" ? null : <span>{row.description}</span>),
+    },
+    {
+      header: t(locale, "apps.chain.columnProvider"),
+      cell: (row) => <span className="text-muted-foreground">{row.provider_workspace}</span>,
+    },
+    {
+      header: t(locale, "apps.chain.columnMultiplier"),
+      cell: (row) => <span className="tabular-nums">×{row.multiplier}</span>,
+    },
+    {
+      header: t(locale, "apps.chain.columnMonth"),
+      align: "right",
+      cell: (row) => (
+        <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
+          {/* F5: an owned bot pays this workspace's own keys, so it has no
+              ceiling; a shared bot with a cap states it; without one, none. */}
+          {row.owned
+            ? t(locale, "bots.monthOwn", { used: row.month_used_rp })
+            : row.monthly_rp === null
+              ? t(locale, "bots.monthNoCeiling", { used: row.month_used_rp })
+              : t(locale, "bots.monthLimit", { used: row.month_used_rp, limit: row.monthly_rp })}
+        </span>
+      ),
+    },
+  ];
+  return (
+    <div data-slot="app-chain">
+      <FlowSection title={t(locale, "apps.chain.title")} subtitle={t(locale, "apps.chain.copy")}>
+        <DataTable columns={columns} rows={chain} rowKey={(row) => `${row.position}:${row.bot_id}`} />
+        {canManage ? (
+          <ChainReorderControls
+            locale={locale}
+            appId={appId}
+            chain={chain}
+            mountableBots={mountableBots.filter((bot) => !chain.some((row) => row.bot_id === bot.id))}
+            onReordered={onReordered}
+          />
+        ) : null}
+      </FlowSection>
+    </div>
   );
 }
 
@@ -279,11 +606,15 @@ export function TargetHeader({
       ? t(locale, BLOCKED_REASON_KEYS[payload.blocked_reason])
       : null;
 
+  // F11: App-scoped facts ONLY. `keys.length` and `model_chains.length` were
+  // BOT configuration reached through an equal id — a different entity after
+  // the split — so the band carries installations, Apps mounted through the
+  // chain, the delivery refusal count and the App's scope, nothing else.
+  const chain = payload.chain ?? [];
   const metrics: Metric[] = payload.can_manage && !payload.blocked
     ? [
         { key: t(locale, "settings.installations"), value: payload.installations.length },
-        { key: t(locale, "settings.metricKeys"), value: payload.keys.length },
-        { key: t(locale, "settings.modelChains"), value: payload.model_chains.length },
+        { key: t(locale, "appDetail.metricMountedBots"), value: mountedBotCount(chain) },
         {
           key: t(locale, "apps.metricRejected24h"),
           value: payload.delivery_summary?.rejected24h ?? 0,
@@ -296,10 +627,12 @@ export function TargetHeader({
     <>
       <PageHeader
         title={appDisplayName(payload.app)}
-        description={t(locale, "apps.by", { login: payload.app.created_by })}
+        description={t(locale, "apps.by", { login: payload.app.created_by ?? "—" })}
         actions={
           <>
-            {blockedMessage ? null : <BotSettingsLink locale={locale} appId={appId} />}
+            {blockedMessage ? null : (
+              <BotSettingsLink locale={locale} mountedBotIds={(payload.chain ?? []).map((row) => row.bot_id)} />
+            )}
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           </>
         }
@@ -403,6 +736,45 @@ function TargetOpsZone({
 }
 
 /**
+ * F11: the credential controls the plan keeps on the App face for managers.
+ * They are APP facts — the webhook endpoint the App receives on, its numeric
+ * id, and where its stored private key and webhook secret live. The secrets
+ * themselves are never in the payload; this block names them and links the
+ * place they are rotated.
+ */
+export function AppCredentialsSection({
+  locale,
+  workspaceId,
+  app,
+}: {
+  locale: SpaBoot["locale"];
+  workspaceId: string;
+  app: SettingsPayload["app"];
+}) {
+  const webhookUrl = `${currentOrigin()}/webhook/${workspaceId}/${app.id}`;
+  return (
+    <section className="flex flex-col gap-2 py-3" data-slot="app-credentials">
+      <h3 className="text-sm font-semibold">{t(locale, "appDetail.credentialsTitle")}</h3>
+      <p className="text-sm text-muted-foreground">{t(locale, "appDetail.credentialsCopy")}</p>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+        <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsWebhook")}</dt>
+        <dd>
+          <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">{webhookUrl}</code>
+        </dd>
+        {app.github_app_id === null ? null : (
+          <>
+            <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsAppId")}</dt>
+            <dd className="tabular-nums">{app.github_app_id}</dd>
+          </>
+        )}
+        <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsStored")}</dt>
+        <dd>{t(locale, "appDetail.credentialsStoredValue")}</dd>
+      </dl>
+    </section>
+  );
+}
+
+/**
  * The App detail face — pure `t()` + data rendering, no window/router access,
  * so tests can static-render it. A non-manager gets the D4 identity card; a
  * manager gets 应用设置 (identity header, ops, the bot's sections) and 已安装.
@@ -415,6 +787,7 @@ export function AppDetailView({
   modelsLoading = false,
   notice,
   search,
+  mountable = [],
   onReload,
   onSearch,
 }: {
@@ -425,6 +798,8 @@ export function AppDetailView({
   modelsLoading?: boolean;
   notice: { kind: NoticeKind; message: string } | null;
   search: AppDetailSearch;
+  /** Bots this workspace may mount, unfiltered — the view subtracts the chain. */
+  mountable?: Array<{ id: string; name: string }>;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
   onSearch: (next: AppDetailSearch) => void;
 }) {
@@ -434,6 +809,16 @@ export function AppDetailView({
         <TargetHeader locale={locale} appId={appId} payload={payload} />
         {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
         <SettingsView locale={locale} payload={payload} />
+        {/* F3: the chain is what the App mounts, readable by every member; only
+            the installer's managers may rewrite its order. */}
+        <AppChainSection
+          locale={locale}
+          appId={appId}
+          chain={payload.chain ?? []}
+          canManage={payload.can_manage}
+          mountableBots={mountable}
+          onReordered={onReload}
+        />
       </div>
     );
   }
@@ -442,7 +827,7 @@ export function AppDetailView({
   const bot = payload.blocked ? null : payload;
 
   function onTabChange(next: string): void {
-    if (next !== "settings" && next !== "delivery" && next !== "installations") return;
+    if (next !== "settings" && next !== "bots" && next !== "delivery" && next !== "installations") return;
     onSearch({ ...search, tab: next });
   }
 
@@ -456,11 +841,27 @@ export function AppDetailView({
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
           <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
+          {/* D40: this plan registers the `bots` tab — the chain is the plan's
+              own subject, and no other plan edits this tab set. */}
+          <TabsTrigger value="bots">{t(locale, "appDetail.tabBots")}</TabsTrigger>
           <TabsTrigger value="delivery">{t(locale, "appDetail.tabDelivery")}</TabsTrigger>
           <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
         </TabsList>
         <TabsContent value="settings" forceMount>
           <div className="flex flex-col">
+            {/* F11: the App's own identity and credentials stay on the App
+                face — the bot configuration moved, the App metadata did not.
+                A Blocked App (its bot is no longer shared) renders neither:
+                the payload carries no App-side facts for it. */}
+            {payload.blocked ? null : (
+              <AppInfoSection
+                locale={locale}
+                app={payload.app}
+                workspaceId={payload.workspace_id}
+                canManage={true}
+                onReload={onReload}
+              />
+            )}
             {target === null ? (
               payload.targets_many ? (
                 <RepositoriesNotice locale={locale} copy="appDetail.targetsMany" />
@@ -471,14 +872,32 @@ export function AppDetailView({
             {target === null ? null : (
               <TargetOpsZone locale={locale} payload={target} onReload={onReload} />
             )}
-            {bot === null ? null : (
-              <BotSettingsView
+            {payload.blocked ? null : (
+              <AppCredentialsSection locale={locale} workspaceId={payload.workspace_id} app={payload.app} />
+            )}
+            {bot === null || payload.can_manage !== true ? null : (
+              <AppShareSection locale={locale} appId={appId} app={payload.app} onReload={onReload} />
+            )}
+          </div>
+        </TabsContent>
+        <TabsContent value="bots">
+          <div className="flex flex-col">
+            {/* F4/D47: the copy follows the REAL bind state. A pending row is an
+                UNBOUND installation of a SHARED App (the server sends none for an
+                owned App, which never binds) — that, and only that, is "the chain
+                appears once the installation is bound". Everything else with an
+                empty chain is the honest "nothing mounted" answer, and rows whose
+                bot is no longer shared render skipped. */}
+            {(payload.chain ?? []).length === 0 && (payload.pending_installations ?? []).length > 0 ? (
+              <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.pendingBind")}</p>
+            ) : (
+              <AppChainSection
                 locale={locale}
-                payload={{ ...bot, can_manage: bot.can_configure_bot === true }}
-                groups={groups}
-                modelsLoading={modelsLoading}
-                notice={null}
-                onReload={onReload}
+                appId={appId}
+                chain={payload.chain ?? []}
+                canManage={payload.can_manage === true}
+                mountableBots={mountable}
+                onReordered={onReload}
               />
             )}
           </div>
@@ -516,6 +935,95 @@ export function AppDetailView({
           </div>
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+/**
+ * "Share this app" (Task 5's second block): the one App-owned mutating
+ * control the detail keeps, PATCHing `/api/apps/:appId/scope` behind the
+ * same confirm-then-write shape the bot's share switch uses. Sharing is an
+ * App property — a shared App is installable by any workspace — never a bot
+ * property, so the control lives here and nowhere on the bot page.
+ */
+export function AppShareSection({
+  locale,
+  appId,
+  app,
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  app: { scope: "owned" | "shared" };
+  onReload: (options?: { background?: boolean }) => Promise<unknown>;
+}) {
+  const [pending, setPending] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function submitScope(scope: "owned" | "shared"): Promise<void> {
+    setBusy(true);
+    try {
+      const { status } = await patchJson(
+        `${apiBase()}/api/apps/${encodeURIComponent(appId)}/scope`,
+        { scope, ...(scope === "owned" ? { confirm: true } : {}) },
+      );
+      if (status < 200 || status >= 300) {
+        setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+      } else {
+        await onReload({ background: true });
+        setNotice({
+          kind: "success",
+          message: t(locale, scope === "shared" ? "apps.shareAppSaved" : "apps.unshareAppSaved"),
+        });
+      }
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+    } finally {
+      setBusy(false);
+      setPending(false);
+    }
+  }
+
+  const sharing = app.scope === "shared";
+  return (
+    <div className="flex flex-col gap-2 py-3" data-slot="app-share">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-muted-foreground">
+          {t(locale, sharing ? "apps.shareAppOn" : "apps.shareAppOff")}
+        </p>
+        <Button type="button" variant={sharing ? "destructive-outline" : "secondary"} onClick={() => setPending(true)}>
+          {t(locale, "apps.shareAppSwitch")}
+        </Button>
+      </div>
+      <NoticeRegion notice={notice} />
+      {pending ? (
+        <Dialog open onOpenChange={(open) => { if (!open) setPending(false); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t(locale, "apps.shareAppSwitch")}</DialogTitle>
+              <DialogDescription>
+                {t(locale, sharing ? "apps.shareAppConfirmOff" : "apps.shareAppConfirm")}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button type="button" variant="outline">
+                  {t(locale, "common.cancel")}
+                </Button>
+              </DialogClose>
+              <Button
+                type="button"
+                variant={sharing ? "destructive" : "default"}
+                disabled={busy}
+                onClick={() => void submitScope(sharing ? "owned" : "shared")}
+              >
+                {t(locale, "apps.shareAppSwitch")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </div>
   );
 }

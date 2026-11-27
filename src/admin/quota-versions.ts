@@ -9,7 +9,6 @@ import {
   quotaStartsOn,
   type QuotaProfileListRow,
   type QuotaProfileVersion,
-  type QuotaSource,
 } from "../store/quota-store";
 import { readMonthlyRpByWorkspace } from "../store/usage-store";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
@@ -25,14 +24,13 @@ export type QuotaVersionRow = {
   effectiveTo: string | null;
   state: "past" | "current" | "scheduled";
   base: Record<ReviewLevel, number>;
-  source: Record<QuotaSource, number>;
   rpPerCredit: number;
   notes: string | null;
   monthlyRp: Record<string, number | null>;
 };
 
 export type QuotaVersionsPayload = {
-  judgingVersion: number;
+  judgingVersion: number | null;
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
@@ -61,27 +59,37 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
   ]);
   const profiles = decodeQuotaProfiles((profileResult?.results ?? []) as QuotaProfileListRow[]);
   const plans = (planResult?.results ?? []) as QuotaPlan[];
-  const judging = pickQuotaProfile(profiles, month.startIso);
+  // An empty table is a fresh deployment, not a read failure: the operator
+  // needs the form to publish the first version, so nothing here throws.
+  //
+  // The marker names the version a workspace with NO binding gets, which under
+  // D13 is the profile in force at this instant — not the one covering the
+  // month's 1st. A bound workspace may sit on an older version; that is the
+  // point of the binding, and the list says so with `current` naming only the
+  // unbound answer.
+  const judging = profiles.length === 0 ? null : pickQuotaProfile(profiles, now.toISOString());
   const versions = profiles.map((profile: QuotaProfileVersion, index) => ({
     id: profile.id,
     version: profile.version,
     effectiveFrom: profile.effectiveFrom,
     effectiveTo: profiles[index + 1]?.effectiveFrom ?? null,
     state:
-      profile.id === judging.id
+      profile.id === judging?.id
         ? ("current" as const)
-        : profile.effectiveFrom > month.startIso
+        : profile.effectiveFrom > now.toISOString()
           ? ("scheduled" as const)
           : ("past" as const),
     base: profile.base,
-    source: profile.source,
     rpPerCredit: profile.rpPerCredit,
     notes: profile.notes,
     monthlyRp: profile.monthlyRp,
   }));
-  const uncoveredPlanIds = plans.filter((plan) => !Object.hasOwn(judging.monthlyRp, plan.id)).map((plan) => plan.id);
+  const uncoveredPlanIds =
+    judging === null
+      ? plans.map((plan) => plan.id)
+      : plans.filter((plan) => !Object.hasOwn(judging.monthlyRp, plan.id)).map((plan) => plan.id);
   return {
-    judgingVersion: judging.version,
+    judgingVersion: judging?.version ?? null,
     nextVersion: profiles.reduce((max, profile) => Math.max(max, profile.version), 0) + 1,
     plans,
     versions,
@@ -120,6 +128,11 @@ async function liveWorkspacePlans(db: DashboardD1): Promise<Array<{ id: string; 
  * How many live workspaces would already be over these numbers at today's
  * usage. One month sum (`readMonthlyRp` with no workspace bound), one
  * comparison per workspace (`quotaSpent`), one date (`quotaStartsOn`).
+ *
+ * A workspace holding a binding for this month is NOT counted: its version is
+ * already pinned, so the candidate reaches it at its next month's first
+ * metering, never mid-month (D13, contract § 3). What the count reports is the
+ * population that adopts the candidate at its next metering — the unbound.
  */
 export async function previewQuotaImpact(
   db: DashboardD1,
@@ -127,13 +140,19 @@ export async function previewQuotaImpact(
   now: Date,
 ): Promise<QuotaImpact> {
   const month = quotaMonth(now);
-  const [workspaces, usage] = await Promise.all([
+  const [workspaces, usage, bound] = await Promise.all([
     liveWorkspacePlans(db),
     readMonthlyRpByWorkspace(db, month.startIso, month.endIso),
+    db
+      .prepare(`SELECT workspace_id AS workspaceId FROM workspace_quota_binding WHERE month = ?1`)
+      .bind(month.month)
+      .all<{ workspaceId: string }>(),
   ]);
   const spent = new Map(usage.map((row) => [row.workspaceId, row.total]));
+  const pinned = new Set(bound.results.map((row) => row.workspaceId));
   let count = 0;
   for (const workspace of workspaces) {
+    if (pinned.has(workspace.id)) continue;
     if (quotaSpent(spent.get(workspace.id) ?? 0, candidate.monthlyRp[workspace.planId] ?? null)) {
       count += 1;
     }
@@ -145,7 +164,6 @@ export async function previewQuotaImpact(
 export type CreateQuotaVersionInput = QuotaCandidate & {
   notes: string | null;
   base: Record<ReviewLevel, number>;
-  source: Record<QuotaSource, number>;
   rpPerCredit: number;
 };
 
@@ -156,8 +174,8 @@ export type CreateQuotaVersionOutcome =
 const PROFILE_INSERT_SQL = `
   INSERT INTO quota_profiles
     (id, version, effective_from, base_quick, base_standard, base_deep,
-     source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-  SELECT ?1, COALESCE(MAX(version), 0) + 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+     rp_per_credit, notes, created_at, created_by)
+  SELECT ?1, COALESCE(MAX(version), 0) + 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
     FROM quota_profiles`;
 
 const PLAN_INSERT_SQL = `
@@ -198,8 +216,6 @@ export async function createQuotaVersion(
           input.base.quick,
           input.base.default,
           input.base.deep,
-          input.source.byok,
-          input.source.shared,
           input.rpPerCredit,
           input.notes,
           now,
@@ -217,7 +233,6 @@ export async function createQuotaVersion(
           JSON.stringify({
             effectiveFrom: input.effectiveFrom,
             base: input.base,
-            source: input.source,
             rpPerCredit: input.rpPerCredit,
             monthlyRp: input.monthlyRp,
             notes: input.notes,
@@ -304,27 +319,27 @@ export function parseQuotaCandidate(body: unknown, planIds: readonly string[]): 
 
 /**
  * The pricing half of the create body. Every factor is a positive integer
- * because the DDL CHECKs are: a zero or fractional weight would price a review
- * at 0 RP and make the ledger's pre-metering sentinel ambiguous.
+ * because the DDL CHECKs are: a zero weight would price a review at 0 RP and
+ * make the ledger's pre-metering sentinel ambiguous.
+ *
+ * The two key-source rates are GONE (D37): a review's price is
+ * `ceil(base × the executing bot's multiplier)`, so the profile carries only
+ * the level weights and the credit denominator.
  */
-export function parseQuotaNumbers(body: unknown): Parsed<Pick<CreateQuotaVersionInput, "base" | "source" | "rpPerCredit" | "notes">> {
+export function parseQuotaNumbers(
+  body: unknown,
+): Parsed<Pick<CreateQuotaVersionInput, "base" | "rpPerCredit" | "notes">> {
   const fields = record(body);
   if (fields === null) return { ok: false, error: "body must be a JSON object" };
   const base = record(fields.base);
-  const source = record(fields.source);
-  if (base === null || source === null) {
-    return { ok: false, error: "base and source must be objects of positive whole numbers" };
+  if (base === null) {
+    return { ok: false, error: "base must be an object of positive whole numbers" };
   }
   const quick = positiveInt(base.quick);
   const standard = positiveInt(base.default);
   const deep = positiveInt(base.deep);
   if (quick === null || standard === null || deep === null) {
     return { ok: false, error: "base.quick, base.default and base.deep must each be a positive whole number of RP" };
-  }
-  const byok = positiveInt(source.byok);
-  const shared = positiveInt(source.shared);
-  if (byok === null || shared === null) {
-    return { ok: false, error: "source.byok and source.shared must each be a positive whole-number multiplier" };
   }
   const rpPerCredit = positiveInt(fields.rpPerCredit);
   if (rpPerCredit === null) {
@@ -334,7 +349,7 @@ export function parseQuotaNumbers(body: unknown): Parsed<Pick<CreateQuotaVersion
     return { ok: false, error: "notes must be a string, or null to record none" };
   }
   const notes = typeof fields.notes === "string" && fields.notes.trim().length > 0 ? fields.notes.trim() : null;
-  return { ok: true, value: { base: { quick, default: standard, deep }, source: { byok, shared }, rpPerCredit, notes } };
+  return { ok: true, value: { base: { quick, default: standard, deep }, rpPerCredit, notes } };
 }
 
 /**

@@ -140,7 +140,7 @@ export function LoadedProvidersSection({
             <ProviderGroupCard
               key={group.providerId}
               locale={locale}
-              appId={payload.app.github_app_id}
+              botId={payload.app.id}
               group={group}
               catalog={catalogById[group.catalogId]}
               limitsSnapshot={payload.model_limits_snapshot}
@@ -204,7 +204,7 @@ function groupMeta(
 
 function ProviderGroupCard({
   locale,
-  appId,
+  botId,
   group,
   catalog,
   limitsSnapshot,
@@ -216,7 +216,7 @@ function ProviderGroupCard({
   onReload,
 }: {
   locale: SpaBoot["locale"];
-  appId: number;
+  botId: string;
   group: ProviderGroup;
   catalog: CatalogProvider | undefined;
   limitsSnapshot: string;
@@ -336,7 +336,7 @@ function ProviderGroupCard({
                       <UsagePanel
                         key={`${key.keyId}:${usage.nonce}`}
                         locale={locale}
-                        appId={appId}
+                        botId={botId}
                         provider={group.providerId}
                         keyId={key.keyId}
                         open
@@ -426,7 +426,7 @@ function ProviderGroupCard({
           locale={locale}
           open={syncOpen}
           onOpenChange={setSyncOpen}
-          appId={appId}
+          botId={botId}
           provider={group.providerId}
           label={group.label}
           onOutcome={onOutcome}

@@ -48,7 +48,7 @@ describe("attributionVerdict", () => {
     expect(verdict).toEqual({
       ok: true,
       count: 0,
-      message: "tenant attribution: 0 orphan Apps (every review_bots row has a bot_workspaces row)",
+      message: "tenant attribution: 0 orphan Apps (every github_apps row has an app_workspaces row)",
     });
   });
 
@@ -56,7 +56,7 @@ describe("attributionVerdict", () => {
     const verdict = attributionVerdict(wranglerJson(3));
     expect(verdict.ok).toBe(false);
     expect(verdict.count).toBe(3);
-    expect(verdict.message).toContain("3 App(s) have no bot_workspaces row");
+    expect(verdict.message).toContain("3 App(s) have no app_workspaces row");
     expect(verdict.message).toContain("scripts/workspace-backfill.sql");
   });
 
@@ -91,7 +91,7 @@ describe("attributionVerdict", () => {
   });
 
   test("the query is the column mapping the replay file backfills — executed, not restated", () => {
-    const independent = "SELECT COUNT(*) AS n FROM review_bots WHERE id NOT IN (SELECT bot_id FROM bot_workspaces)";
+    const independent = "SELECT COUNT(*) AS n FROM github_apps WHERE id NOT IN (SELECT app_id FROM app_workspaces)";
     const db = createMigratedTestD1();
     try {
       expect(verdictFor(ZERO_ORPHAN_SQL, db).ok).toBe(true);
@@ -99,7 +99,9 @@ describe("attributionVerdict", () => {
 
       seedBot(db, "app-mapped", 1);
       seedBot(db, "app-orphan", 2);
-      db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-mapped', 'default')").run();
+      // seedBot seeds the split pair (mapping included); this test is ABOUT the
+      // orphan, so drop that row to model an unmapped App.
+      db.raw.run("DELETE FROM app_workspaces WHERE app_id = 'app-orphan'");
 
       const orphaned = verdictFor(ZERO_ORPHAN_SQL, db);
       expect(orphaned.ok).toBe(false);
@@ -111,11 +113,11 @@ describe("attributionVerdict", () => {
       expect(verdictFor(ZERO_ORPHAN_SQL, db)).toEqual({
         ok: true,
         count: 0,
-        message: "tenant attribution: 0 orphan Apps (every review_bots row has a bot_workspaces row)",
+        message: "tenant attribution: 0 orphan Apps (every github_apps row has an app_workspaces row)",
       });
       expect(countOf(independent, db)).toBe(0);
-      db.raw.prepare("UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'app-mapped'").run();
-      db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = 'app-mapped'").run();
+      db.raw.prepare("UPDATE github_apps SET deleted_at = datetime('now') WHERE id = 'app-mapped'").run();
+      db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = 'app-mapped'").run();
       expect(verdictFor(ZERO_ORPHAN_SQL, db).count).toBe(1);
     } finally {
       db.raw.close();
@@ -131,7 +133,7 @@ describe("targetlessVerdict", () => {
       const verdict = targetlessFor(db);
       expect(verdict.ok).toBe(false);
       expect(verdict.count).toBe(1);
-      expect(verdict.message).toContain("1 bot(s) have no live review target");
+      expect(verdict.message).toContain("1 live GitHub App(s) have no live review target");
       expect(verdict.message).toContain("0057_review_targets.sql cannot be replayed whole");
       expect(verdict.message).toContain("restore the missing target rows");
     } finally {
@@ -150,12 +152,12 @@ describe("targetlessVerdict", () => {
       expect(verdictFor(ZERO_ORPHAN_SQL, db)).toEqual({
         ok: true,
         count: 0,
-        message: "tenant attribution: 0 orphan Apps (every review_bots row has a bot_workspaces row)",
+        message: "tenant attribution: 0 orphan Apps (every github_apps row has an app_workspaces row)",
       });
       expect(targetlessFor(db)).toEqual({
         ok: true,
         count: 0,
-        message: "tenant attribution: 0 target-less bots (every live review_bots row has a live review_targets row)",
+        message: "tenant attribution: 0 target-less Apps (every live github_apps row has a live review_targets row)",
       });
     } finally {
       db.raw.close();
@@ -168,7 +170,7 @@ describe("targetlessVerdict", () => {
     expect(orphan.ok).toBe(false);
     expect(targetless.ok).toBe(false);
     expect(orphan.message).not.toBe(targetless.message);
-    expect(orphan.message).toContain("have no bot_workspaces row");
+    expect(orphan.message).toContain("have no app_workspaces row");
     expect(targetless.message).toContain("have no live review target");
     for (const stdout of ["", "not json", "[]", wranglerJson(0, false)]) {
       expect(targetlessVerdict(stdout).ok, stdout).toBe(false);
@@ -178,8 +180,8 @@ describe("targetlessVerdict", () => {
 
   test("the target-less query runs against the migrated schema — liveness on both sides", () => {
     const independent =
-      "SELECT COUNT(*) AS n FROM review_bots WHERE deleted_at IS NULL AND id NOT IN " +
-      "(SELECT bot_id FROM review_targets WHERE deleted_at IS NULL)";
+      "SELECT COUNT(*) AS n FROM github_apps WHERE deleted_at IS NULL AND id NOT IN " +
+      "(SELECT app_id FROM review_targets WHERE deleted_at IS NULL)";
     const db = createMigratedTestD1();
     try {
       expect(targetlessFor(db).ok).toBe(true);
@@ -187,7 +189,7 @@ describe("targetlessVerdict", () => {
 
       seedBot(db, "bot-live", 1);
       seedBot(db, "bot-gone", 2);
-      db.raw.prepare("UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'bot-gone'").run();
+      db.raw.prepare("UPDATE github_apps SET deleted_at = datetime('now') WHERE id = 'bot-gone'").run();
       expect(targetlessFor(db).count).toBe(1);
       expect(targetlessFor(db).count).toBe(countOf(independent, db));
 

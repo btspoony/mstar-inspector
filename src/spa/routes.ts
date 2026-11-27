@@ -17,6 +17,7 @@ export const SPA_PAGES = [
   "settings",
   "login",
   "app-detail",
+  "bot-detail",
 ] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
@@ -32,7 +33,8 @@ export type SpaRoute =
   | { page: "members"; pathname: string; workspaceRef: string }
   | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
-  | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string };
+  | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string }
+  | { page: "bot-detail"; pathname: string; botId: string; workspaceRef: string };
 
 /**
  * First path segments that can never name a workspace (today's routes). ONE
@@ -63,7 +65,11 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
  * route to a workspace. ONE source for the SPA matcher below and the Worker's
  * route-family gate (`src/dashboard/index.ts`), which derives from it.
  */
-export const WORKSPACE_FAMILY_SEGMENTS = ["repos", "apps", "members", "settings", "api"] as const;
+// `review-bots` joined the family with the App/bot split (the bot-config form
+// POSTs live at /dashboard/<ref>/review-bots/:botId/settings): without it the
+// tenant classifier answered `other` for those paths, workspaceOnly fell
+// through, and every bot-config form POST landed in the 405 wildcard.
+export const WORKSPACE_FAMILY_SEGMENTS = ["repos", "apps", "members", "settings", "api", "review-bots", "bots"] as const;
 
 const WORKSPACE_REF_PATH = new RegExp(
   `^/dashboard/([^/]+)/(?:${WORKSPACE_FAMILY_SEGMENTS.join("|")})(?:/|$)`,
@@ -93,6 +99,7 @@ const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)$/;
 const WORKSPACE_REPOS_PATH = /^\/dashboard\/([^/]+)\/repos$/;
 const WORKSPACE_REPOS_DETAIL_PATH = /^\/dashboard\/([^/]+)\/repos\/([^/]+)$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
+const WORKSPACE_BOT_DETAIL_PATH = /^\/dashboard\/([^/]+)\/bots\/([^/]+)$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
 const WORKSPACE_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/settings$/;
 const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)$/;
@@ -179,6 +186,8 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
     const targetId = WORKSPACE_REPOS_DETAIL_PATH.exec(pathname)?.[2];
     if (targetId) return { page: "repos", pathname, workspaceRef, targetId };
+    const botId = WORKSPACE_BOT_DETAIL_PATH.exec(pathname)?.[2];
+    if (botId) return { page: "bot-detail", pathname, botId, workspaceRef };
     const appId = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
     if (appId) return { page: "app-detail", pathname, appId, workspaceRef };
     return null;

@@ -17,7 +17,7 @@ function capturing(db: TestD1, captured: string[]): TestD1 {
 function seed(db: TestD1, prNumber: number, id: string, state: string, daysAgo: number): void {
   db.raw
     .prepare(
-      `INSERT INTO pull_requests (id, bot_id, owner, repo, pr_number, state, last_seen_at)
+      `INSERT INTO pull_requests (id, app_id, owner, repo, pr_number, state, last_seen_at)
        VALUES (?, 'bot', 'acme', 'widgets', ?, ?, datetime('now', ?))`,
     )
     .run(id, prNumber, state, `-${daysAgo} days`);

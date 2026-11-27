@@ -9,7 +9,7 @@ import {
 import { createUser } from "../../src/dashboard/users";
 import { deleteWorkspace } from "../../src/dashboard/workspace-store";
 import { applyMigrations } from "../helpers/migration-shapes";
-import {
+import { syncSplitPair,
   createMigratedTestD1,
   createTestD1,
   migrationNumber,
@@ -202,9 +202,8 @@ async function twoTenantWorld(): Promise<TestD1> {
     )
     .run(WS_B);
   const box = createSecretbox(TEST_KEY);
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, scope, shared_at, created_at, updated_at)
        VALUES (?, 'platform-bot', 9501, 'platform-bot', ?, 'enc', 'alice',
@@ -217,13 +216,16 @@ async function twoTenantWorld(): Promise<TestD1> {
         `github_apps.private_key_enc:${SHARED_BOT}`,
       ),
     );
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
     .prepare(
       `INSERT INTO workspaces (id, slug, name, created_by, created_at) VALUES (?, ?, ?, 'alice', datetime('now'))`,
     )
     .run(WS_PROVIDER, WS_PROVIDER, WS_PROVIDER);
   db.raw
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
     .run(SHARED_BOT, WS_PROVIDER);
   const apps = createReviewBotsStore(db);
   for (const [installationId, login] of [
@@ -273,7 +275,7 @@ const boundTo = (db: TestD1, installationId: number) =>
   (
     db.raw
       .query(
-        "SELECT bound_workspace_id FROM bot_installations WHERE bot_id = ? AND installation_id = ?",
+        "SELECT bound_workspace_id FROM github_app_installations WHERE app_id = ? AND installation_id = ?",
       )
       .get(SHARED_BOT, installationId) as { bound_workspace_id: string | null }
   ).bound_workspace_id;
@@ -339,8 +341,9 @@ describe("shared bot installations are bound to one workspace", () => {
     stubGithub(world());
     const bound = await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A);
     expect(bound.status).toBe(302);
+    // F4: a successful bind lands on the chain it created.
     expect(bound.headers.get("location")).toBe(
-      `/dashboard/${WS_A}/apps/9501?tab=settings`,
+      `/dashboard/${WS_A}/apps/9501?tab=bots`,
     );
     expect(boundTo(db, INSTALLATION_A)).toBe(WS_A);
   });
@@ -438,7 +441,7 @@ describe("shared bot installations are bound to one workspace", () => {
     );
     const written = db.raw
       .query(
-        "SELECT COUNT(*) AS n FROM review_targets WHERE bot_id = ? AND repo_id = 2002",
+        "SELECT COUNT(*) AS n FROM review_targets WHERE app_id = ? AND repo_id = 2002",
       )
       .get(SHARED_BOT) as { n: number };
     expect(written.n).toBe(0);
@@ -591,13 +594,12 @@ describe("shared bot installations are bound to one workspace", () => {
         `INSERT INTO workspaces (id, slug, name, created_by, created_at) VALUES ('ws-live', 'ws-live', 'live', 'x', datetime('now'))`,
       )
       .run();
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+    db.raw.prepare(
+      `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
                                   created_by, status, created_at, updated_at)
          VALUES ('bot-x', 'bot-x', 7101, 'bot-x', 'k', 'w', 'x', 'active', datetime('now'), datetime('now'))`,
-      )
-      .run();
+    )
+    .run();
     seedTarget(db, "bot-x", {
       workspaceId: "ws-gone",
       repoId: 1,

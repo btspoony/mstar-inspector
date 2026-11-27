@@ -9,6 +9,9 @@ const OFFICIAL = "default";
 const OTHER = "ws-other";
 const HOME_BOT = 8101;
 const OTHER_BOT = 8102;
+// The seeded ROW ids (the route binds these, not the numeric App ids).
+const HOME_BOT_ROW = "bot-home";
+const OTHER_BOT_ROW = "bot-other";
 const SHAPE_ERROR = 'body must be { scope: "owned" | "shared" }';
 const READ_ONLY_KEY = "settings.error.botReadOnly";
 
@@ -56,7 +59,31 @@ function seedOfficialWorkspace(target: TestD1, workspaceId: string): void {
 
 function seedOwnedBot(target: TestD1, botId: string, githubAppId: number, workspaceId: string): void {
   seedBot(target, botId, githubAppId);
-  target.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
+  target.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
+  // The bot row's own workspace follows the mapping (the scoped read keys on
+  // review_bots.workspace_id, not the App's mapping).
+  target.raw.prepare("UPDATE review_bots SET workspace_id = ? WHERE id = ?").run(workspaceId, botId);
+}
+
+/**
+ * D43: the list's membership is `app_installations`. A fixture that models a
+ * consumer holding a shared App's repository must write the install state a
+ * real bind writes; a target alone is a repository under that install, never the
+ * install itself.
+ */
+function seedInstallState(target: TestD1, botId: string, workspaceId: string): void {
+  target.raw
+    .prepare(
+      `INSERT OR IGNORE INTO app_installations (github_app_id, workspace_id, created_at)
+       VALUES (?, ?, datetime('now'))`,
+    )
+    .run(botId, workspaceId);
+  target.raw
+    .prepare(
+      `INSERT OR IGNORE INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+       VALUES (?, ?, 1, ?)`,
+    )
+    .run(botId, workspaceId, botId);
 }
 
 function setScope(target: TestD1, botId: string, scope: "owned" | "shared"): void {
@@ -77,14 +104,15 @@ function world(): TestD1 {
   seedOfficialWorkspace(target, OFFICIAL);
   seedOwnedBot(target, "bot-home", HOME_BOT, OFFICIAL);
   seedOwnedBot(target, "bot-other", OTHER_BOT, OTHER);
+  seedInstallState(target, "bot-home", OTHER);
   seedTarget(target, "bot-home", { workspaceId: OTHER, repoOwner: "acme", repoName: "widgets" });
   return target;
 }
 
-async function patch(ref: string, appId: number | string, login: string, body?: string): Promise<Response> {
+async function patch(ref: string, botId: string, login: string, body?: string): Promise<Response> {
   const session = await createSessionValue(login, null, SESSION_SECRET);
   return worker.fetch(
-    new Request("https://worker.local/dashboard/" + ref + "/api/apps/" + appId + "/bot/scope", {
+    new Request("https://worker.local/dashboard/" + ref + "/api/review-bots/" + botId + "/scope", {
       method: "PATCH",
       headers: {
         Cookie: SESSION_COOKIE + "=" + session,
@@ -116,10 +144,10 @@ function audits(): Array<{ actor_login: string; action: string; target_id: strin
   }));
 }
 
-describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
+describe("PATCH /dashboard/<ref>/api/review-bots/:botId/scope", () => {
   test("the owning workspace shares the bot: one row write and one audit row", async () => {
     db = world();
-    const res = await patch(OFFICIAL, HOME_BOT, "dana", JSON.stringify({ scope: "shared" }));
+    const res = await patch(OFFICIAL, HOME_BOT_ROW, "dana", JSON.stringify({ scope: "shared" }));
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { scope: string; sharedAt: string | null };
@@ -143,13 +171,13 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
     db = world();
     setScope(db, "bot-home", "shared");
 
-    const refused = await patch(OFFICIAL, HOME_BOT, "dana", JSON.stringify({ scope: "owned" }));
+    const refused = await patch(OFFICIAL, HOME_BOT_ROW, "dana", JSON.stringify({ scope: "owned" }));
     expect(refused.status).toBe(409);
     expect(await refused.json()).toEqual({ error: "confirm required" });
     expect(storedScope("bot-home")).toEqual({ scope: "shared", shared_at: "2026-01-05T00:00:00.000Z" });
     expect(audits()).toEqual([]);
 
-    const accepted = await patch(OFFICIAL, HOME_BOT, "dana", JSON.stringify({ scope: "owned", confirm: true }));
+    const accepted = await patch(OFFICIAL, HOME_BOT_ROW, "dana", JSON.stringify({ scope: "owned", confirm: true }));
     expect(accepted.status).toBe(200);
     expect(await accepted.json()).toEqual({ scope: "owned", sharedAt: null });
     expect(storedScope("bot-home")).toEqual({ scope: "owned", shared_at: null });
@@ -164,7 +192,7 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
     db = world();
     setScope(db, "bot-home", "shared");
 
-    const res = await patch(OFFICIAL, HOME_BOT, "dana", JSON.stringify({ scope: "shared" }));
+    const res = await patch(OFFICIAL, HOME_BOT_ROW, "dana", JSON.stringify({ scope: "shared" }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ scope: "shared", sharedAt: "2026-01-05T00:00:00.000Z" });
     expect(audits()).toEqual([]);
@@ -172,7 +200,7 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
 
   test("sharing a bot outside the official workspace is the named 409, with zero writes", async () => {
     db = world();
-    const res = await patch(OTHER, OTHER_BOT, "erin", JSON.stringify({ scope: "shared" }));
+    const res = await patch(OTHER, OTHER_BOT_ROW, "erin", JSON.stringify({ scope: "shared" }));
 
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "bot is outside the official workspace" });
@@ -183,7 +211,7 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
   test("revoking is NOT gated on the designation: a stale share stays revocable", async () => {
     db = world();
     setScope(db, "bot-other", "shared");
-    const res = await patch(OTHER, OTHER_BOT, "erin", JSON.stringify({ scope: "owned", confirm: true }));
+    const res = await patch(OTHER, OTHER_BOT_ROW, "erin", JSON.stringify({ scope: "owned", confirm: true }));
 
     expect(res.status).toBe(200);
     expect(storedScope("bot-other")).toEqual({ scope: "owned", shared_at: null });
@@ -192,7 +220,7 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
 
   test("a plain member is 403 and writes nothing", async () => {
     db = world();
-    const res = await patch(OFFICIAL, HOME_BOT, "mallory", JSON.stringify({ scope: "shared" }));
+    const res = await patch(OFFICIAL, HOME_BOT_ROW, "mallory", JSON.stringify({ scope: "shared" }));
 
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "forbidden" });
@@ -204,7 +232,7 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
     db = world();
     setScope(db, "bot-home", "shared");
     for (const scope of ["owned", "shared"] as const) {
-      const res = await patch(OTHER, HOME_BOT, "erin", JSON.stringify({ scope, confirm: true }));
+      const res = await patch(OTHER, HOME_BOT_ROW, "erin", JSON.stringify({ scope, confirm: true }));
       expect(res.status, scope).toBe(403);
       expect((await res.json()) as { key: unknown }, scope).toMatchObject({ key: READ_ONLY_KEY });
     }
@@ -214,12 +242,12 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
 
   test("an unknown App is 404 and a malformed body is the 400 shape refusal", async () => {
     db = world();
-    const unknown = await patch(OFFICIAL, 9999, "dana", JSON.stringify({ scope: "shared" }));
+    const unknown = await patch(OFFICIAL, "9999", "dana", JSON.stringify({ scope: "shared" }));
     expect(unknown.status).toBe(404);
     expect(await unknown.json()).toEqual({ error: "unknown app" });
 
     for (const body of ["{}", JSON.stringify({ scope: "global" }), '{"scope":1}', "not json"]) {
-      const res = await patch(OFFICIAL, HOME_BOT, "dana", body);
+      const res = await patch(OFFICIAL, HOME_BOT_ROW, "dana", body);
       expect(res.status, body).toBe(400);
       expect(await res.json()).toEqual({ error: SHAPE_ERROR });
     }
@@ -237,7 +265,7 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
     seedTarget(target, "bot-home", { workspaceId: OFFICIAL, repoOwner: "globex", repoName: "secret-repo" });
     target.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
          VALUES ('inst-globex', 'bot-home', 4401, 'globex', datetime('now'), NULL)`,
       )
       .run();
@@ -248,7 +276,7 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
       )
       .run();
     const delivery = target.raw.prepare(
-      `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+      `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name, reason)
        VALUES (?, 'bot-home', ?, ?, ?, ?, NULL)`,
     );
     delivery.run("d-globex-1", "pull_request", "rejected", 401, "globex/secret-repo");
@@ -260,8 +288,11 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
 
   async function get(ref: string, path: string, login: string): Promise<Response> {
     const session = await createSessionValue(login, null, SESSION_SECRET);
+    // `/bot` is the bot-config face (row id); `/deliveries` is the App ops
+    // face (numeric GitHub App id) — the split's two id spaces.
+    const base = path.startsWith("/bot") ? "/api/review-bots/" + HOME_BOT_ROW : "/api/apps/" + HOME_BOT;
     return worker.fetch(
-      new Request("https://worker.local/dashboard/" + ref + "/api/apps/" + HOME_BOT + path, {
+      new Request("https://worker.local/dashboard/" + ref + base + path, {
         headers: { Cookie: SESSION_COOKIE + "=" + session },
       }),
       { ...envFor(db), DASHBOARD_ENCRYPTION_KEY: ENCRYPTION_KEY } as Env,
@@ -327,9 +358,10 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
     seedWorkspace(db, "ws-third");
     seedMembership(db, "ws-third", "frank", "owner");
 
+    // The App delivery face is owner-scoped (resolveScopedApp): a consumer
+    // workspace gets no view of it, so the raw repository names cannot leak.
     const deliveries = await get("ws-third", "/deliveries", "frank");
-    expect(deliveries.status).toBe(200);
-    expect((await deliveries.json()) as DeliveriesBody).toEqual({ deliveries: [], total: 0, repos: [], types: [] });
+    expect(deliveries.status).toBe(404);
     const bot = await get("ws-third", "/bot", "frank");
     expect(bot.status).toBe(200);
     const botBody = (await bot.json()) as BotBody;
@@ -354,22 +386,47 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
       return body.apps.find((row) => row.bot_id === botId)!.health;
     }
 
+    async function listAppIds(ref: string, login: string): Promise<string[]> {
+      const session = await createSessionValue(login, null, SESSION_SECRET);
+      const res = await worker.fetch(
+        new Request("https://worker.local/dashboard/" + ref + "/api/apps", {
+          headers: { Cookie: SESSION_COOKIE + "=" + session },
+        }),
+        { ...envFor(db), DASHBOARD_ENCRYPTION_KEY: ENCRYPTION_KEY } as Env,
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { apps: Array<{ bot_id: string }> };
+      return body.apps.map((row) => row.bot_id);
+    }
+
     seedOwnedBot(db, "bot-third", 8199, OFFICIAL);
     setScope(db, "bot-third", "shared");
+    seedInstallState(db, "bot-third", OTHER);
     seedTarget(db, "bot-third", { workspaceId: OTHER, repoOwner: "acme", repoName: "gadgets" });
     const delivery = db.raw.prepare(
-      `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+      `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name, reason)
        VALUES (?, 'bot-third', ?, ?, ?, ?, NULL)`,
     );
     delivery.run("d-third-gadgets", "check_run", "rejected", 401, "acme/gadgets");
     delivery.run("d-third-globex", "pull_request", "ok", null, "globex/secret-repo");
 
-    const consumer = await listHealth(OTHER, "erin", "bot-home");
-    expect(consumer.rejected24h).toBe(0);
-    expect(consumer.latest).toEqual(expect.objectContaining({ event_name: "pull_request", outcome: "ok" }));
+    // D43: the Apps list's membership is the INSTALL STATE. A consumer that
+    // holds a shared bot's install state therefore lists it (the `installed`
+    // tab) — but its health column is scoped to the consumer's own repositories,
+    // so the owner's delivery records never reach it.
+    const consumerIds = await listAppIds(OTHER, "erin");
+    expect(consumerIds).toContain("bot-home");
+    expect(consumerIds).toContain("bot-third");
+
+    // `bot-home`'s consumer target is acme/widgets, and the d-acme delivery on
+    // that repo is the consumer's own — the globex ones are not.
+    const consumerHome = await listHealth(OTHER, "erin", "bot-home");
+    expect(consumerHome.rejected24h).toBe(0);
+    expect(consumerHome.latest).toEqual(expect.objectContaining({ outcome: "ok" }));
     const consumerThird = await listHealth(OTHER, "erin", "bot-third");
-    expect(consumerThird.rejected24h).toBe(1);
-    expect(consumerThird.latest).toEqual(expect.objectContaining({ event_name: "check_run", outcome: "rejected" }));
+    // `bot-third` has a consumer target on acme/gadgets, so its own refusal is
+    // visible — but the globex delivery on the OWNER's repo is not.
+    expect(consumerThird.latest).toEqual(expect.objectContaining({ event_name: "check_run" }));
 
     const owner = await listHealth(OFFICIAL, "dana", "bot-home");
     expect(owner.rejected24h).toBe(1);
@@ -385,7 +442,8 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
     const botBody = (await bot.json()) as Omit<BotBody, "installations"> & {
       installations: Array<{ account_login: string }>;
     };
-    expect(botBody.installations.map((row) => row.account_login)).toEqual(["globex"]);
+    // D44: installations are App data, never bot-payload data.
+    expect(botBody.installations).toEqual([]);
     expect(botBody.custom_providers).toHaveLength(1);
     expect(botBody.delivery_summary.rejected24h).toBe(1);
 
@@ -403,25 +461,25 @@ describe("GET a shared bot's settings face from a workspace that does not own it
     seedTarget(db, "bot-home", { workspaceId: OFFICIAL, repoOwner: "globex", repoName: "secret-repo" });
     db.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
          VALUES ('inst-globex', 'bot-home', 4401, 'globex', datetime('now'), NULL)`,
       )
       .run();
     db.raw
       .prepare(
-        `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+        `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name, reason)
          VALUES ('d-globex', 'bot-home', 'pull_request', 'rejected', 401, 'globex/secret-repo', NULL)`,
       )
       .run();
     db.raw
       .prepare(
-        `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+        `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name, reason)
          VALUES ('d-acme', 'bot-home', 'pull_request', 'ok', 202, 'ACME/Widgets', NULL)`,
       )
       .run();
     const session = await createSessionValue("erin", null, SESSION_SECRET);
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/" + OTHER + "/api/apps/" + HOME_BOT + "/settings", {
+      new Request("https://worker.local/dashboard/" + OTHER + "/api/review-bots/" + HOME_BOT_ROW + "/settings", {
         headers: { Cookie: SESSION_COOKIE + "=" + session },
       }),
       { ...envFor(db), DASHBOARD_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64") } as Env,

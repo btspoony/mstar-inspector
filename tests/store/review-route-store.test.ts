@@ -38,7 +38,7 @@ function payloadFor(): ReviewJobPayload {
     head_sha: null,
     action: "created",
     triggered_by: "issue_comment",
-    botRef: { appId: BOT_ID },
+    botRef: { appId: BOT_ID, botId: BOT_ID },
     targetId: TARGET_ID,
   };
 }

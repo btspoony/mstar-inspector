@@ -151,15 +151,15 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
       ["/dashboard/acme/apps/12345", "?tab=insights"],
       ["/dashboard/acme/repos/12345", ""],
       ["/dashboard/acme/apps", ""],
-      ["/dashboard/acme/api/apps/12345/settings", ""],
-      ["/dashboard/acme/api/apps/12345/bot", ""],
+      ["/dashboard/acme/api/review-bots/12345/settings", ""],
+      ["/dashboard/acme/api/review-bots/12345/bot", ""],
       ["/dashboard/acme/api/targets", ""],
       ["/dashboard/apps/12345/settings", ""],
     ] as const) {
       expect(settingsTabRedirect(path, search), `${path}${search}`).toBeNull();
     }
     expect(matchSpaRoute("/dashboard/acme/api/apps/12345")).toBeNull();
-    expect(matchSpaRoute("/dashboard/acme/api/apps/12345/settings")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/api/review-bots/12345/settings")).toBeNull();
     expect(matchSpaRoute("/dashboard/acme/api/targets")).toBeNull();
   });
 

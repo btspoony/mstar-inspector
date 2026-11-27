@@ -208,15 +208,19 @@ describe("the shared-bot routes are registered", () => {
     const routes = paths(adminApp);
     expect(routes).toContain("GET /api/bots");
     expect(routes).toContain("PATCH /api/bots/:botId/scope");
+    expect(routes).toContain("PATCH /api/review-bots/:botId/scope");
     expect(routes).toContain("PATCH /api/official-workspace");
   });
 
-  test("the workspace route table carries the owning workspace's scope write", () => {
+  test("the workspace route table carries both share switches", () => {
     const routes = paths(dashboardApp);
-    expect(routes).toContain("PATCH /:workspaceRef/api/apps/:appId/bot/scope");
-    const row = APP_ROUTES.find((entry) => entry.path === "/api/apps/:appId/bot/scope");
-    expect(row, "workspace scope route is declared in APP_ROUTES").toBeDefined();
-    expect(row && row.method).toBe("patch");
-    expect(row && row.access).toBe("write");
+    expect(routes).toContain("PATCH /:workspaceRef/api/apps/:appId/scope");
+    expect(routes).toContain("PATCH /:workspaceRef/api/review-bots/:botId/scope");
+    for (const path of ["/api/apps/:appId/scope", "/api/review-bots/:botId/scope"]) {
+      const row = APP_ROUTES.find((entry) => entry.path === path);
+      expect(row, `workspace scope route ${path} is declared in APP_ROUTES`).toBeDefined();
+      expect(row && row.method).toBe("patch");
+      expect(row && row.access).toBe("write");
+    }
   });
 });

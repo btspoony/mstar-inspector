@@ -120,6 +120,17 @@ export type ReviewFailureInput = {
    */
   code: FailureCode;
   /**
+   * For a quota refusal, WHICH ceiling refused: the workspace's plan month
+   * ('plan') or one bot's own month ('bot'). Absent for every other stage and
+   * for historical rows, where the distinction did not exist.
+   */
+  quotaScope?: "plan" | "bot" | null;
+  /**
+   * The bot a 'bot' refusal named. Never the App id: a plan refusal has no bot,
+   * and a fabricated id is worse than a NULL an operator can rule out.
+   */
+  quotaBotId?: string | null;
+  /**
    * The attempt id the failure belongs to (the Workflow instance id), or a
    * caller-chosen id for a failure that never reached an attempt. Absent, the
    * row's own id is the track id.
@@ -232,8 +243,8 @@ export function settlementFailureRowStatement(
   assertFailureStage(input.stage);
   return db
     .prepare(
-      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, quota_scope, quota_bot_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
     )
     .bind(
@@ -249,6 +260,8 @@ export function settlementFailureRowStatement(
       input.code ?? null,
       input.trackId ?? rowId,
       input.message ?? null,
+      input.quotaScope ?? null,
+      input.quotaBotId ?? null,
     );
 }
 
@@ -280,8 +293,8 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
       const rowId = crypto.randomUUID();
       await db
         .prepare(
-          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, quota_scope, quota_bot_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           rowId,
@@ -296,6 +309,8 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
           input.code ?? null,
           input.trackId ?? rowId,
           input.message ?? null,
+          input.quotaScope ?? null,
+          input.quotaBotId ?? null,
         )
         .run();
     },

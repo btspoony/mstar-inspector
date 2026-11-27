@@ -41,14 +41,14 @@ const openPanels: object[] = [];
 
 export function UsagePanel({
   locale,
-  appId,
+  botId,
   provider,
   keyId,
   open,
   onClose,
 }: {
   locale: SpaBoot["locale"];
-  appId: number;
+  botId: string;
   provider: string;
   keyId: string;
   open: boolean;
@@ -71,7 +71,7 @@ export function UsagePanel({
     let keyed: Refusal | null = null;
     try {
       const { status, body } = await postForm(
-        `${apiBase()}/api/apps/${encodeURIComponent(String(appId))}/keys/usage`,
+        `${apiBase()}/api/review-bots/${encodeURIComponent(botId)}/keys/usage`,
         { provider, keyId },
       );
       if (status === 200) {
@@ -92,7 +92,7 @@ export function UsagePanel({
     }
     setSnapshot(ready);
     setPhase("ready");
-  }, [appId, provider, keyId]);
+  }, [botId, provider, keyId]);
 
   useEffect(() => {
     if (open) void probe();

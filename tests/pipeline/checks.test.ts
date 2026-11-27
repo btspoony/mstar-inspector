@@ -56,7 +56,7 @@ import {
   SANDBOX_READ_PERMISSIONS,
   type AuthSeam,
 } from "../../src/pipeline/comment";
-import { createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1, syncReviewBotColumn } from "../store/helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const GITHUB_APP_ID = 1001;
@@ -66,14 +66,16 @@ const T0 = 1_700_000_000_000;
 
 async function seededDb(): Promise<TestD1> {
   const db = createMigratedTestD1();
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, 'checks-test', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(APP_ID, GITHUB_APP_ID);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   await mapAppToDefaultWorkspace(db, APP_ID);
   return db;
 }
@@ -1382,15 +1384,15 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     const unreadable = proof("review");
     db.raw
       .prepare(
-        `INSERT INTO reviews
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope, reviewed_at)
+        `INSERT INTO reviews (id, app_id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope, reviewed_at)
          VALUES ('earlier-attempt', ?, ?, ?, ?, ?, ?, 'ship it', '{"tally":{"scorePct":96}}', datetime('now'))`,
       )
       .run(APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA);
+  syncReviewBotColumn(db);
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', ?, ?)`,
       )
       .run(
@@ -1618,8 +1620,8 @@ describe("empty increment inheritance (spec §7.9)", () => {
     if (corruptEnvelope) db.raw.run("PRAGMA ignore_check_constraints = ON");
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, envelope)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, envelope)
+         VALUES (?, ?, ?, ?, ?, ?, ?,?, ?)`,
       )
       .run(
         crypto.randomUUID(),
@@ -1632,6 +1634,7 @@ describe("empty increment inheritance (spec §7.9)", () => {
         SCOPE.appId,
         envelope,
       );
+  syncReviewBotColumn(db);
   }
 
   test("the terminal Check carries the inherited baseline result, never an unconditional neutral", async () => {
@@ -1715,7 +1718,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
             confirmed_ms, applied_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'applied', ?, ?, 1, 'done', ?, ?, ?, ?)`,
@@ -1776,7 +1779,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
             confirmed_ms, applied_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'applied', ?, ?, 1, 'done', ?, ?, ?, ?)`,
@@ -1800,7 +1803,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'degraded', 'sending', '{}', NULL, 1, 'pending', ?, ?)`,
       )
@@ -1845,7 +1848,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
             confirmed_ms, applied_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'applied', ?, ?, 1, 'done', ?, ?, ?, ?)`,
@@ -2679,8 +2682,8 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   function seedHeadReview(db: TestD1, verdict: string, scorePct: number | null): void {
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, envelope)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, envelope)
+         VALUES (?, ?, ?, ?, ?, ?, ?,?, ?)`,
       )
       .run(
         crypto.randomUUID(),
@@ -2693,6 +2696,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         SCOPE.appId,
         JSON.stringify(scorePct === null ? { verdict } : { verdict, tally: { scorePct } }),
       );
+  syncReviewBotColumn(db);
   }
 
   async function skipHead(
@@ -2774,7 +2778,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
          VALUES ('broken-proof', ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', '{not json', 1, 'done', ?, ?)`,
       )
@@ -2868,7 +2872,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
             confirmed_ms, applied_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'confirmed', ?, ?, 1, 'done', ?, ?, ?, NULL)`,
@@ -2913,7 +2917,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
          VALUES ('no-payload', ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', ?, 1, 'done', ?, ?, ?)`,
       )
@@ -3003,7 +3007,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
          VALUES ('degraded-proof', ?, ?, ?, ?, ?, ?, 'degraded', 'confirmed', '{"version":1,"artifact":null}', ?, 1, 'done', ?, ?)`,
       )

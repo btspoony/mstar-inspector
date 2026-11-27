@@ -177,7 +177,7 @@ describe("worker entry delivery refusals", () => {
       head_sha: SHA,
       action: "opened",
       triggered_by: "pull_request",
-      botRef: { appId: "11111111-2222-3333-4444-555555555555" },
+      botRef: { appId: "11111111-2222-3333-4444-555555555555", botId: "11111111-2222-3333-4444-555555555555" },
       targetId: TARGET_ID,
     };
     const { REVIEW_QUEUE, IDEMPOTENCY_KV } = makeEnv();

@@ -5,7 +5,7 @@ import worker from "../../src/worker/index";
 import { requireMember, type DashboardVariables } from "../../src/dashboard/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
 import {
   MANIFEST_HOLD_COOKIE,
@@ -153,7 +153,7 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO review_bots
+    `INSERT INTO github_apps
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -164,11 +164,19 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
     now,
   );
-  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  seed(
+    db,
+    `INSERT INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+     VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))`,
+    id,
+    workspaceId,
+    slug,
+  );
   seed(
     db,
     `INSERT INTO review_targets
-       (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+       (id, workspace_id, app_id, name, created_by, created_at, updated_at)
      VALUES (?, ?, ?, ?, 'octocat', ?, ?)`,
     `target-${id}`,
     workspaceId,
@@ -187,7 +195,7 @@ function botRowIdOf(db: TestD1, id: string): string {
 
 function liveTargetIdOf(db: TestD1, botId: string): string {
   const row = db.raw
-    .prepare("SELECT id FROM review_targets WHERE bot_id = ? AND deleted_at IS NULL")
+    .prepare("SELECT id FROM review_targets WHERE app_id = ? AND deleted_at IS NULL")
     .get(botId) as { id: string } | null;
   if (row === null) throw new Error(`fixture bot ${botId} owns no live target`);
   return row.id;
@@ -195,7 +203,7 @@ function liveTargetIdOf(db: TestD1, botId: string): string {
 
 function appAcmeId(db: TestD1): number {
   return (
-    db.raw.prepare("SELECT github_app_id FROM review_bots WHERE id = ?").get("app-acme") as {
+    db.raw.prepare("SELECT github_app_id FROM github_apps WHERE id = ?").get("app-acme") as {
       github_app_id: number;
     }
   ).github_app_id;
@@ -241,7 +249,7 @@ describe("the pre-workspace App face is retired", () => {
       `/dashboard/apps/${ACME_APP_ID}/onboarding`,
       `/dashboard/apps/${ACME_APP_ID}/settings`,
       "/dashboard/api/apps",
-      `/dashboard/api/apps/${ACME_APP_ID}/settings`,
+      `/dashboard/api/review-bots/${ACME_APP_ID}/settings`,
     ]) {
       const res = await worker.fetch(await authedRequest(path, "octocat"), env);
       expect(res.status, path).toBe(404);
@@ -448,7 +456,7 @@ describe("manage is the workspace role", () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
     const post = (login: string) =>
-      authedRequest(`/dashboard/acme/apps/${ACME_APP_ID}/settings`, login, {
+      authedRequest(`/dashboard/acme/review-bots/app-acme/settings`, login, {
         method: "POST",
         body: SETTINGS_BODY,
       });
@@ -479,7 +487,7 @@ describe("success redirects stay in the workspace route family", () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
     const res = await worker.fetch(
-      await authedRequest(`/dashboard/acme/apps/${ACME_APP_ID}/settings`, "carol", {
+      await authedRequest(`/dashboard/acme/review-bots/app-acme/settings`, "carol", {
         method: "POST",
         body: SETTINGS_BODY,
         accept: "text/html",
@@ -504,7 +512,7 @@ describe("success redirects stay in the workspace route family", () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
     const res = await worker.fetch(
-      await authedRequest(`/dashboard/acme/apps/${ACME_APP_ID}/settings`, "carol", {
+      await authedRequest(`/dashboard/acme/review-bots/app-acme/settings`, "carol", {
         method: "POST",
         body: "op=save-sandbox-image&sandbox_image_id=no-such-image",
         accept: "text/html",
@@ -519,9 +527,10 @@ describe("success redirects stay in the workspace route family", () => {
 
   test("an App with no repository lands on the repository overview, which always resolves", async () => {
     const { db } = tenancyFixture();
-    db.raw.prepare("DELETE FROM review_targets WHERE bot_id = ?").run("app-acme");
+    db.raw.prepare("DELETE FROM review_targets WHERE app_id = ?").run("app-acme");
+  syncSplitPair(db);
     const res = await worker.fetch(
-      await authedRequest(`/dashboard/acme/apps/${ACME_APP_ID}/settings`, "carol", {
+      await authedRequest(`/dashboard/acme/review-bots/app-acme/settings`, "carol", {
         method: "POST",
         body: SETTINGS_BODY,
         accept: "text/html",
@@ -535,7 +544,7 @@ describe("success redirects stay in the workspace route family", () => {
   test("the SPA fetch form post keeps its plain 2xx body (no redirect)", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
-    const request = await authedRequest(`/dashboard/acme/apps/${ACME_APP_ID}/settings`, "carol", {
+    const request = await authedRequest(`/dashboard/acme/review-bots/app-acme/settings`, "carol", {
       method: "POST",
       body: SETTINGS_BODY,
       accept: "text/html",
@@ -544,7 +553,8 @@ describe("success redirects stay in the workspace route family", () => {
     const res = await worker.fetch(request, env);
     expect(res.status).toBe(200);
     expect(res.headers.get("Location")).toBeNull();
-    expect(await res.text()).toContain(`Saved the omp runtime harness for ${ACME_APP_ID}.`);
+    // The notice names the bot (its own `name`), not the numeric App id.
+    expect(await res.text()).toContain("Saved the omp runtime harness for acme-app.");
   });
 
   test("a native settings post on the retired deployment path answers 404 in the workspace family", async () => {
@@ -1042,7 +1052,7 @@ describe("the onboarding CTA stays inside the workspace", () => {
 
   test("the Open Settings CTA falls back to the overview when the App holds no repository", async () => {
     const { db } = tenancyFixture();
-    db.raw.prepare("DELETE FROM review_targets WHERE bot_id = ?").run("app-acme");
+    db.raw.prepare("DELETE FROM review_targets WHERE app_id = ?").run("app-acme");
     const res = await worker.fetch(
       await authedRequest(`/dashboard/acme/apps/${ACME_APP_ID}/onboarding`, "dana"),
       envFor(db),
@@ -1274,7 +1284,7 @@ describe("App creation is owner/admin", () => {
       globalThis.fetch = realFetch;
     }
     const mapping = db.raw
-      .prepare("SELECT bot_workspaces.workspace_id AS ws FROM bot_workspaces JOIN review_bots ON review_bots.id = bot_workspaces.bot_id WHERE review_bots.github_app_id = ?")
+      .prepare("SELECT app_workspaces.workspace_id AS ws FROM app_workspaces JOIN github_apps ON github_apps.id = app_workspaces.app_id WHERE github_apps.github_app_id = ?")
       .get(CONVERSION.id) as { ws: string } | null;
     expect(mapping?.ws).toBe("ws-other");
     const ownerRead = await worker.fetch(
@@ -1330,7 +1340,7 @@ describe("App creation is owner/admin", () => {
       globalThis.fetch = realFetch;
     }
     const mapping = db.raw
-      .prepare("SELECT bot_workspaces.workspace_id AS ws FROM bot_workspaces JOIN review_bots ON review_bots.id = bot_workspaces.bot_id WHERE review_bots.github_app_id = ?")
+      .prepare("SELECT app_workspaces.workspace_id AS ws FROM app_workspaces JOIN github_apps ON github_apps.id = app_workspaces.app_id WHERE github_apps.github_app_id = ?")
       .get(CONVERSION.id) as { ws: string } | null;
     expect(mapping?.ws).toBe("ws-acme");
   });
@@ -1376,7 +1386,7 @@ describe("App creation is owner/admin", () => {
       globalThis.fetch = realFetch;
     }
     const row = db.raw
-      .prepare("SELECT COUNT(*) AS n FROM review_bots WHERE github_app_id = ?")
+      .prepare("SELECT COUNT(*) AS n FROM github_apps WHERE github_app_id = ?")
       .get(CONVERSION.id) as { n: number };
     expect(row.n).toBe(1);
   });
@@ -1405,7 +1415,7 @@ describe("App creation is owner/admin", () => {
     expect(res.headers.get("Location")).toBeNull();
     expect(await res.text()).toContain(t("en", "manifest.error.workspaceGone"));
     const row = db.raw
-      .prepare("SELECT COUNT(*) AS n FROM review_bots WHERE github_app_id = ?")
+      .prepare("SELECT COUNT(*) AS n FROM github_apps WHERE github_app_id = ?")
       .get(CONVERSION.id) as { n: number };
     expect(row.n).toBe(1);
   });

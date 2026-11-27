@@ -17,7 +17,6 @@ function dbAt0069(): TestD1 {
   const db = createTestD1();
   applyMigrations(db, BEFORE);
   seedBot(db, "bot-1", 7001);
-  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-1', 'default')").run();
   db.raw
     .prepare(
       `INSERT INTO review_targets
@@ -89,7 +88,7 @@ function seedStoreTarget(db: TestD1, id: string, repoId: number, follow: 0 | 1):
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+         (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
           follow_workspace_defaults, review_trigger_mode, review_level, check_min_score,
           check_pass_verdicts, created_by, created_at, updated_at)
        VALUES (?, 'default', 'bot-store', ?, ?, 'acme', ?, ?, 'manual', 'deep', 70,

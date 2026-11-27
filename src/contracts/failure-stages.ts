@@ -86,7 +86,18 @@ export const MAINTENANCE_DEFERRED_STAGE = "maintenance_deferred";
  * as its `entitlement` sibling — no plan id, no workspace name, no ceiling
  * figure: the PR author can act on none of them, and the Check is public.
  */
-export const QUOTA_SKIP_REASON = "the workspace has reached this month's review quota";
+export const QUOTA_PLAN_SKIP_REASON =
+  "the workspace has used up this month's plan allowance for shared review bots";
+
+/** The per-bot sibling: the bot's OWN month ceiling stopped it (D10). */
+export const QUOTA_BOT_SKIP_REASON =
+  "the shared review bot that reviews this repository has used up this month's allowance for this workspace";
+
+/**
+ * The empty-chain refusal (D41). NOT a quota sentence: nothing is mounted, so it
+ * names no allowance — the author cannot act on a ceiling that does not exist.
+ */
+export const NO_REVIEW_BOT_SKIP_REASON = "this app has no review bot available for this repository yet";
 
 /**
  * The one sentence an UNREADABLE gate carries. It is not a plan fact: the gate

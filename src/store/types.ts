@@ -55,7 +55,7 @@ export type FindingRow = {
 /** A row of the `review_publications` journal (private — spec §7.1 Visibility). */
 export type ReviewPublicationRow = {
   id: string;
-  bot_id: string;
+  app_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -81,7 +81,7 @@ export type ReviewPublicationRow = {
 /** A row of the `review_findings` lifecycle table. */
 export type ReviewFindingRow = {
   id: string;
-  bot_id: string;
+  app_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -119,7 +119,7 @@ export type ReviewThreadRow = {
   id: string;
   finding_row_id: string;
   publication_id: string;
-  bot_id: string;
+  app_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -155,7 +155,7 @@ export type ReviewThreadRow = {
  */
 export type ReviewCheckRow = {
   id: string;
-  bot_id: string;
+  app_id: string;
   github_app_id: number;
   installation_id: number;
   owner: string;

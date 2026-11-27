@@ -276,7 +276,7 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
     expect(otherOrigin.dedupeKey).not.toBe(successorIntentOf(base, head)!.dedupeKey);
 
     const otherApp = successorIntentOf(
-      { ...base, botRef: { appId: "another-app" }, targetId: "target-another-app" },
+      { ...base, botRef: { appId: "another-app", botId: "another-app" }, targetId: "target-another-app" },
       head,
     )!;
     expect(otherApp.dedupeKey).not.toBe(successorIntentOf(base, head)!.dedupeKey);

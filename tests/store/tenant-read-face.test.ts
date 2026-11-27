@@ -32,7 +32,7 @@ async function seedMappedAndOrphan() {
   const db = createMigratedTestD1();
   const mapped = await seedApp(db, { githubAppId: 1 });
   const orphan = await seedApp(db, { githubAppId: 2 });
-  db.raw.prepare(`DELETE FROM bot_workspaces WHERE bot_id = ?`).run(orphan.id);
+  db.raw.prepare(`DELETE FROM app_workspaces WHERE app_id = ?`).run(orphan.id);
   return { db, mapped, orphan };
 }
 
@@ -57,9 +57,9 @@ describe("apps-store tenant read face", () => {
 });
 
 describe("apps-store read SQL joins the tenant", () => {
-  test("APP_READ_SQL joins bot_workspaces and selects workspace_id", () => {
+  test("APP_READ_SQL joins app_workspaces and selects workspace_id", () => {
     for (const sql of Object.values(APP_READ_SQL)) {
-      expect(sql).toContain("INNER JOIN bot_workspaces");
+      expect(sql).toContain("INNER JOIN app_workspaces");
       expect(sql).toContain("w.workspace_id");
     }
   });
@@ -160,17 +160,31 @@ function directReadFiles(): string[] {
     .sort();
 }
 
+// Post-split truth: every one of these files' review_bots reads moved to
+// github_apps (Tasks 3–4 converted the publishing/ops trees); grep finds zero
+// remaining references in any of them. The bot table is read by the store
+// alone — the allowlist is the proof, not a leftover.
 const MAINTENANCE_SITES: Record<string, number> = {
-  "admin/maintenance-replay.ts": 1,
-  "worker/lifecycle-reconcile.ts": 1,
-  "worker/check-reconcile.ts": 3,
-  "pipeline/review-threads.ts": 1,
-  "store/review-checks.ts": 1,
-  "admin/installation-repositories.ts": 1,
+  // `readBotMultiplier` is the ONE read of `review_bots.multiplier`, shared by
+  // the metering path and the enqueue ceiling. Authorization happened upstream
+  // (the webhook resolved the bot row, the job carries `botRef.botId`), the row
+  // is addressed by its own id, and the projection is that single price column
+  // — no identity, no ownership, no workspace to scope by.
+  "store/quota-store.ts": 1,
+  // The relay's ceiling fallback: `review_bots` by the bot id the chain named,
+  // projecting one price column.
+  "worker/select-review-bot.ts": 1,
 };
 
+/**
+ * The attribution upgrade is a TENANT-SCOPED reader, not a maintenance one: its
+ * whole job is the workspace equality (`b.workspace_id = u.workspace_id`), so the
+ * workspace predicate is present on every statement and the pin below is what
+ * the audit counts. One `prepare` call: the UPDATE that carries the guard (the
+ * count helpers and the page builder are template literals passed to it).
+ */
 const TENANT_DIRECT_SITES: Record<string, number> = {
-  "dashboard/targets-store.ts": 1,
+  "admin/data-upgrades/usage-bot-attribution.ts": 1,
 };
 
 describe("tenant read face allowlist", () => {
@@ -239,7 +253,7 @@ describe("tenant read face allowlist", () => {
     const sql = "select (select 1 from workspaces limit 1), b.name from review_bots b";
     expect(projection(sql)).toContain("b.name");
     expect(projection(sql)).not.toContain("review_bots");
-    const joined = "select t.id from review_targets t join review_bots b on b.id = t.bot_id and b.name = t.name";
+    const joined = "select t.id from review_targets t join review_bots b on b.id = t.app_id and b.name = t.name";
     expect(projection(joined)).not.toContain("b.name");
   });
 });

@@ -1256,7 +1256,7 @@ describe("a persisted launch that never staged a publication", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
          VALUES ('pub-staged', ?, ?, ?, ?, ?, ?, 'review', 'prepared', '{}', NULL, 0, 'pending', ?, ?)`,
       )
@@ -3365,7 +3365,7 @@ describe("the publication-failure settlement under QC scrutiny", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
          VALUES ('pub-own', ?, ?, ?, ?, ?, ?, 'review', 'prepared', ?, NULL, 0, 'pending', ?, ?)`,
       )
@@ -3398,7 +3398,7 @@ describe("the publication-failure settlement under QC scrutiny", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
          VALUES ('pub-foreign', ?, ?, ?, ?, ?, ?, 'review', 'prepared', ?, NULL, 0, 'pending', ?, ?)`,
       )
@@ -3430,7 +3430,7 @@ describe("the publication-failure settlement under QC scrutiny", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
          VALUES ('pub-old', ?, ?, ?, ?, ?, ?, 'review', 'failed', ?, NULL, 1, 'done', ?, ?)`,
       )

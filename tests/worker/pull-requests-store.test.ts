@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import {
   createReviewBotsStore,
   PULL_REQUEST_LIST_LIMIT,
@@ -15,16 +15,18 @@ const SCOPE_FOREIGN: LedgerScope = { ...SCOPE, workspaceId: "another-workspace" 
 
 function seedApp(db: TestD1, id = APP_ID, githubAppId = 2001): string {
   const now = "2026-01-01T00:00:00.000Z";
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, created_at, updated_at)
        VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
                'octocat', 'active', ?, ?)`,
     )
     .run(id, githubAppId, id, now, now);
-  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
+  db.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);
   return seedTarget(db, id, { id: `target-${id}` });
 }
 
@@ -65,7 +67,7 @@ describe("upsertPullRequest", () => {
       headSha: "sha-2",
       updatedAt: "2026-01-01T00:05:00.000Z",
     });
-    const rows = db.raw.prepare("SELECT * FROM pull_requests WHERE bot_id = ?").all(APP_ID) as Array<{
+    const rows = db.raw.prepare("SELECT * FROM pull_requests WHERE app_id = ?").all(APP_ID) as Array<{
       head_sha: string;
       title: string;
       state: string;
@@ -81,7 +83,7 @@ describe("upsertPullRequest", () => {
     db.raw.prepare("UPDATE pull_requests SET first_seen_at = '2020-01-01 00:00:00', last_seen_at = '2020-01-01 00:00:00'").run();
     await createReviewBotsStore(db).upsertPullRequest(PR);
     const row = db.raw
-      .prepare("SELECT first_seen_at, last_seen_at FROM pull_requests WHERE bot_id = ?")
+      .prepare("SELECT first_seen_at, last_seen_at FROM pull_requests WHERE app_id = ?")
       .get(APP_ID) as { first_seen_at: string; last_seen_at: string };
     expect(row.first_seen_at).toBe("2020-01-01 00:00:00");
     expect(row.last_seen_at).not.toBeNull();
@@ -101,7 +103,7 @@ describe("upsertPullRequest", () => {
       state: "merged",
     });
     const row = db.raw
-      .prepare("SELECT title, state, head_sha FROM pull_requests WHERE bot_id = ?")
+      .prepare("SELECT title, state, head_sha FROM pull_requests WHERE app_id = ?")
       .get(APP_ID) as { title: string; state: string; head_sha: string };
     expect(row.title).toBe("Add a thing");
     expect(row.head_sha).toBe("sha-1");
@@ -114,7 +116,7 @@ describe("upsertPullRequest", () => {
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "merged" });
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2020-01-01T00:00:00Z" });
     const row = db.raw
-      .prepare("SELECT state FROM pull_requests WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ?")
+      .prepare("SELECT state FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?")
       .get(APP_ID, "acme", "widgets", 131) as { state: string };
     expect(row.state).toBe("merged");
   });
@@ -124,13 +126,13 @@ describe("upsertPullRequest", () => {
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-03-04T05:06:07Z" });
     const first = db.raw
-      .prepare("SELECT last_seen_at FROM pull_requests WHERE bot_id = ?")
+      .prepare("SELECT last_seen_at FROM pull_requests WHERE app_id = ?")
       .get(APP_ID) as { last_seen_at: string };
     expect(first.last_seen_at).toBe("2026-03-04 05:06:07");
 
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-01-01T00:00:00Z" });
     const after = db.raw
-      .prepare("SELECT last_seen_at FROM pull_requests WHERE bot_id = ?")
+      .prepare("SELECT last_seen_at FROM pull_requests WHERE app_id = ?")
       .get(APP_ID) as { last_seen_at: string };
     expect(after.last_seen_at).toBe("2026-03-04 05:06:07");
   });
@@ -143,15 +145,15 @@ describe("listPullRequests", () => {
     await createReviewBotsStore(db).upsertPullRequest(PR);
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, prNumber: 132, title: "Second", headSha: "sha-b" });
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id, reviewed_at)
-         VALUES ('r-old', 77, 'acme', 'widgets', 131, 'sha-0', 'comment', ?, ?, '2026-01-01 00:00:00'),
-                ('r-new', 77, 'acme', 'widgets', 131, 'sha-1', 'approve', ?, ?, '2026-02-01 00:00:00')`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, target_id, reviewed_at)
+         VALUES ('r-old', 77, 'acme', 'widgets', 131, 'sha-0', 'comment', ?, ?, '2026-01-01 00:00:00'),('r-new', 77, 'acme', 'widgets', 131, 'sha-1', 'approve', ?, ?, '2026-02-01 00:00:00')`,
       )
       .run(APP_ID, TARGET_ID, APP_ID, TARGET_ID);
+  syncReviewBotColumn(db);
     for (const id of ["f1", "f2"]) {
       db.raw
         .prepare(
@@ -179,7 +181,7 @@ describe("listPullRequests", () => {
       seedApp(db);
       await createReviewBotsStore(db).upsertPullRequest(PR);
       db.raw
-        .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+        .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
         .run(APP_ID);
       db.raw
         .prepare(
@@ -206,7 +208,7 @@ describe("listPullRequests", () => {
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
@@ -231,7 +233,7 @@ describe("listPullRequests", () => {
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
@@ -255,14 +257,15 @@ describe("listPullRequests", () => {
     seedApp(db, "other-app", 2002);
     await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i2', 'other-app', 88, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i2', 'other-app', 88, 'acme', datetime('now'))")
       .run();
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
-         VALUES ('r-other', 88, 'acme', 'widgets', 131, 'sha-x', 'request-changes', 'other-app', 'target-other-app')`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, bot_id, target_id)
+         VALUES ('r-other', 88, 'acme', 'widgets', 131, 'sha-x', 'request-changes', 'other-app','other-app', 'target-other-app')`,
       )
       .run();
+  syncReviewBotColumn(db);
     db.raw
       .prepare(
         `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
@@ -414,14 +417,15 @@ describe("listPullRequests", () => {
       });
     }
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
-         VALUES ('r-in', 77, 'acme', 'widgets', ?, 'sha-1', 'approve', ?, ?)`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, bot_id, target_id)
+         VALUES ('r-in', 77, 'acme', 'widgets', ?, 'sha-1', 'approve', ?, ?, ?)`,
       )
-      .run(total, APP_ID, TARGET_ID);
+      .run(total, APP_ID, APP_ID, TARGET_ID);
+  syncReviewBotColumn(db);
     db.raw
       .prepare(
         `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
@@ -476,14 +480,15 @@ describe("listPullRequests repository filter + option set", () => {
       });
     }
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id, reviewed_at)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, target_id, reviewed_at)
          VALUES ('r-behind', 77, 'acme', 'behind', 9002, 'sha-1', 'approve', ?, ?, '2026-02-01 00:00:00')`,
       )
       .run(APP_ID, TARGET_ID);
+  syncReviewBotColumn(db);
     db.raw
       .prepare(
         `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
@@ -551,7 +556,7 @@ describe("sweepTerminalPullRequests", () => {
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: "2020-06-01T00:00:00Z" });
 
     const row = db.raw
-      .prepare("SELECT state, last_seen_at FROM pull_requests WHERE bot_id = ?")
+      .prepare("SELECT state, last_seen_at FROM pull_requests WHERE app_id = ?")
       .get(APP_ID) as { state: string; last_seen_at: string };
     expect(row.state).toBe("open");
     expect(row.last_seen_at).toBe("2026-01-01 00:00:00");
@@ -565,7 +570,7 @@ describe("sweepTerminalPullRequests", () => {
     const fresh = new Date(Date.now() - 60_000).toISOString();
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2020-01-01T00:00:00Z" });
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: fresh });
-    const row = db.raw.prepare("SELECT state FROM pull_requests WHERE bot_id = ?").get(APP_ID) as {
+    const row = db.raw.prepare("SELECT state FROM pull_requests WHERE app_id = ?").get(APP_ID) as {
       state: string;
     };
     expect(row.state).toBe("closed");
@@ -601,10 +606,11 @@ describe("pull request detail reads", () => {
   function seedReview(db: TestD1, id: string, reviewedAt: string, verdict = "approve", round: number | null = null): void {
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, bot_id, target_id, round)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, app_id, target_id, round)
          VALUES (?, 99, 'acme', 'widgets', 131, ?, ?, 'looks good', 'm1', 'p1', ?, ?, ?, ?)`,
       )
       .run(id, `sha-${id}`, verdict, reviewedAt, APP_ID, TARGET_ID, round);
+  syncReviewBotColumn(db);
   }
 
   async function detailFixture(): Promise<TestD1> {
@@ -612,7 +618,7 @@ describe("pull request detail reads", () => {
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i3', ?, 99, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i3', ?, 99, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
@@ -972,7 +978,7 @@ describe("failure rows are scoped to the PR's current head", () => {
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 99, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 99, 'acme', datetime('now'))")
       .run(APP_ID);
     // 'sha-1' is PR.headSha: one live-head failure, one old-head failure, one headless row.
     seedFailure(db, "f-head", "sha-1");
@@ -1034,7 +1040,7 @@ describe("failure rows are scoped to the PR's current head", () => {
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, headSha: undefined });
     db.raw
-      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 99, 'acme', datetime('now'))")
+      .prepare("INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 99, 'acme', datetime('now'))")
       .run(APP_ID);
     seedFailure(db, "f-empty", "");
     seedFailure(db, "f-named", "sha-9");
@@ -1074,14 +1080,14 @@ function seedFinding(
   db.raw
     .prepare(
       `INSERT OR IGNORE INTO review_publications
-         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
        VALUES ('p1', ?, 99, 'acme', 'widgets', 131, 'sha-1', 'review', 'applied', '{}', 1, 1)`,
     )
     .run(APP_ID);
   db.raw
     .prepare(
       `INSERT INTO review_findings
-         (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
        VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', ?, ?, ?, 1, 1, ?)`,
@@ -1120,7 +1126,7 @@ describe("reviewing-now projection (D11/D16)", () => {
   function seedInstallation(db: TestD1): void {
     db.raw
       .prepare(
-        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i-lock', ?, ?, 'acme', datetime('now'))",
+        "INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i-lock', ?, ?, 'acme', datetime('now'))",
       )
       .run(APP_ID, INSTALLATION_ID);
   }
@@ -1183,7 +1189,7 @@ describe("reviewing-now projection (D11/D16)", () => {
     const db = createMigratedTestD1();
     await seedLedger(db);
     db.raw
-      .prepare("UPDATE pull_requests SET owner = 'Acme', repo = 'Widgets' WHERE bot_id = ? AND pr_number = 131")
+      .prepare("UPDATE pull_requests SET owner = 'Acme', repo = 'Widgets' WHERE app_id = ? AND pr_number = 131")
       .run(APP_ID);
     seedLock(db);
     const rows = (await createReviewBotsStore(db).listPullRequests(SCOPE)).rows;
@@ -1218,7 +1224,7 @@ describe("reviewing-now projection (D11/D16)", () => {
       "superseded before admission",
       async (db) => {
         db.raw
-          .prepare("UPDATE pull_requests SET head_sha = 'sha-new', head_at = ? WHERE bot_id = ? AND pr_number = 131")
+          .prepare("UPDATE pull_requests SET head_sha = 'sha-new', head_at = ? WHERE app_id = ? AND pr_number = 131")
           .run(new Date().toISOString(), APP_ID);
       },
     ],

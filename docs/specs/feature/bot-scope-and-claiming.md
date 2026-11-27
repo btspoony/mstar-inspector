@@ -8,14 +8,46 @@ A review bot's visibility (`owned` / `shared`), the platform's official workspac
 
 ### Bot scope
 
-| Field | Contract |
-|---|---|
-| `review_bots.scope` | `owned` (default) or `shared`. A `shared` bot may be referenced by targets outside its owning workspace. |
-| `review_bots.shared_at` | Set when the bot is shared, cleared when unshared. A same-value write is a no-op: no row change, no audit row. |
-| Authority | Three actors. The platform operator, through the console (`PATCH /api/bots/:botId/scope`, `src/admin/index.ts`). The official workspace's owner/admin, for its own bots, through `PATCH /dashboard/:workspaceRef/api/apps/:appId/bot/scope` (`appBotScopeRoute`, `src/dashboard/index.ts`) — both routes land the transition through the store's `setBotScope` (`src/dashboard/apps-store.ts`), which re-checks the official-workspace guard inside the write's own batch. Everyone else has no scope write: a member route reaches no bot whose workspace it does not own (`canWriteBotScope`, `src/dashboard/index.ts`). A bot shared before a designation change stays revocable by its owning workspace through that same route — the store's unshare statement carries no official-workspace guard; the UI may hide the control, the API path stays open. |
-| Constraint | `shared` is only accepted for a bot whose workspace is the **official workspace** at write time. The check runs inside the same batch as the write, so a designation changed concurrently cannot authorize a stale share. |
+Two independent switches — an App and a bot are different entities, and sharing
+one grants nothing about the other. Each has its own column, guard, route and
+audit action:
 
-A retained target grants its workspace no bot-scope write; the bot's lifecycle, configuration, keys, metadata, installations and deliveries belong to its owning workspace, and a Blocked target's payload carries only target-owned configuration.
+| Switch | Column | What sharing it grants |
+|---|---|---|
+| Share this App | `github_apps.scope` (`owned` default, `shared`), `github_apps.shared_at` | other workspaces may bind this App's installations and mount its bots: the bind route, the pending list, App visibility and the marketplace list (`SHARED_APP_LIST_SQL`) |
+| Share this Bot | `review_bots.scope`, `review_bots.shared_at` | another workspace may mount the bot in its chain and spend against its capability and ceiling: the mountability check, the relay's capability gate and the bot list |
+
+- A `shared` bot has no GitHub identity of its own: it publishes as the App of
+  the installation it is mounted on. Sharing a bot changes no App's scope;
+  sharing an App changes no bot's scope and no review's price.
+- `shared_at` is set when the entity is shared and cleared when it is unshared.
+  A same-value write is a no-op: no row change, no audit row.
+- **Authority.** The platform operator, through the console (`PATCH
+  /api/bots/:botId/scope` for an App — the pre-split path is kept — and `PATCH
+  /api/review-bots/:botId/scope` for a bot, `src/admin/index.ts`); and the
+  owning workspace's owner/admin, through `PATCH
+  /dashboard/:workspaceRef/api/apps/:appId/scope` and `PATCH
+  /dashboard/:workspaceRef/api/review-bots/:botId/scope`
+  (`src/dashboard/index.ts`). Both land on `setAppScope` / `setReviewBotScope`
+  (`src/dashboard/apps-store.ts`); the bot writer re-checks ownership and the
+  owner/admin role inside the store, so a caller that bypasses the route
+  cannot write.
+- **One guard, bound to each entity's owner.** `shared` is accepted only while
+  that entity's owning workspace is the **official workspace** at write time:
+  the App guard resolves the owner through `app_workspaces`, the bot guard
+  binds `review_bots.workspace_id`. The check runs inside the same batch as the
+  write, so a designation changed concurrently cannot authorize a stale share.
+  Unsharing carries no guard on purpose — an entity shared before a
+  designation change stays revocable by its owning workspace, and the UI may
+  hide the control while the API path stays open.
+- Everyone else has no scope write: `canWriteBotScope` (`src/dashboard/index.ts`)
+  admits only the entity's owning workspace, and a member route reaches no
+  entity whose workspace they do not own.
+
+A retained target grants its workspace no bot-scope write; the bot's lifecycle,
+configuration, keys, metadata, installations and deliveries belong to its owning
+workspace, and a Blocked target's payload carries only target-owned
+configuration.
 
 ### Official workspace
 
@@ -29,28 +61,53 @@ The store is not renamed: `review_runtime_settings` is the platform parameter st
 
 ### Installation binding
 
-An installation belongs to the app, never to a target. The `installation.created`
-webhook records it in `bot_installations` (authoritative `account_login` when the
-payload carries the installation's own account); the 已安装 tab lists those rows
-and offers the bind action for each one this target has not bound yet. There is
-no pre-install intent table and no callback route: the app-creation manifest sets
-no `setup_url`, so GitHub never redirects to one.
+Three tables answer three different questions: a physical installation is
+GitHub's, an install state is one workspace's, and the chain is what that state
+mounts.
 
-A shared bot is installed on many customers' accounts, so each of its
-installations is bound to at most one workspace (`bot_installations.bound_workspace_id`,
-migration 0104). The bind writes that column only after the signed-in manager's
-own GitHub user token shows they administer the installation's account; the
-webhook never writes it. For a shared bot the repository walk, target creation
-and the bind read only installations bound to the caller's workspace.
+| Table | Holds | Written by |
+|---|---|---|
+| `github_app_installations` (pre-split `bot_installations`, renamed and re-pointed in `0115`) | one row per GitHub installation of one App — `installation_id`, `account_login`, `seen_at`, `removed_at`, and `bound_workspace_id` (migration `0104`) — keyed `(app_id, installation_id)`; the id changes on reinstall | the `installation.created` / `deleted` webhooks (`upsertInstallation`), and the bind for `bound_workspace_id` only |
+| `app_installations (github_app_id, workspace_id)` | one workspace's install of one App — never the physical row; both columns are its key | `createApp` (the owner's own state, with zero physical installations) and `bindInstallation` (a workspace's first installation of the App), each in the batch that carries its authority; backfilled by `0118`; removed with its chain when a non-owned App loses its last installation |
+| `app_install_bots (github_app_id, workspace_id, position, bot_id)` | the ordered chain under one install state; key `(github_app_id, workspace_id, position)`, composite foreign key to `app_installations`; a position is a stored order, never a rank to renumber | `createApp`, `bindInstallation` and the chain rewrite `PATCH /api/apps/:appId/chain`; nothing else |
 
-Migration 0081 drops `install_claims`; migration 0067 dropped the target-keyed
-variant before it.
+- **A new install state copies the App owner's chain.** The owner's chain is the
+  `app_install_bots` rows of `(app.id, app.owner)` — `app_workspaces.workspace_id`
+  — and it is what the App brings. A first bind copies those rows in the
+  owner's positions, keeping only bots that are `shared` or owned by the binding
+  workspace; when none qualifies the chain is empty and the App's Bots tab says
+  so. App creation writes the owner's state with one row at position 1 naming
+  the bot the App created. A bind by a workspace that already holds the state
+  writes no chain row, a target creation never writes one, and a chain rewrite
+  keeps the requested order rather than renumbering.
+- A chain row is mountable while its bot is `shared` or owned by the chain's
+  workspace, checked inside the writing batch. A bot its owner later stops
+  sharing stays in the chain as a skipped row, and only a newly added bot must
+  be mountable.
+- **The pending list is physical.** `pending_installations` lists live
+  `github_app_installations` rows of that App minus those bound to a live
+  workspace, and is empty unless the App is `shared` or mapped to the addressed
+  workspace. The bind writes `bound_workspace_id` only after the signed-in
+  manager's own GitHub user token shows they administer the installation's
+  account; the webhook never writes it. There is no pre-install intent table and
+  no callback route: the app-creation manifest sets no `setup_url`, so GitHub
+  never redirects to one.
+- **Membership of `/api/apps` is the install state.** A row appears because the
+  workspace owns the App or holds its `app_installations` row; a live target and
+  a physical installation decide nothing — they can neither resurrect an App
+  with no state nor hide one whose state exists (a bound App its owner stopped
+  sharing stays listed). `listInstalledBotIds` reads `app_installations` alone,
+  and an installed row's month cell sums the bots its chain mounts, not a bot
+  sharing the App's id.
+
+Migration `0081` drops `install_claims`; migration `0067` dropped the
+target-keyed variant before it.
 
 ### Resolution guards
 
-`targets-store.resolveByRepo(botId, repository)`:
+`targets-store.resolveByRepo`, keyed by the App's id:
 
-After signature verification and classification, the delivery resolves its target by repository: `(bot_id, repo_id)` first; otherwise a live unclaimed owner/name row is claimed in that request; otherwise the bot's single live row with no repository columns is claimed. Two unclaimed candidates or no hit resolve to nothing. No hit answers `200` with `no_target_for_repo`, enqueues nothing and writes no ledger row.
+After signature verification and classification, the delivery resolves its target by repository: `(app_id, repo_id)` first; otherwise a live unclaimed owner/name row is claimed in that request; otherwise the App's single live row with no repository columns is claimed. Two unclaimed candidates or no hit resolve to nothing. No hit answers `200` with `no_target_for_repo`, enqueues nothing and writes no ledger row.
 
 A shared bot reviews once the consuming workspace holds a target for that repository.
 
@@ -65,29 +122,31 @@ its Check is settled `neutral` and the delivery records one terminal
 `entitlement` failure. `self-hosted` always has the capability and never reads
 the column.
 
-A second enqueue refusal sits beside it: a workspace whose month has reached its
-plan's RP ceiling
+A second enqueue refusal sits beside it, produced by the relay
 ([entitlement](../architecture/entitlement-and-deployment-modes.md) § RP metering
-and the monthly ceiling). It has the SAME shape and sends nothing — the attached
-Check settles `neutral` and one terminal failure is recorded — but under its own
-`quota` stage, because the cause is consumption rather than capability. The two
-are ordered capability first and can never both fire on one delivery: one
-verdict per delivery, recorded once.
+and the monthly ceiling): a shared bot that no ceiling admits. It has the SAME
+shape and sends nothing — the attached Check settles `neutral` and one terminal
+failure is recorded — under the `quota` stage, because the cause is consumption
+rather than capability. A delivery records at most one refusal, and the relay's
+precedence is the workspace's plan month, then the bot's month, then the
+capability; an empty chain, or a chain of bots whose owners stopped sharing,
+refuses `no-review-bot`.
 
 ## Invariants
 
 - `shared` is platform-authorized and batch-verified against the current designation.
-- The bind writes only an installation the bot already reported: the pending read is the gate, so an id the bot never saw attaches nothing.
-- A shared bot's installation grants its repositories to the one workspace it is bound to; an unbound row grants none, and a row bound to another live workspace is never rebound (first binder wins). A deleted workspace's binding counts as unbound.
+- The bind writes only an installation the App already reported: the pending read is the gate, so an id the App never saw attaches nothing.
+- A shared App's installation grants its repositories to the one workspace it is bound to; an unbound row grants none, and a row bound to another live workspace is never rebound (first binder wins). A deleted workspace's binding counts as unbound.
 - A wrong installation is repaired at the installation level; no per-target binding column exists to clear. No route unbinds an installation bound to a live workspace. Deleting the wrongly bound workspace is the full repair: its binding then counts as unbound and the same batch retires its targets. Uninstalling and reinstalling the App gives a new installation id that arrives unbound, but the wrongly bound workspace's live targets keep their repository claims (delivery resolution reads targets, not bindings) until they are removed in that workspace.
 - The webhook writes installations and deliveries; it claims a null repository identity on its target and writes no installation binding.
 - A delivery whose repository matches no live target, and one matching two unclaimed rows, resolves to nothing; silently falling back would re-attribute a review.
 
 ## Where it lives
 
-- `migrations/0058_review_bot_scope.sql`, `migrations/0067_repo_target_identity.sql`, `migrations/0081_drop_install_claims.sql`
+- `migrations/0058_review_bot_scope.sql`, `migrations/0067_repo_target_identity.sql`, `migrations/0081_drop_install_claims.sql`, `migrations/0104_bot_installation_binding.sql`
+- `migrations/0115_app_bot_split.sql` (the two entities, `github_app_installations`, `app_installations`, `app_install_bots`), `migrations/0116_github_apps_sandbox_image_drop.sql`, `migrations/0118_app_install_state_backfill.sql` (the install-state backfill), `migrations/0124_app_install_chain_guard.sql` (the chain rewrite's all-or-nothing guard)
 - `migrations/0062_review_usage_indexes.sql` (the usage read's composite indexes)
-- `src/dashboard/runtime-config-store.ts` (key + domain registry), `src/dashboard/apps-store.ts` (`setBotScope`, `listBotScopes`, `getInstallation`)
+- `src/dashboard/runtime-config-store.ts` (key + domain registry), `src/dashboard/apps-store.ts` (`setAppScope`, `setReviewBotScope`, `getInstallation`, `bindInstallation`, `listPendingInstallations`, `listInstalledBotIds`, `listInstallChainBots`, `replaceInstallChain`)
 - `src/dashboard/targets-store.ts` (`resolveByRepo`), `src/admin/index.ts` (`GET /api/usage`)
 - `src/dashboard/review-usage-store.ts` (`readReviewUsage`, `reviewUsageMonth`), `src/dashboard/index.ts` (`GET /dashboard/<ref>/api/settings/review-usage`)
 - `src/spa/pages/ReviewUsageCard.tsx`, `src/spa/admin/UsagePage.tsx`
@@ -99,13 +158,13 @@ Any change to scope authority, the bind write or the resolution guards updates t
 
 ### Resolving a target for a workspace
 
-A workspace may read a target when it holds that live target: the repository claim makes a target reachable inside its own workspace only. Application visibility keeps its rule (owned apps plus shared bots already holding a live target here). A foreign `owned` bot with no target here is a 404, and the list keeps the narrower rule (own, or shared with a live target here) so a revoked-share target is reachable by URL but not listed.
+A workspace may read a target when it holds that live target: the repository claim makes a target reachable inside its own workspace only. A foreign `owned` bot with no target here is a 404. The app list's membership is the install state (§ Installation binding), so a revoked-share target stays reachable by URL without adding its App to the list.
 
 ### Pending installations and binding
 
-`GET`-side payload field `pending_installations` lists live `bot_installations` of the target's bot that no live target references (`removed_at` excluded) and that are bound to no live workspace (a deleted workspace's binding counts as unbound), and is empty unless the bot is `shared` or mapped to the addressed workspace.
+`GET`-side payload field `pending_installations` lists live `github_app_installations` of that App that are bound to no live workspace (`removed_at` excluded; a deleted workspace's binding counts as unbound), and is empty unless the App is `shared` or mapped to the addressed workspace.
 
-`POST /api/apps/:appId/bind-installation` (manager, `access: write`) writes nothing itself. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared`; malformed id → 400; already bound here → `200 { bound: true }`; id absent from the pending read (including one bound to another workspace) → 404 `unknown installation`. Otherwise it sets a signed, short-lived bind-state cookie and answers `200 { bound: false, authorize_url }`, a GitHub OAuth step-up with `read:user read:org`.
+`POST /api/apps/:appId/bind-installation` (manager, `access: write`) writes nothing itself. Guard order: unknown or foreign app → 404; non-manager → 403; App not `shared` → 404 `bot is not shared`; malformed id → 400; already bound here → `200 { bound: true }`; id absent from the pending read (including one bound to another workspace) → 404 `unknown installation`. Otherwise it sets a signed, short-lived bind-state cookie and answers `200 { bound: false, authorize_url }`, a GitHub OAuth step-up with `read:user read:org`.
 
 The OAuth callback recognises that state and binds only when every check holds, else it renders an error page and binds nothing: the state matches this browser's cookie and is unexpired; the GitHub user is the signed-in user and still manages the workspace (re-checked immediately before the write); no maintenance window is closed (503); the installation is live and not bound elsewhere (409); and the installation's account (`GET /app/installations/{id}`, App JWT) is either that same user or an organization where `GET /user/memberships/orgs/{org}` with the user's token is `active` + `admin` (else 403). The write is `UPDATE … SET bound_workspace_id` guarded by `bound_workspace_id IS NULL OR = caller OR` the bound workspace is deleted. The user token is used for these reads only and is never stored.
 
@@ -115,7 +174,7 @@ Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot
 
 ### Shared bots are read-only for their consumers
 
-Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — is gated by one predicate, `canWriteBotScope` (`src/dashboard/index.ts`, `app.workspace_id === scope.workspaceId`): the caller's workspace must be the bot's owning workspace, read off the same joined row. Scope is **not** part of the decision, so a `shared` bot's owning workspace keeps every configuration write — including the share switch, `PATCH /dashboard/:workspaceRef/api/apps/:appId/bot/scope` (`appBotScopeRoute`) — while a consuming workspace is refused: a retained target grants review configuration, never the bot. A refusal makes no outbound call and no storage change, but the check's position differs by family: the settings operations parse the body first to read their `op` (`appSettingsSaveRoute`, `src/dashboard/index.ts`) and then gate on the predicate, while key deletion and provider-key verification refuse before parsing anything. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot.
+Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — is gated by one predicate, `canWriteBotScope` (`src/dashboard/index.ts`, `app.workspace_id === scope.workspaceId`): the caller's workspace must be the bot's owning workspace, read off the same joined row. Scope is **not** part of the decision, so a `shared` bot's owning workspace keeps every configuration write — including the share switch, `PATCH /dashboard/:workspaceRef/api/review-bots/:botId/scope` — while a consuming workspace is refused: a retained target grants review configuration, never the bot. A refusal makes no outbound call and no storage change, but the check's position differs by family: the settings operations parse the body first to read their `op` (`appSettingsSaveRoute`, `src/dashboard/index.ts`) and then gate on the predicate, while key deletion and provider-key verification refuse before parsing anything. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot.
 
 Two surfaces carry the two halves of a bot's configuration, and only one of them is refused here:
 
@@ -192,12 +251,14 @@ RP (`usage_events.rp`, `quota_profile_plans.monthly_rp`); the card divides by
 No float reaches storage, and the ratio is a column rather than a constant so a
 later profile can re-denominate credits without a code change.
 
-The profile that judges a month is the one covering that month's **1st** (D5):
-`resolveQuotaProfile(db, quotaMonth(now).startIso)`. A profile published
-mid-month therefore never judges the month it was published in — it shows as
-scheduled and starts judging at the next 1st, which is what keeps a price change
-from pushing a workspace over mid-month. The card names the judging profile,
-never "the profile current at render time".
+The profile that judges a month is the one `workspace_quota_binding` pinned for
+that workspace and month — `resolveWorkspaceMonthlyQuota`, over
+`resolveWorkspaceQuotaProfile`. A workspace already metering keeps the version
+its month opened under, even after a newer one is published (that version shows
+as current only for workspaces with no binding); a workspace with no binding for
+the month reads the version in force now, so a newly created workspace adopts
+the latest at its first review. The card names the judging profile, never "the
+profile current at render time".
 
 At or past the ceiling (`usedRp >= monthlyRp`) the used/limit pair stays — the
 measurement is never hidden — and one banner states the consequence and the
@@ -214,16 +275,17 @@ above (the same `rp_per_credit` division, so no second unit appears).
 `usage_events.source` records which one paid, written
 in the same statement that records the price (migration
 `0065_usage_events_source.sql`) — the price alone is not invertible, because
-`rp = base × source` and a profile chooses its own multipliers. Rows written
+`rp = ceil(base × multiplier)` and each bot chooses its own multiplier. Rows written
 before that column exist have a NULL source: they count in the month's total and
 in **neither** split, so the split may total less than the overall figure. That
 is the honest reading and nothing is attributed by default.
 
 The operator's create form must show an impact preview before publishing: the
-number of live `saas` workspaces whose current month's RP has already reached the
-candidate ceiling for their plan. It is a **tightness check, not an eviction
-forecast** — under D5 the candidate cannot judge the current month, and every
-month it does judge starts at 0 RP. The count comes from the same month sum the
+number of live `saas` workspaces with no binding for the current month whose
+month's RP has already reached the candidate ceiling for their plan. It is a
+**tightness check, not an eviction forecast** — a bound workspace keeps its
+month's version and meets the candidate at its next month's first metering, and
+every month the candidate judges starts at 0 RP. The count comes from the same month sum the
 enqueue reads (`readMonthlyRp`, which `sumMonthlyRp` also answers from) and the
 same predicate (`quotaSpent`), so at equal usage it cannot disagree with a
 refusal — with one deliberate difference: the preview passes no cost, so it

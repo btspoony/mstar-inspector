@@ -46,6 +46,7 @@ const {
 const { createReviewConsumer, WorkflowCreateFailedError } = await import("../../src/pipeline/consumer");
 const { createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
 
+const TEST_RUNNER_KEY = `${TEST_APP_ID}:${TEST_APP_ID}`; // composite appId:botId — consumer.ts writes it so; both equal this release
 const ATTEMPT_ID = "attempt-hard-stop-01";
 const CAP_MS = 900_000;
 const SCOPE: Scope = {
@@ -86,7 +87,7 @@ async function makeDeps(share?: { db: Awaited<ReturnType<typeof createSeededTest
     fingerprint: "test-fingerprint",
     githubAppId: 424242,
   });
-  deps.runnerConfigs.set(TEST_APP_ID, {
+  deps.runnerConfigs.set(TEST_RUNNER_KEY, {
     appCfg: { keys: { ark: ["sk-test"] }, modelChain: "ark/deepseek-v4-flash" },
     modelOverrides: undefined,
     customProviders: undefined,

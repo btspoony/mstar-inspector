@@ -20,6 +20,7 @@ import {
 import { issueViewCommand } from "../../src/pipeline/gitops";
 import { createConsumerHarness, loadConsumer, makePayload } from "../helpers/consumer-harness";
 import type { TestD1 } from "../store/helpers";
+import { syncReviewBotColumn } from "../store/helpers";
 
 const { createReviewConsumer } = await loadConsumer();
 
@@ -57,8 +58,8 @@ function seedReview(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, context_incomplete, reviewed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, context_incomplete, reviewed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?,?, ?, ?)`,
     )
     .run(
       crypto.randomUUID(),
@@ -72,6 +73,7 @@ function seedReview(
       contextIncomplete ? 1 : 0,
       reviewedAt,
     );
+  syncReviewBotColumn(db);
 }
 
 function runnerInput(): Record<string, unknown> {

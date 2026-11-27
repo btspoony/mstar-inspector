@@ -5,7 +5,7 @@ import { createInsightsStore } from "../../src/dashboard/insights-store";
 import { SHARED_BOT_REFUSAL } from "../../src/dashboard/entitlement";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, syncSplitPair, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "target", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -46,8 +46,7 @@ function seedReview(
 ): void {
   seed(
     db,
-    `INSERT INTO reviews
-       (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id, target_id)
+    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, app_id, target_id)
      VALUES (?, 123, ?, ?, ?, ?, datetime('now'), 'approved', 's', '{}', ?, ?)`,
     input.id,
     input.owner,
@@ -74,7 +73,7 @@ function seedFinding(
   seed(
     db,
     `INSERT INTO review_publications
-       (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+       (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
         payload_json, created_ms, updated_ms)
      VALUES (?, ?, 123, ?, ?, ?, ?, 'review', 'applied', '{}', 1, 1)`,
     `pub-${input.id}`,
@@ -87,7 +86,7 @@ function seedFinding(
   seed(
     db,
     `INSERT INTO review_findings
-       (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+       (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
         first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
         first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
      VALUES (?, ?, 123, ?, ?, ?, ?, ?, ?, ?, 'sha', 'sha', 1, 1, ?, 1, 1, ?)`,
@@ -142,7 +141,7 @@ function isolationFixture() {
   }
   seed(
     db,
-    `INSERT INTO review_bots
+    `INSERT INTO github_apps
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES (?, 'shared-app', ?, 'shared-app', 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -150,7 +149,9 @@ function isolationFixture() {
     BOT_ID,
     GITHUB_APP_ID,
   );
-  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", BOT_ID, WORKSPACE_A);
+  seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", BOT_ID, WORKSPACE_A);
+  // The bot row follows its mapping — the bot-config face reads review_bots.
+  syncSplitPair(db);
 
   const targetA = seedTarget(db, BOT_ID, {
     id: "target-a",
@@ -179,7 +180,7 @@ function isolationFixture() {
   ]) {
     seed(
       db,
-      `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+      `INSERT INTO pull_requests (id, app_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
        VALUES (?, ?, ?, ?, ?, ?, 'PR', 'open', 'sha', datetime('now'), datetime('now'))`,
       `pr-${row.number}`,
       BOT_ID,
@@ -331,7 +332,8 @@ describe("the execution ledgers are tenant-scoped by their own target", () => {
 describe("the dashboard routes resolve the target inside the session workspace", () => {
   const INSIGHTS = `/dashboard/${WORKSPACE_A}/api/targets/target-a/insights/summary?include=repos`;
   const LEDGER = `/dashboard/${WORKSPACE_A}/api/targets/target-a/pull-requests`;
-  const SETTINGS = `/dashboard/${WORKSPACE_A}/api/apps/${GITHUB_APP_ID}/settings`;
+  // The settings face is bot-config: it binds the ROW id (BOT_ID).
+  const SETTINGS = `/dashboard/${WORKSPACE_A}/api/review-bots/${BOT_ID}/settings`;
 
   test("insights and the ledger serve this workspace's target only, with no GitHub call", async () => {
     const { db } = isolationFixture();
@@ -386,7 +388,7 @@ describe("the dashboard routes resolve the target inside the session workspace",
     for (const path of [
       `/dashboard/ws-c/api/targets/target-a/insights/summary`,
       `/dashboard/ws-c/api/targets/target-a/pull-requests`,
-      `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/settings`,
+      `/dashboard/ws-c/api/review-bots/${GITHUB_APP_ID}/settings`,
     ]) {
       const response = await worker.fetch(await request(path, "octocat"), env);
       expect(response.status, path).toBe(404);
@@ -399,7 +401,7 @@ describe("the dashboard routes resolve the target inside the session workspace",
     for (const path of [
       `/dashboard/${WORKSPACE_B}/api/targets/target-b/insights/summary`,
       `/dashboard/${WORKSPACE_B}/api/targets/target-b/pull-requests`,
-      `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/settings`,
+      `/dashboard/${WORKSPACE_B}/api/review-bots/${BOT_ID}/settings`,
     ]) {
       const response = await worker.fetch(await request(path, "octocat"), env);
       expect(response.status, path).toBe(200);
@@ -412,7 +414,7 @@ describe("a target whose bot is no longer shared reads Blocked", () => {
     const { db } = isolationFixture();
     const env = envFor(db);
     const read = async (workspace: string) => {
-      const response = await worker.fetch(await request(`/dashboard/${workspace}/api/apps/${GITHUB_APP_ID}/settings`, "octocat"), env);
+      const response = await worker.fetch(await request(`/dashboard/${workspace}/api/review-bots/${BOT_ID}/settings`, "octocat"), env);
       expect(response.status, workspace).toBe(200);
       return (await response.json()) as {
         blocked: boolean;

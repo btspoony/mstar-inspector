@@ -107,7 +107,7 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO review_bots
+    `INSERT INTO github_apps
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -119,7 +119,7 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
     now,
   );
-  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
 }
 
 function fixture() {
@@ -164,7 +164,7 @@ describe("operator without a valid grant", () => {
       "/dashboard/acme/api/support/workspace",
       "/dashboard/acme/api/members",
       "/dashboard/acme/api/apps",
-      `/dashboard/acme/api/apps/${APP_ID}/settings`,
+      `/dashboard/acme/api/review-bots/${APP_ID}/settings`,
     ]) {
       const res = await worker.fetch(await authedRequest(path, OPERATOR), env);
       expect(res.status, path).toBe(404);
@@ -291,12 +291,12 @@ describe("operator with a valid grant", () => {
     const env = envFor(db);
     const cases: Array<{ path: string; method?: string; body?: string }> = [
       { path: "/dashboard/acme/api/apps" },
-      { path: `/dashboard/acme/api/apps/${APP_ID}/settings` },
-      { path: `/dashboard/acme/api/apps/${APP_ID}/models` },
+      { path: `/dashboard/acme/api/review-bots/${APP_ID}/settings` },
+      { path: `/dashboard/acme/api/review-bots/${APP_ID}/models` },
       { path: `/dashboard/acme/api/targets/${TARGET_ID}/insights/summary` },
       { path: `/dashboard/acme/api/targets/${TARGET_ID}/pull-requests` },
       { path: `/dashboard/acme/api/targets/${TARGET_ID}/pull-requests/acme/widgets/131` },
-      { path: `/dashboard/acme/api/apps/${APP_ID}/keys/verify`, method: "POST", body: "provider=openai" },
+      { path: `/dashboard/acme/api/review-bots/${APP_ID}/keys/verify`, method: "POST", body: "provider=openai" },
     ];
     for (const item of cases) {
       const res = await worker.fetch(

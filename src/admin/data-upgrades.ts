@@ -4,6 +4,7 @@ import { ledgerTargetAlignment } from "./data-upgrades/ledger-target-alignment";
 import { orphanLedgerAttribution } from "./data-upgrades/orphan-ledger-attribution";
 import { repoBackfill } from "./data-upgrades/repo-backfill";
 import { repoIdClaim } from "./data-upgrades/repo-id-claim";
+import { orphanLedgerAttributionBot } from "./data-upgrades/usage-bot-attribution";
 
 /** Where an item resumes. Opaque to the runner; the item owns its shape. */
 export type UpgradeCursor = Record<string, unknown>;
@@ -96,6 +97,7 @@ export const DATA_UPGRADES: DataUpgradeItem[] = [
   orphanLedgerAttribution,
   ledgerTargetAlignment,
   repoIdClaim,
+  orphanLedgerAttributionBot,
 ];
 
 /** Resolve a registered item; `null` is the route layer's 404. */

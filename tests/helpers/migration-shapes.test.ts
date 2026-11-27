@@ -32,7 +32,7 @@ describe("fixture shapes (TAIL_PREREQUISITES)", () => {
   for (const [shape, migrations] of Object.entries(FIXTURE_SHAPES)) {
     test(`${shape}: every table a migration touches exists when it runs`, () => {
       const db = createTestD1();
-      for (const name of migrations) {
+      for (const name of [...new Set(migrations)].sort()) {
         for (const table of touchedTables(migrationSql(name))) {
           const row = db.raw
             .query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -51,9 +51,11 @@ describe("fixture shapes (TAIL_PREREQUISITES)", () => {
 describe("fixture shapes (review bot vocabulary)", () => {
   const RENAME = "0056_review_bots_rename.sql";
 
+  const SPLIT = "0115_app_bot_split.sql";
+
   for (const [shape, migrations] of Object.entries(FIXTURE_SHAPES)) {
     test(`${shape}: matches the shape's bot and target vocabulary`, () => {
-      const renamed = migrations.includes(RENAME);
+      const renamed = migrations.includes(RENAME) && !migrations.includes(SPLIT);
       const db = createTestD1();
       applyMigrations(db, migrations);
       const tables = new Set(
@@ -61,21 +63,40 @@ describe("fixture shapes (review bot vocabulary)", () => {
           (row) => row.name,
         ),
       );
-      expect(tables.has("review_bots"), `${shape}: reviewed bot parent`).toBe(renamed);
-      expect(tables.has("github_apps"), `${shape}: pre-rename parent`).toBe(!renamed);
+      const postSplit = migrations.includes(SPLIT);
+      expect(tables.has("review_bots"), `${shape}: bot table`).toBe(renamed || postSplit);
+      expect(tables.has("github_apps"), `${shape}: credential parent`).toBe(!renamed);
       const reviews = (
         db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string }>
       ).map((column) => column.name);
-      expect(reviews, `${shape}: review attribution column`).toContain(renamed ? "bot_id" : "app_id");
-      expect(tables.has("review_targets"), `${shape}: target table`).toBe(renamed);
+      // 0005 names the column app_id; 0056 renames it to bot_id; 0115 renames it
+      // back to app_id AND adds a fresh bot_id for the executing bot. No shape in
+      // FIXTURE_SHAPES currently stops between 0056 and 0115, so the middle arm is
+      // the era branch a future shape would take, not a tautology.
+      if (renamed) {
+        expect(reviews, `${shape}: review attribution column (bot era)`).toContain("bot_id");
+        expect(reviews, `${shape}: review attribution column (bot era)`).not.toContain("app_id");
+      } else {
+        expect(reviews, `${shape}: review attribution column`).toContain("app_id");
+      }
+      if (postSplit) expect(reviews, `${shape}: executing bot column`).toContain("bot_id");
+      expect(tables.has("review_targets"), `${shape}: target table`).toBe(renamed || postSplit);
       const botColumns = (
         db.raw.query(`PRAGMA table_info(${renamed ? "review_bots" : "github_apps"})`).all() as Array<{
           name: string;
         }>
       ).map((column) => column.name);
-      expect(botColumns.includes("review_trigger_mode"), `${shape}: review configuration on the bot row`).toBe(
-        !renamed,
-      );
+      // 0067 moved the review trigger mode off the App/bot row onto the
+      // target, so the control lives on exactly one of them per era.
+      const targetColumns = tables.has("review_targets")
+        ? (db.raw.query("PRAGMA table_info(review_targets)").all() as Array<{ name: string }>).map(
+            (column) => column.name,
+          )
+        : [];
+      expect(
+        botColumns.includes("review_trigger_mode") || targetColumns.includes("review_trigger_mode"),
+        `${shape}: review configuration reachable (App row or target)`,
+      ).toBe(true);
     });
   }
 });
@@ -107,13 +128,18 @@ describe("fixture migrations (fail-fast)", () => {
           handed.push(sql);
           db.run(sql);
         },
+        transaction: (fn: () => void) => () => fn(),
       },
     } as unknown as TestD1;
     try {
       applyMigrations(recording, ["0059_install_claims.sql"]);
-      expect(handed).toHaveLength(3);
+      // The transactional seam turns foreign-key enforcement on first; the
+      // file's own statements follow, one by one.
+      const statements = handed.filter((statement) => !statement.startsWith("PRAGMA"));
+      expect(handed.length - statements.length).toBe(1);
+      expect(statements).toHaveLength(3);
       expect(
-        handed.map((statement) =>
+        statements.map((statement) =>
           (statement
             .split("\n")
             .map((line) => line.trim())

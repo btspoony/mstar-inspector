@@ -5,7 +5,7 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
 import { parsePullRequestDetail, parseRecordPage } from "../../src/spa/pages/data";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -30,17 +30,19 @@ async function seedApp(
   opts: { id: string; githubAppId: number; workspaceId: string; slug: string },
 ): Promise<void> {
   const now = new Date().toISOString();
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
                'octocat', 'active', ?, ?)`,
     )
     .run(opts.id, opts.slug, opts.githubAppId, opts.slug, now, now);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
     .run(opts.id, opts.workspaceId);
   seedTarget(db, opts.id, { id: `target-${opts.id}`, workspaceId: opts.workspaceId });
 }
@@ -108,7 +110,7 @@ describe("GET /api/targets/:targetId/pull-requests", () => {
   test("an unknown state is clamped to 'open'", async () => {
     const db = await fixture();
     db.raw
-      .prepare("UPDATE pull_requests SET state = 'draft-ish' WHERE bot_id = 'app-acme' AND pr_number = 131")
+      .prepare("UPDATE pull_requests SET state = 'draft-ish' WHERE app_id = 'app-acme' AND pr_number = 131")
       .run();
     const res = await getFace(`/dashboard/acme/api/targets/target-app-acme/pull-requests`, db);
     const body = (await res.json()) as { pull_requests: Array<Record<string, unknown>> };
@@ -196,7 +198,7 @@ const sectionPath = (section: "findings" | "reviews" | "failures") => `${detailP
 function seedInstallation(db: TestD1): void {
   db.raw
     .prepare(
-      "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', 'app-acme', 77, 'acme', datetime('now'))",
+      "INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', 'app-acme', 77, 'acme', datetime('now'))",
     )
     .run();
 }
@@ -205,10 +207,11 @@ function seedReviews(db: TestD1, count: number): void {
   for (let index = 0; index < count; index += 1) {
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, reviewed_at, bot_id, target_id)
-         VALUES (?, 77, 'acme', 'widgets', 131, ?, 'comment', ?, 'app-acme', 'target-app-acme')`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, reviewed_at, app_id, bot_id, target_id)
+         VALUES (?, 77, 'acme', 'widgets', 131, ?, 'comment', ?, 'app-acme','app-acme', 'target-app-acme')`,
       )
       .run(`r-${index}`, `sha-${index}`, `2026-01-${String(index + 1).padStart(2, "0")} 00:00:00`);
+  syncReviewBotColumn(db);
   }
 }
 
@@ -236,7 +239,7 @@ function seedFindings(
   db.raw
     .prepare(
       `INSERT OR IGNORE INTO review_publications
-         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
        VALUES ('p1', 'app-acme', 77, 'acme', 'widgets', 131, 'sha-1', 'review', 'applied', '{}', 1, 1)`,
     )
     .run();
@@ -244,7 +247,7 @@ function seedFindings(
     db.raw
       .prepare(
         `INSERT INTO review_findings
-           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
             first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
          VALUES (?, 'app-acme', 77, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', ?, ?, 'open', 1, 1, 'target-app-acme')`,
@@ -274,10 +277,11 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     seedInstallation(db);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, bot_id, target_id)
-         VALUES ('r-null', 77, 'acme', 'widgets', 131, 'sha-1', 'comment', NULL, NULL, NULL, 'app-acme', 'target-app-acme')`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, app_id, bot_id, target_id)
+         VALUES ('r-null', 77, 'acme', 'widgets', 131, 'sha-1', 'comment', NULL, NULL, NULL, 'app-acme','app-acme', 'target-app-acme')`,
       )
       .run();
+  syncReviewBotColumn(db);
 
     const head = (await (await getFace(detailPath, db)).json()) as { counts: { reviews: number } };
     expect(head.counts.reviews).toBe(1);
@@ -396,10 +400,11 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     seedInstallation(db);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, bot_id, target_id)
-         VALUES ('r-attributed', 77, 'acme', 'widgets', 131, 'sha-1', 'needs fixes', 'The race is reachable.', 'kimi-for-coding', 'openrouter', '2026-01-02 00:00:00', 'app-acme', 'target-app-acme')`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, app_id, bot_id, target_id)
+         VALUES ('r-attributed', 77, 'acme', 'widgets', 131, 'sha-1', 'needs fixes', 'The race is reachable.', 'kimi-for-coding', 'openrouter', '2026-01-02 00:00:00', 'app-acme','app-acme', 'target-app-acme')`,
       )
       .run();
+  syncReviewBotColumn(db);
     db.raw
       .prepare(
         `INSERT INTO findings (id, review_id, severity, title)

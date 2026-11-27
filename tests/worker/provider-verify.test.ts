@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { PROVIDER_VERIFY_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
 import { createReviewBotsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -71,8 +71,11 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
       await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
       await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     );
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
-    .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
     .run(id);
   rawRun(
     db,
@@ -978,7 +981,13 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "verified-app");
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6", "claude-opus-4-7"]);
+    await store.saveVerifiedKey(
+      { botId: app.id, workspaceId: "default", role: "owner" },
+      app.id,
+      "anthropic",
+      PLAIN_KEY,
+      ["claude-sonnet-4-6", "claude-opus-4-7"],
+    );
 
     const keyRow = db.raw
       .query("SELECT * FROM bot_provider_keys WHERE bot_id = ? AND provider = 'anthropic'")
@@ -1003,7 +1012,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "ark-app");
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "ark", PLAIN_KEY, ["doubao-seed-2-1-pro"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "ark", PLAIN_KEY, ["doubao-seed-2-1-pro"]);
 
     const keyRow = db.raw
       .query("SELECT provider, verified_status FROM bot_provider_keys WHERE bot_id = ?")
@@ -1019,12 +1028,12 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "overwrite-app");
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "openai", PLAIN_KEY, ["gpt-5"]);
     let row = db.raw
       .query("SELECT verified_at, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_status).toBe("ok");
-    await store.addProviderKey(app.id, "openai", PLAIN_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "openai", PLAIN_KEY);
     const after = db.raw
       .query("SELECT verified_at, verified_status, key_enc, key_id FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null; key_enc: string; key_id: string };
@@ -1039,7 +1048,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "malformed-cache-app");
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "openai", PLAIN_KEY, ["gpt-5"]);
     db.raw
       .prepare("UPDATE bot_provider_models SET models_json = ? WHERE bot_id = ? AND provider = ?")
       .run("null", app.id, "openai");
@@ -1052,8 +1061,8 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "resave-app");
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
-    await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5", "gpt-5-mini"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "openai", PLAIN_KEY, ["gpt-5"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "openai", PLAIN_KEY, ["gpt-5", "gpt-5-mini"]);
 
     const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as { n: number };
     const cacheCount = db.raw
@@ -1077,7 +1086,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "public-builtin-app");
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "kilo", PLAIN_KEY, ["kilo-auto/efficient"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "kilo", PLAIN_KEY, ["kilo-auto/efficient"]);
     const row = db.raw
       .query("SELECT verified_at, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
@@ -1092,9 +1101,9 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "order-app");
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "mistral", PLAIN_KEY, ["mistral-large"]);
-    await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
-    await store.saveVerifiedKey(app.id, "ark", PLAIN_KEY, ["doubao"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "mistral", PLAIN_KEY, ["mistral-large"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "openai", PLAIN_KEY, ["gpt-5"]);
+    await store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "ark", PLAIN_KEY, ["doubao"]);
     const cached = await store.getVerifiedModels(app.id);
     expect(cached.map((c) => c.provider)).toEqual(["ark", "mistral", "openai"]);
   });
@@ -1103,7 +1112,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "alias-evidence-app");
     const store = configStore(db);
-    await store.addProviderKey(app.id, "ark", PLAIN_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "ark", PLAIN_KEY);
     const keyId = (
       db.raw.query("SELECT key_id FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as { key_id: string }
     ).key_id;
@@ -1123,7 +1132,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "legacy-write-app");
     const store = configStore(db);
-    await store.addProviderKey(app.id, "xai", PLAIN_KEY);
+    await store.addProviderKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "xai", PLAIN_KEY);
     const row = db.raw
       .query("SELECT verified_at, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
@@ -1150,7 +1159,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const app = await seedApp(db, "bounds-app");
     const store = configStore(db);
     await expect(
-      store.saveVerifiedKey(app.id, "openai", "x".repeat(MAX_PROVIDER_KEY_LENGTH + 1), ["gpt-5"]),
+      store.saveVerifiedKey({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, "openai", "x".repeat(MAX_PROVIDER_KEY_LENGTH + 1), ["gpt-5"]),
     ).rejects.toBeInstanceOf(ProviderKeyTooLongError);
     const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as { n: number };
     expect(keyCount.n).toBe(0);
@@ -1161,6 +1170,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const app = await seedApp(db, "custom-app");
     const store = configStore(db);
     await store.upsertCustomProvider(
+      { botId: app.id, workspaceId: "default", role: "owner" },
       app.id,
       { provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: ["m1"] },
       PLAIN_KEY,
@@ -1196,7 +1206,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
         modelIds: ["m1"],
       });
       expect(verified.ok).toBe(true);
-      await store.upsertCustomProvider(app.id, { ...decl, model_ids: ["m1"] }, PLAIN_KEY);
+      await store.upsertCustomProvider({ botId: app.id, workspaceId: "default", role: "owner" }, app.id, { ...decl, model_ids: ["m1"] }, PLAIN_KEY);
     }
     const rows = db.raw
       .query("SELECT provider, verified_at, verified_status FROM bot_custom_provider_keys WHERE bot_id = ? ORDER BY provider")
@@ -1246,6 +1256,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const app = await seedApp(db, "auth-probe-app");
     const store = configStore(db);
     await store.upsertCustomProvider(
+      { botId: app.id, workspaceId: "default", role: "owner" },
       app.id,
       { provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: ["m1"] },
       PLAIN_KEY,
@@ -1263,6 +1274,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     // omp's auth rule validates GET https://api.typesafe.ai/v1/models — the
     // exact path the custom probe hits — so a 2xx there IS proof of the key.
     await store.upsertCustomProvider(
+      { botId: app.id, workspaceId: "default", role: "owner" },
       app.id,
       { provider_id: "typesafe", base_url: "https://api.typesafe.ai", api: "typesafe", model_ids: ["jev-latest"] },
       PLAIN_KEY,

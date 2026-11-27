@@ -3,6 +3,7 @@ import type { ClientRoute } from "./router";
 import { t } from "../i18n";
 import styles from "./pages.module.css";
 import { AppDetailPage } from "./pages/AppDetailPage";
+import { BotDetailPage } from "./pages/BotDetailPage";
 import { AppsPage } from "./pages/AppsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { MembersPage } from "./pages/MembersPage";
@@ -35,6 +36,8 @@ export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBo
       return <LoginPage boot={boot} />;
     case "app-detail":
       return <AppDetailPage boot={boot} appId={route.appId} />;
+    case "bot-detail":
+      return <BotDetailPage boot={boot} botId={route.botId} />;
     default:
       return <h1 className={styles.heading}>{t(boot.locale, "nav.brand")}</h1>;
   }

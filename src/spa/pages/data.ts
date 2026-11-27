@@ -96,6 +96,16 @@ export type AppsPayload = {
   viewer: { login: string; role: Role };
   apps: Array<{
     github_app_id: number;
+    owned?: boolean;
+    installed?: boolean;
+    /** F1: the App's month state from its MOUNTED CHAIN; `null` = no chain,
+     * which renders the dash rather than a fabricated number. */
+    month?: { used_rp: number; owned: boolean; multiplier: number } | null;
+    /** The workspace's own live installations of this App (D43). */
+    installations?: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+    /** The App's ordered chain in this workspace — read-only in this release. */
+    chain?: AppChainEntry[];
+    bot_id?: string;
     github_name: string | null;
     github_slug: string | null;
     github_avatar_url: string | null;
@@ -108,15 +118,135 @@ export type AppsPayload = {
     };
   }>;
   shared_bots?: SharedBotRow[];
+  /** F9: shared GitHub Apps for the marketplace chooser (`scope = 'shared'`). */
+  shared_apps?: SharedAppCard[];
+  pending_installations?: PendingBindRow[];
+  /** F10: absent = unknown (error face), `null` = known unlimited. */
+  month_plan_rp?: number | null;
+  quota_error?: boolean;
 };
+
+/** One unbound physical installation of an App the workspace may install through. */
+export type PendingBindRow = {
+  installation_id: number;
+  account_login: string | null;
+  seen_at: string;
+  app_id: string;
+  app_github_app_id: number;
+  app_name: string;
+};
+
+function isPendingBindRow(value: unknown): value is PendingBindRow {
+  return (
+    isRecord(value) &&
+    typeof value.installation_id === "number" &&
+    Number.isSafeInteger(value.installation_id) &&
+    typeof value.app_id === "string" &&
+    typeof value.app_github_app_id === "number" &&
+    typeof value.app_name === "string" &&
+    isNullableString(value.account_login) &&
+    typeof value.seen_at === "string"
+  );
+}
+
+/** One row of the "Bots I can use" read (D6): the bot plus the caller's month. */
+export type UsableBotRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  workspace_id: string;
+  workspace_name: string;
+  owned: boolean;
+  /** This caller may change the bot's configuration — ownership AND role. */
+  can_manage: boolean;
+  scope: BotScope;
+  multiplier: number;
+  month_used_rp: number;
+};
+
+export type UsableBotsPayload = {
+  workspace_id: string;
+  /** `null` is a KNOWN unlimited plan; a failed read is `quota_error`. */
+  plan_monthly_rp: number | null;
+  /** F10: the ceiling could not be resolved — render an error, never
+   * "no ceiling". */
+  quota_error?: boolean;
+  bots: UsableBotRow[];
+};
+
+function isUsableBotRow(value: unknown): value is UsableBotRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    isNullableString(value.description) &&
+    typeof value.workspace_id === "string" &&
+    typeof value.workspace_name === "string" &&
+    typeof value.owned === "boolean" &&
+    typeof value.can_manage === "boolean" &&
+    isBotScope(value.scope) &&
+    typeof value.multiplier === "number" &&
+    typeof value.month_used_rp === "number"
+  );
+}
+
+export function parseUsableBots(data: unknown): UsableBotsPayload | null {
+  if (!isRecord(data)) return null;
+  if (typeof data.workspace_id !== "string") return null;
+  if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
+  if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && typeof data.plan_monthly_rp !== "number") {
+    return null;
+  }
+  if (!Array.isArray(data.bots)) return null;
+  const bots: UsableBotRow[] = [];
+  for (const row of data.bots) {
+    if (!isUsableBotRow(row)) return null;
+    bots.push(row);
+  }
+  return {
+    workspace_id: data.workspace_id,
+    plan_monthly_rp: data.plan_monthly_rp ?? null,
+    ...(data.quota_error === true ? { quota_error: true } : {}),
+    bots,
+  };
+}
 
 /** One `shared` bot the workspace may create a target on. */
 export type SharedBotRow = {
   id: string;
   github_slug: string | null;
   name: string;
+  github_description?: string | null;
+  owner_workspace_name?: string | null;
+  capability?: string | null;
   target_count: number;
 };
+
+/** F9: one shared App card — the marketplace chooser's unit. */
+export type SharedAppCard = {
+  id: string;
+  github_slug: string | null;
+  name: string;
+  github_description: string | null;
+  owner_workspace_id: string | null;
+  owner_workspace_name: string | null;
+  capability: string | null;
+  target_count: number;
+};
+
+function isSharedAppCard(value: unknown): value is SharedAppCard {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    (value.github_slug === null || typeof value.github_slug === "string") &&
+    typeof value.name === "string" &&
+    (value.github_description === null || typeof value.github_description === "string") &&
+    (value.owner_workspace_id === null || typeof value.owner_workspace_id === "string") &&
+    (value.owner_workspace_name === null || typeof value.owner_workspace_name === "string") &&
+    (value.capability === null || typeof value.capability === "string") &&
+    typeof value.target_count === "number"
+  );
+}
 
 function isSharedBotRow(value: unknown): value is SharedBotRow {
   return (
@@ -125,7 +255,10 @@ function isSharedBotRow(value: unknown): value is SharedBotRow {
     value.id !== "" &&
     (value.github_slug === null || typeof value.github_slug === "string") &&
     typeof value.name === "string" &&
-    typeof value.target_count === "number"
+    typeof value.target_count === "number" &&
+    (value.github_description === undefined || value.github_description === null || typeof value.github_description === "string") &&
+    (value.owner_workspace_name === undefined || value.owner_workspace_name === null || typeof value.owner_workspace_name === "string") &&
+    (value.capability === undefined || value.capability === null || typeof value.capability === "string")
   );
 }
 
@@ -411,11 +544,62 @@ export function isReviewLevel(value: unknown): value is ReviewLevel {
  * log, sandbox_image_id, review-trigger runtime config) stays behind the
  * manager face (the server keys the split on `can_manage`).
  */
+/**
+ * One row of an App's ordered chain in this workspace (F7): the App's only
+ * App→bot relation. `position` is the stored order, `month_used_rp` this
+ * workspace's spend through that bot this month, and `owned` says whether this
+ * workspace provides it (a shared bot reads false).
+ */
+export type AppChainEntry = {
+  position: number;
+  bot_id: string;
+  name: string;
+  description: string | null;
+  provider_workspace: string;
+  owned: boolean;
+  /** False when the bot's owner stopped sharing it: mounted, but skipped. */
+  available: boolean;
+  multiplier: number;
+  month_used_rp: number;
+  /** The bot's own monthly cap; `null` = no cap of its own. */
+  monthly_rp: number | null;
+};
+
+/**
+ * The install-state slice every App face carries: the workspace's own live
+ * installations of this App and its ordered chain. `pending_installations` is
+ * what tells "the chain appears once an installation is bound" from "nothing is
+ * mounted": it holds only UNBOUND installations of a SHARED App — an owned App
+ * never binds (D47), so it carries none.
+ */
+export type AppChain = {
+  chain?: AppChainEntry[];
+  installations?: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+  pending_installations?: PendingInstallation[];
+};
+
+function isAppChainEntry(value: unknown): value is AppChainEntry {
+  return (
+    isRecord(value) &&
+    typeof value.position === "number" &&
+    Number.isSafeInteger(value.position) &&
+    typeof value.bot_id === "string" &&
+    typeof value.name === "string" &&
+    (value.description === null || typeof value.description === "string") &&
+    typeof value.provider_workspace === "string" &&
+    typeof value.owned === "boolean" &&
+    typeof value.available === "boolean" &&
+    typeof value.multiplier === "number" &&
+    typeof value.month_used_rp === "number" &&
+    (value.monthly_rp === null || typeof value.monthly_rp === "number")
+  );
+}
+
 export type SettingsIdentityAppMeta = {
-  github_app_id: number;
-  status: string;
+  github_app_id: number | null;
+  status: string | null;
   review_enabled?: boolean;
-  created_by: string;
+  created_by: string | null;
   created_at: string;
   id: string;
   github_name: string | null;
@@ -432,7 +616,7 @@ export type SettingsIdentityAppMeta = {
  * and required-when-readable in `parseSettings`.
  */
 export type AppIdentityCardApp = {
-  github_app_id: number;
+  github_app_id: number | null;
   id: string;
   github_name: string | null;
   github_description: string | null;
@@ -524,7 +708,7 @@ type TargetOwnedSections = {
  * `last_webhook_at` and `github_metadata_synced_at` — the bot's own data.
  */
 export type AppInstallApp = {
-  github_app_id: number;
+  github_app_id: number | null;
   id: string;
   github_name: string | null;
   github_slug: string | null;
@@ -533,10 +717,10 @@ export type AppInstallApp = {
 };
 
 export type BlockedAppIdentityBase = {
-  github_app_id: number;
+  github_app_id: number | null;
   id: string;
-  status: string;
-  created_by: string;
+  status: string | null;
+  created_by: string | null;
   scope: BotScope;
   github_name: string | null;
   github_slug: string | null;
@@ -588,7 +772,7 @@ function isPendingInstallationList(value: unknown): value is PendingInstallation
  * bot identity alone.
  */
 export type SettingsAppMeta = BotSettingsAppMeta & {
-  created_by: string;
+  created_by: string | null;
   github_visibility: GithubVisibility | null;
   review_trigger_mode: ReviewTriggerMode;
   review_level: ReviewLevel | null;
@@ -647,11 +831,17 @@ export const DELIVERY_PAGE_SIZE = 20;
  * with the workspace's review policy added.
  */
 export type BotSettingsAppMeta = {
-  github_app_id: number;
+  github_app_id: number | null;
   id: string;
-  status: string;
+  name?: string | null;
+  description?: string | null;
+  shared_at?: string | null;
+  multiplier?: number | null;
+  status: string | null;
   scope: BotScope;
-  sandbox_image_id: string;
+  /** BOT configuration: the bot payload always carries it; the App face
+   * deliberately omits it (F11), so the shared meta stays optional. */
+  sandbox_image_id?: string;
   last_webhook_at: string | null;
   github_name: string | null;
   github_slug: string | null;
@@ -668,7 +858,7 @@ export type BotSettingsAppMeta = {
  * so both faces feed them the same data.
  */
 export type BotConfigSections = {
-  app: BotSettingsAppMeta;
+  app: BotSettingsAppMeta & { sandbox_image_id: string };
   keys: ProviderKeyRow[];
   model_chain: string | null;
   model_roles: Record<string, string>;
@@ -695,9 +885,64 @@ export type BotConfigSections = {
  * the workspace that OWNS the bot" — a consuming workspace gets these sections
  * read-only, and the bot's scope never enters the answer.
  */
+/** The bot detail page's overview block (D23): the provider, the caller's
+ * month, the consuming workspace's plan ceiling, and the mounts — the
+ * editable sections stay out of this shape so the read-only region proves
+ * nothing the API did not serve. */
+export type BotOverview = {
+  provider_workspace: string;
+  month_used_rp: number;
+  plan_monthly_rp: number | null;
+  default_chain: string | null;
+  mounted_apps: Array<{ id: string; github_app_id: number; name: string }>;
+  mounted_bot_ids?: string[];
+};
+
+function parseBotOverview(value: unknown): BotOverview | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.provider_workspace !== "string") return null;
+  if (typeof value.month_used_rp !== "number") return null;
+  if (value.plan_monthly_rp !== null && typeof value.plan_monthly_rp !== "number") return null;
+  if (value.default_chain !== null && typeof value.default_chain !== "string") return null;
+  if (!Array.isArray(value.mounted_apps)) return null;
+  for (const row of value.mounted_apps) {
+    if (
+      !isRecord(row) ||
+      typeof row.id !== "string" ||
+      typeof row.github_app_id !== "number" ||
+      typeof row.name !== "string"
+    ) {
+      return null;
+    }
+  }
+  if (value.mounted_bot_ids !== undefined && !isStringArray(value.mounted_bot_ids)) return null;
+  return {
+    provider_workspace: value.provider_workspace,
+    month_used_rp: value.month_used_rp,
+    plan_monthly_rp: value.plan_monthly_rp,
+    default_chain: value.default_chain,
+    mounted_apps: value.mounted_apps.map((row) => ({
+      id: row.id,
+      github_app_id: row.github_app_id,
+      name: row.name,
+    })),
+    ...(value.mounted_bot_ids === undefined ? {} : { mounted_bot_ids: value.mounted_bot_ids }),
+  };
+}
+
+/** One owner-set per-workspace ceiling exception. */
+export type BotQuotaOverride = { workspaceId: string; monthlyRp: number };
+
 export type BotSettingsPayload = {
   can_manage: boolean;
+  /** The owner's exception layer over the default ceiling; owner-only. */
+  quota_overrides?: BotQuotaOverride[];
+  /** F10: the ceiling could not be resolved — never render "no ceiling". */
+  quota_error?: boolean;
+  /** Whose bot it is — independent of `scope` (publication) and `can_manage`. */
+  owned?: boolean;
   official_workspace?: boolean;
+  overview?: BotOverview;
 } & BotConfigSections;
 
 /** Provider-management data after the static catalog has loaded. */
@@ -715,7 +960,7 @@ export type SettingsReadOnlyPayload = {
   target_id?: string;
   targets_many?: boolean;
   app: SettingsIdentityAppMeta;
-};
+} & AppChain;
 
 /**
  * The App's operator-facing display name (D0): GitHub's current name, then
@@ -723,11 +968,19 @@ export type SettingsReadOnlyPayload = {
  * appDisplayName, so a rename shows up wherever the SPA names the App.
  */
 export function appDisplayName(app: {
+  name?: string | null;
   github_name: string | null;
   github_slug: string | null;
-  github_app_id: number;
+  github_app_id: number | null;
 }): string {
-  return app.github_name ?? app.github_slug ?? String(app.github_app_id);
+  // Mirrors the server's: post-split bot rows carry null placeholders for
+  // every App field, so the bot's own `name` is what a notice prints there.
+  return (
+    app.name ??
+    app.github_name ??
+    app.github_slug ??
+    (app.github_app_id === null ? "the app" : String(app.github_app_id))
+  );
 }
 
 type SettingsManageBase = {
@@ -740,7 +993,7 @@ type SettingsManageBase = {
   targets_many?: boolean;
   official_workspace?: boolean;
   can_configure_bot?: boolean;
-} & BotConfigSections;
+} & AppChain & BotConfigSections;
 
 /**
  * The manager face of an App whose workspace holds a repository under it: the
@@ -759,10 +1012,17 @@ export type SettingsManagePayload = SettingsManageBase & {
  * defaulted (`target_id?: undefined` is the discriminant {@link hasTargetFacts}
  * reads).
  */
+/** The App face never serves the BOT's sandbox image (F11) — an App has no
+ * runtime harness of its own; the field belongs to the bot it mounts. */
+type AppFaceSandbox = { sandbox_image_id?: string };
+
 export type SettingsUntargetedPayload = SettingsManageBase & {
   target_id?: undefined;
   check_gate?: undefined;
-  app: BotSettingsAppMeta & { created_by: string; github_visibility: GithubVisibility | null };
+  app: BotSettingsAppMeta & AppFaceSandbox & {
+    created_by: string;
+    github_visibility: GithubVisibility | null;
+  };
 };
 
 /**
@@ -781,7 +1041,7 @@ export type SettingsBlockedPayload = {
   app: BlockedAppIdentity;
   targets_many?: false;
   installation: BoundInstallation | null;
-} & TargetOwnedSections;
+} & TargetOwnedSections & AppChain;
 
 /**
  * The Blocked manager face of a bot this workspace holds SEVERAL repositories
@@ -789,7 +1049,7 @@ export type SettingsBlockedPayload = {
  * target-owned slice is absent and `target_id` is an explicit `null` — the
  * shape the SPA's `targets_many` notice reads.
  */
-export type SettingsBlockedManyPayload = {
+export type SettingsBlockedManyPayload = AppChain & {
   can_manage: true;
   blocked: true;
   blocked_reason: BlockedReason;
@@ -854,7 +1114,7 @@ export function reviewEnabled(app: { review_enabled?: number | boolean }): boole
  * both faces) — over the same normalization, so the App status pill and
  * SettingsPage's OpsCard share one derivation.
  */
-export function isPaused(app: { status: string; review_enabled?: number | boolean }): boolean {
+export function isPaused(app: { status: string | null; review_enabled?: number | boolean }): boolean {
   return app.status === "active" && !reviewEnabled(app);
 }
 
@@ -865,7 +1125,7 @@ export function isPaused(app: { status: string; review_enabled?: number | boolea
  */
 export function appStatusPill(
   locale: Locale,
-  app: { status: string; review_enabled?: number | boolean },
+  app: { status: string | null; review_enabled?: number | boolean },
 ): { label: string; tone: "success" | "warn" } {
   const paused = isPaused(app);
   return {
@@ -1606,11 +1866,12 @@ export function pullRequestStatePill(
 
 /**
  * The App detail page's faces: 应用设置 (the App's own configuration, the
- * default), 投递状态 (the bot's webhook deliveries, filtered and paged) and
- * 已安装. The data faces — 洞察 and Pull requests — belong to the repository
- * detail, so they are not values a URL can open here.
+ * default), 机器人 (the App's ordered chain, read-only), 投递状态 (the bot's
+ * webhook deliveries, filtered and paged) and 已安装. The data faces — 洞察 and
+ * Pull requests — belong to the repository detail, so they are not values a
+ * URL can open here.
  */
-export type AppDetailTab = "settings" | "delivery" | "installations";
+export type AppDetailTab = "settings" | "bots" | "delivery" | "installations";
 
 /**
  * URL-derived detail state: the App detail's active tab. `window`/`repo`/`pr`
@@ -1642,9 +1903,9 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
 /**
  * The search string as the App detail states it — the ONE derivation shared by
  * the mount initializer and the popstate re-sync (the spa-url-state-resync
- * contract). The bare path IS the 应用设置 tab; `?tab=installations` is the only
- * other address this page opens, and any other value (including the retired
- * data-tab spellings) resolves to the default. `pr` rides verbatim only when
+ * contract). The bare path IS the 应用设置 tab; `?tab=bots`, `?tab=delivery` and
+ * `?tab=installations` are the other addresses this page opens, and any other
+ * value (including the retired data-tab spellings) resolves to the default. `pr` rides verbatim only when
  * `pullRequestRefOf` resolves it — the same predicate the detail face reads —
  * so the address bar never advertises an open detail that can never open.
  */
@@ -1653,7 +1914,7 @@ export function parseAppDetailSearch(search: string): AppDetailSearch {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const rawTab = params.get("tab");
   const tab: AppDetailTab =
-    rawTab === "installations" || rawTab === "delivery" ? rawTab : "settings";
+    rawTab === "installations" || rawTab === "delivery" || rawTab === "bots" ? rawTab : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
@@ -1863,7 +2124,15 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
-  return { ...(data as AppsPayload), shared_bots: parseSharedBots(data.shared_bots) };
+  const pending = Array.isArray(data.pending_installations)
+    ? data.pending_installations.filter(isPendingBindRow)
+    : [];
+  return {
+    ...(data as AppsPayload),
+    shared_bots: parseSharedBots(data.shared_bots),
+    shared_apps: Array.isArray(data.shared_apps) ? data.shared_apps.filter(isSharedAppCard) : [],
+    pending_installations: pending,
+  };
 }
 
 /** One repository target row of `GET /:ref/api/targets` (product spec J1). */
@@ -2295,8 +2564,9 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
-  if (typeof data.app.status !== "string") return null;
-  if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
+  if (data.app.status !== null && typeof data.app.status !== "string") return null;
+  if (!isNullableString(data.app.created_by)) return null;
+  if (data.app.github_app_id !== null && typeof data.app.github_app_id !== "number") return null;
   if (typeof data.app.id !== "string") return null;
   if (!isNullableString(data.app.github_slug)) return null;
   if (typeof data.blocked !== "boolean") return null;
@@ -2357,7 +2627,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   }
   if (typeof data.official_workspace !== "boolean") return null;
   if (typeof data.can_configure_bot !== "boolean") return null;
-  if (typeof data.app.sandbox_image_id !== "string") return null;
+  if (data.app.sandbox_image_id !== undefined && typeof data.app.sandbox_image_id !== "string") return null;
   if (!isBotScope(data.app.scope)) return null;
   if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
   if (!isPendingInstallationList(data.pending_installations)) return null;
@@ -2370,6 +2640,12 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!parseCatalogReference(data)) return null;
   if (!isSandboxImageList(data.sandbox_images)) return null;
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
+  if (
+    data.chain !== undefined &&
+    (!Array.isArray(data.chain) || !data.chain.every(isAppChainEntry))
+  ) {
+    return null;
+  }
   if (!hasTarget) return data as SettingsPayload;
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
@@ -2394,9 +2670,18 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!isRecord(data)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
+  let quotaOverrides: BotQuotaOverride[] | undefined;
+  if (data.quota_overrides !== undefined) {
+    if (!Array.isArray(data.quota_overrides)) return null;
+    quotaOverrides = [];
+    for (const row of data.quota_overrides) {
+      if (!isRecord(row) || typeof row.workspaceId !== "string" || typeof row.monthlyRp !== "number") return null;
+      quotaOverrides.push({ workspaceId: row.workspaceId, monthlyRp: row.monthlyRp });
+    }
+  }
   const app = data.app;
-  if (typeof app.github_app_id !== "number" || typeof app.id !== "string") return null;
-  if (typeof app.status !== "string") return null;
+  if ((app.github_app_id !== null && typeof app.github_app_id !== "number") || typeof app.id !== "string") return null;
+  if (app.status !== null && typeof app.status !== "string") return null;
   if (!isBotScope(app.scope)) return null;
   if (typeof app.sandbox_image_id !== "string") return null;
   if (
@@ -2420,7 +2705,13 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   if (!isSandboxImageList(data.sandbox_images)) return null;
-  return data as BotSettingsPayload;
+  if (data.overview !== undefined && data.overview !== null && parseBotOverview(data.overview) === null) return null;
+  if (data.owned !== undefined && typeof data.owned !== "boolean") return null;
+  if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
+  return {
+    ...(data as BotSettingsPayload),
+    overview: data.overview == null ? undefined : parseBotOverview(data.overview) ?? undefined,
+  };
 }
 
 function isPrVerdict(value: unknown): value is (typeof PR_VERDICTS)[number] {

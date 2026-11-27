@@ -107,7 +107,7 @@ export type CheckCredentialResolution =
     };
 
 /**
- * Exact `(bot_id, installation_id)` credential routing for the Check lane.
+ * Exact `(app_id, installation_id)` credential routing for the Check lane.
  * The production implementation is the §7.6 chain — routing gates → decrypt →
  * the ONE `createReviewCommenter` construction point per pair per run (whose
  * `checks: "write"` mint and Checks client are the §7.9 adapter) → live
@@ -141,16 +141,16 @@ type CheckRoutingRow = {
 
 async function checkRoutingRow(db: D1Like, appId: string, installationId: number): Promise<CheckRoutingRow | null> {
   return db
-    // shortcut: tenant-bypass — check credential routing by exact (bot_id,
+    // shortcut: tenant-bypass — check credential routing by exact (app_id,
     // installation_id); returns no tenant-facing field. Upgrade: tenant-filter it
     // once check reconciliation becomes workspace-scoped.
     .prepare(
       `SELECT ga.id AS id, ga.github_app_id AS github_app_id, ga.status AS status,
               ga.deleted_at AS deleted_at, ga.review_enabled AS review_enabled,
               ga.private_key_enc AS private_key_enc
-       FROM bot_installations ai
-       JOIN review_bots ga ON ga.id = ai.bot_id
-       WHERE ai.bot_id = ? AND ai.installation_id = ?`,
+       FROM github_app_installations ai
+       JOIN github_apps ga ON ga.id = ai.app_id
+       WHERE ai.app_id = ? AND ai.installation_id = ?`,
     )
     .bind(appId, installationId)
     .first<CheckRoutingRow>();
@@ -356,36 +356,36 @@ async function reenableHealthyAppChecks(
     // no tenant-facing field. Upgrade: tenant-filter it once check
     // reconciliation becomes workspace-scoped.
     .prepare(
-      `SELECT DISTINCT rc.bot_id AS bot_id, rc.installation_id AS installation_id,
-              CASE WHEN cur.id IS NULL OR (rc.installation_id, rc.bot_id) > (cur.installation_id, cur.bot_id)
+      `SELECT DISTINCT rc.app_id AS app_id, rc.installation_id AS installation_id,
+              CASE WHEN cur.id IS NULL OR (rc.installation_id, rc.app_id) > (cur.installation_id, cur.app_id)
                    THEN 0 ELSE 1 END AS wrapped
          FROM review_checks rc
-         JOIN review_bots ga ON ga.id = rc.bot_id
+         JOIN github_apps ga ON ga.id = rc.app_id
          LEFT JOIN check_reenable_cursor cur ON cur.id = 1
         WHERE rc.recovery_state = 'suspended'
           AND ga.status = 'active' AND ga.deleted_at IS NULL
-        ORDER BY wrapped, rc.installation_id, rc.bot_id
+        ORDER BY wrapped, rc.installation_id, rc.app_id
         LIMIT ?`,
     )
     .bind(budget.settings.checkSelectLimit)
-    .all<{ bot_id: string; installation_id: number }>();
+    .all<{ app_id: string; installation_id: number }>();
   if (suspended.length === 0) return;
 
   const last = suspended[suspended.length - 1]!;
   await db
     .prepare(
-      `INSERT INTO check_reenable_cursor (id, installation_id, bot_id) VALUES (1, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET installation_id = excluded.installation_id, bot_id = excluded.bot_id`,
+      `INSERT INTO check_reenable_cursor (id, installation_id, app_id) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET installation_id = excluded.installation_id, app_id = excluded.app_id`,
     )
-    .bind(last.installation_id, last.bot_id)
+    .bind(last.installation_id, last.app_id)
     .run();
 
   const candidates: { appId: string; installationId: number; currentFingerprint: string | null }[] = [];
   for (const pair of suspended) {
-    const routing = await checkRoutingRow(db, pair.bot_id, pair.installation_id);
+    const routing = await checkRoutingRow(db, pair.app_id, pair.installation_id);
     const currentFingerprint = routing === null ? null : await sha256Hex(routing.private_key_enc);
     candidates.push({
-      appId: pair.bot_id,
+      appId: pair.app_id,
       installationId: pair.installation_id,
       currentFingerprint,
     });
@@ -454,8 +454,8 @@ async function reenableProbe(
     .prepare(
       `SELECT rc.last_error, ga.review_enabled
          FROM review_checks rc
-         JOIN review_bots ga ON ga.id = rc.bot_id
-        WHERE rc.bot_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
+         JOIN github_apps ga ON ga.id = rc.app_id
+        WHERE rc.app_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
     )
     .bind(pair.appId, pair.installationId)
     .all<{ last_error: string | null; review_enabled: number }>();
@@ -1130,7 +1130,7 @@ async function readRecoveryGate(db: D1Like, scope: Scope): Promise<EvidenceRead<
     const row = await db
       .prepare(
         `SELECT * FROM review_targets
-          WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
+          WHERE app_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
             AND deleted_at IS NULL
           ORDER BY created_at, id LIMIT 1`,
       )

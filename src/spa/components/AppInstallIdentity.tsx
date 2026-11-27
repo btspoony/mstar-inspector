@@ -20,7 +20,7 @@ export function AppInstallIdentity({ locale, name, avatarSrc, appId, href, child
   locale: SpaBoot["locale"];
   name: string;
   avatarSrc: string | null;
-  appId?: number;
+  appId?: number | null;
   href: string | null;
   children?: ReactNode;
 }) {

@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import {
-  QUOTA_SKIP_REASON,
+  QUOTA_PLAN_SKIP_REASON,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
   SHARED_BOT_ENTITLEMENT_STAGE,
@@ -10,7 +10,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { SharedBotRefusal } from "../../src/dashboard/entitlement";
 import { CHECK_SUMMARIES } from "../../src/pipeline/checks";
 import { handleReviewJob, type DeliveryRefusal, type HandlerDeps } from "../../src/worker/handlers";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const WS = "default";
 const APP_ID = "11111111-2222-3333-4444-555555555555";
@@ -45,24 +45,26 @@ function payload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    botRef: { appId: APP_ID },
+    botRef: { appId: APP_ID, botId: APP_ID },
     targetId: TARGET_ID,
     ...overrides,
   };
 }
 
 function seedReviewConfig(db: TestD1): void {
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
           status, deleted_at, created_at, updated_at)
        VALUES (?, ?, 'shared-bot-test', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(APP_ID, GITHUB_APP_ID);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
     .prepare(
-      `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+      `INSERT INTO review_targets (id, workspace_id, app_id, name, created_by, created_at, updated_at)
        VALUES (?, ?, ?, 'shared-bot-test', 'tester', datetime('now'), datetime('now'))`,
     )
     .run(TARGET_ID, WS, APP_ID);
@@ -173,7 +175,7 @@ describe("handleReviewJob — a quota refusal", () => {
 
     const outcome = await handleReviewJob(payload(), handlerDeps(db, kv, queue, attach), QUOTA_REFUSAL);
 
-    expect(outcome).toEqual({ kind: "skipped", reason: QUOTA_SKIP_REASON });
+    expect(outcome).toEqual({ kind: "skipped", reason: QUOTA_PLAN_SKIP_REASON });
     expect(send).toHaveBeenCalledTimes(0);
     expect(countRows(db, "usage_events")).toBe(0);
     expect(countRows(db, "comment_trigger_claims")).toBe(0);
@@ -185,7 +187,7 @@ describe("handleReviewJob — a quota refusal", () => {
     const rows = db.raw.query(FAILURE_SQL).all() as FailureRow[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: QUOTA_STAGE, target_id: TARGET_ID, head_sha: SHA });
-    expect(rows[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_SKIP_REASON));
+    expect(rows[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_PLAN_SKIP_REASON));
     expect(rows[0]!.error).not.toContain("2000");
     db.raw.close();
   });

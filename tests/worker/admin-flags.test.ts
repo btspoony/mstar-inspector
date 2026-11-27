@@ -3,7 +3,7 @@ import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { isFlagEnabled, type ServerFlagKey } from "../../src/admin/flags";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
@@ -241,15 +241,17 @@ async function seedApp(db: TestD1): Promise<void> {
     `github_apps.webhook_secret_enc:${id}`,
   );
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 'app-x', 4242, 'app-x', ?, ?, 'fixture', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, privateKeyEnc, webhookSecretEnc);
-  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
+  db.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);
   seedTarget(db, id, {
     id: "target-app-x",
     repoId: PR_PAYLOAD.repository.id,

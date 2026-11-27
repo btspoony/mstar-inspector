@@ -3,7 +3,7 @@ import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { deleteWorkspace } from "../../src/dashboard/workspace-store";
 import type { Env } from "../../src/worker/env";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -91,7 +91,7 @@ function seedApp(db: TestD1, workspaceId: string): void {
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO review_bots
+    `INSERT INTO github_apps
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES ('app-acme', 'acme-app', 4711, 'acme-app', 'v1.primary.aXZpdi5wcmV0ZXh0',
@@ -99,11 +99,13 @@ function seedApp(db: TestD1, workspaceId: string): void {
     now,
     now,
   );
-  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-acme', ?)", workspaceId);
+  seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('app-acme', ?)", workspaceId);
+  // The split pair: the bot row the bot-config face reads.
+  syncSplitPair(db);
   seed(
     db,
     `INSERT INTO review_targets
-       (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+       (id, workspace_id, app_id, name, created_by, created_at, updated_at)
      VALUES ('target-app-acme', ?, 'app-acme', 'acme-app', 'dana', ?, ?)`,
     workspaceId,
     now,
@@ -160,6 +162,7 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
          VALUES ('default', 'free', 'active', ?, ?)`,
       )
       .run(now, now);
+  syncSplitPair(db);
 
     const res = await request(db, DELETE_PATH, "dana", { method: "POST" });
 
@@ -179,7 +182,7 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
     const paths = [
       "/dashboard/default/api/apps",
       "/dashboard/default/api/members",
-      "/dashboard/default/api/apps/4711/settings",
+      "/dashboard/default/api/review-bots/app-acme/settings",
     ];
     for (const path of paths) {
       expect((await request(db, path, "dana")).status, `before ${path}`).not.toBe(404);
