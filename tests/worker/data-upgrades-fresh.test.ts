@@ -19,13 +19,14 @@ function snapshot(db: TestD1): Record<string, number> {
 }
 
 describe("data upgrades on a fresh deployment", () => {
-  test("all five are registered in run order", () => {
+  test("every item is registered in run order", () => {
     expect(DATA_UPGRADES.map((item) => `${item.order}:${item.id}`)).toEqual([
       "10:repo-backfill",
       "20:orphan-ledger-attribution",
       "21:ledger-target-alignment",
       "22:repo-id-claim",
       "30:usage-bot-attribution",
+      "31:split-integrity",
     ]);
     expect(DATA_UPGRADES.filter((item) => item.requiresDowntime).map((item) => item.id)).toEqual([
       "repo-backfill",

@@ -58,6 +58,7 @@ describe("repo-id-claim", () => {
       "ledger-target-alignment",
       "repo-id-claim",
       "usage-bot-attribution",
+      "split-integrity",
     ]);
     expect(repoIdClaim.requiresDowntime).toBe(false);
   });
