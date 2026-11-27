@@ -349,8 +349,7 @@ function mountedBotCount(chain: readonly AppChainEntry[]): number {
  * It is unreachable unless the store also admits this workspace as the
  * installer; `can_manage` gates the UI, the store gates the write.
  *
- * One hook, two control surfaces: the creator face's chip row
- * ({@link ChainReorderControls}) and the installed face's in-table row
+ * One hook, one control surface: the installed face's in-table row
  * controls + section-header add ({@link InstalledChainSection}).
  */
 function useChainOrderEditor(
@@ -404,193 +403,12 @@ function useChainOrderEditor(
   return { busy, notice, move, remove, add };
 }
 
-function ChainReorderControls({
-  locale,
-  appId,
-  chain,
-  mountableBots,
-  onReordered,
-}: {
-  locale: SpaBoot["locale"];
-  appId: string;
-  chain: readonly AppChainEntry[];
-  /** Every bot this workspace may mount; the section subtracts the mounted ones. */
-  mountableBots: readonly { id: string; name: string }[];
-  onReordered: () => Promise<unknown>;
-}) {
-  const { busy, notice, move, remove, add } = useChainOrderEditor(locale, appId, chain, onReordered);
-
-  return (
-    <div className="flex flex-col gap-2">
-      <NoticeRegion notice={notice} />
-      <div className="flex flex-wrap items-center gap-2" data-slot="app-chain-reorder">
-        {chain.map((row, index) => (
-          <span key={row.bot_id} className="flex items-center gap-1 rounded-md border border-(--border-default) px-2 py-1">
-            <span className="text-sm font-medium">{row.name}</span>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={busy || index === 0}
-              aria-label={t(locale, "apps.chain.moveUp", { bot: row.name })}
-              onClick={() => move(index, index - 1)}
-            >
-              ↑
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={busy || index === chain.length - 1}
-              aria-label={t(locale, "apps.chain.moveDown", { bot: row.name })}
-              onClick={() => move(index, index + 1)}
-            >
-              ↓
-            </Button>
-            {/* D27: the LAST bot's row stays visible and cannot be removed — the
-                UI never offers an empty chain, though the store would refuse one. */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={busy || chain.length === 1}
-              aria-label={t(locale, "apps.chain.removeBot", { bot: row.name })}
-              onClick={() => remove(row.bot_id)}
-            >
-              ✕
-            </Button>
-          </span>
-        ))}
-      </div>
-      {mountableBots.length === 0 ? null : (
-        <details data-slot="app-chain-add">
-          <summary className="cursor-pointer text-sm text-muted-foreground">
-            {t(locale, "apps.chain.addBot")}
-          </summary>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {mountableBots.map((bot) => (
-              <Button
-                key={bot.id}
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={busy}
-                aria-label={t(locale, "apps.chain.addNamed", { bot: bot.name })}
-                onClick={() => add(bot.id)}
-              >
-                + {bot.name}
-              </Button>
-            ))}
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-
-export function AppChainSection({
-  locale,
-  appId,
-  chain,
-  canManage,
-  mountableBots,
-  onReordered,
-}: {
-  locale: SpaBoot["locale"];
-  appId: string;
-  chain: readonly AppChainEntry[];
-  canManage: boolean;
-  mountableBots: readonly { id: string; name: string }[];
-  onReordered: () => Promise<unknown>;
-}) {
-  if (chain.length === 0) {
-    // An EMPTY chain is still a state a manager must be able to leave: the "add"
-    // affordance renders beside the empty copy, so the FIRST bot is reachable.
-    // A reader gets the copy alone.
-    return (
-      <div className="flex flex-col gap-2" data-slot="app-chain">
-        <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>
-        {canManage && mountableBots.length > 0 ? (
-          <ChainReorderControls
-            locale={locale}
-            appId={appId}
-            chain={chain}
-            mountableBots={mountableBots}
-            onReordered={onReordered}
-          />
-        ) : null}
-      </div>
-    );
-  }
-  const columns: DataTableColumn<AppChainEntry>[] = [
-    {
-      header: t(locale, "apps.chain.columnPosition"),
-      cell: (row) => <span className="tabular-nums text-muted-foreground">{row.position}</span>,
-    },
-    {
-      header: t(locale, "apps.chain.columnBot"),
-      cell: (row) => (
-        <span className="flex flex-wrap items-center gap-2">
-          <span className="font-semibold text-foreground">{row.name}</span>
-          <span className="text-muted-foreground">
-            {t(locale, row.owned ? "apps.chain.tagMine" : "apps.chain.tagShared")}
-          </span>
-          {/* A bot its owner stopped sharing stays mounted as a skipped row. */}
-          {row.available ? null : (
-            <span className="text-(--tone-warn-fg)">{t(locale, "apps.chain.rowUnavailable")}</span>
-          )}
-        </span>
-      ),
-      meta: (row) => (row.description === null || row.description === "" ? null : <span>{row.description}</span>),
-    },
-    {
-      header: t(locale, "apps.chain.columnProvider"),
-      cell: (row) => <span className="text-muted-foreground">{row.provider_workspace}</span>,
-    },
-    {
-      header: t(locale, "apps.chain.columnMultiplier"),
-      cell: (row) => <span className="tabular-nums">×{row.multiplier}</span>,
-    },
-    {
-      header: t(locale, "apps.chain.columnMonth"),
-      align: "right",
-      cell: (row) => (
-        <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
-          {/* F5: an owned bot pays this workspace's own keys, so it has no
-              ceiling; a shared bot with a cap states it; without one, none. */}
-          {row.owned
-            ? t(locale, "bots.monthOwn", { used: row.month_used_rp })
-            : row.monthly_rp === null
-              ? t(locale, "bots.monthNoCeiling", { used: row.month_used_rp })
-              : t(locale, "bots.monthLimit", { used: row.month_used_rp, limit: row.monthly_rp })}
-        </span>
-      ),
-    },
-  ];
-  return (
-    <div data-slot="app-chain">
-      <FlowSection title={t(locale, "apps.chain.title")} subtitle={t(locale, "apps.chain.copy")}>
-        <DataTable columns={columns} rows={chain} rowKey={(row) => `${row.position}:${row.bot_id}`} />
-        {canManage ? (
-          <ChainReorderControls
-            locale={locale}
-            appId={appId}
-            chain={chain}
-            mountableBots={mountableBots.filter((bot) => !chain.some((row) => row.bot_id === bot.id))}
-            onReordered={onReordered}
-          />
-        ) : null}
-      </FlowSection>
-    </div>
-  );
-}
-
 /**
  * The installed face's chain section — ONE control surface: the row ↑↓✕
  * controls live in the table's actions column and 添加机器人 sits in the
  * section header. A member (canManage false) gets the same rows with the
- * controls ABSENT, not disabled. The creator face carries no chain; the
- * member identity view keeps the read-only {@link AppChainSection}.
+ * controls ABSENT, not disabled. The creator face carries no chain at all —
+ * the chain is what the App mounts, a fact of the install state.
  */
 export function InstalledChainSection({
   locale,
@@ -1073,21 +891,15 @@ export function AppDetailView({
         <TargetHeader locale={locale} appId={appId} payload={payload} />
         {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
         <SettingsView locale={locale} payload={payload} />
-        {/* F3: the chain is what the App mounts, readable by every member; only
-            the installer's managers may rewrite its order. */}
-        <AppChainSection
-          locale={locale}
-          appId={appId}
-          chain={payload.chain ?? []}
-          canManage={payload.can_manage}
-          mountableBots={mountable}
-          onReordered={onReload}
-        />
       </div>
     );
   }
 
-  const target = hasTargetFacts(payload) ? payload : null;
+  // The ops block (enable/disable/delete) is an APP fact: every unblocked
+  // manager face renders it, target or no target. A Blocked face still gates
+  // on target facts — the several-repository Blocked shape names no App
+  // operations target.
+  const opsPayload = payload.blocked ? (hasTargetFacts(payload) ? payload : null) : payload;
   const bot = payload.blocked ? null : payload;
 
   function onTabChange(next: string): void {
@@ -1129,8 +941,11 @@ export function AppDetailView({
                 }
               />
             )}
-            {target === null ? null : (
-              <TargetOpsZone locale={locale} payload={target} onReload={onReload} />
+            {opsPayload === null ? null : (
+              // OpsSection reads only App facts (status, github_app_id); the
+              // target-owned review rows stay hidden (targetOwned=false), so
+              // the target-less manager face renders the same ops block.
+              <TargetOpsZone locale={locale} payload={opsPayload as TargetSettingsPayload} onReload={onReload} />
             )}
             {/* Sharing is an App property only the OFFICIAL workspace may flip;
                 any other workspace gets the state as a read-only line. */}

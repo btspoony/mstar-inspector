@@ -356,14 +356,17 @@ describe("tab shell rendering (static SSR)", () => {
     expect(installed).toContain('href="https://github.com/apps/demo/installations/new"');
   });
 
-  test("an App with no repository renders no repository block and no ops zone", () => {
+  test("an App with no repository renders no repository block but keeps the App ops", () => {
     expect(parseSettings(untargetedPayload)).not.toBeNull();
     expect(parseSettings(untargetedPayload)?.target_id).toBeUndefined();
 
     const markup = renderDetail(untargetedPayload);
     expect(markup).not.toContain(t("en", "appDetail.noRepository"));
     expect(markup).not.toContain(t("en", "appDetail.targetsMany"));
-    expect(markup).not.toContain(t("en", "settings.ops"));
+    // The ops block is an App fact: enable/disable/delete render with no target.
+    expect(markup).toContain(t("en", "settings.ops"));
+    expect(markup).toContain(t("en", "apps.actions.disable"));
+    expect(markup).toContain(t("en", "apps.actions.delete"));
     for (const key of ["settings.reviewTrigger", "settings.reviewDepth", "settings.reviewGate"] as const) {
       expect(markup).not.toContain(t("en", key));
     }
@@ -371,13 +374,15 @@ describe("tab shell rendering (static SSR)", () => {
     expect(markup).toContain(t("en", "apps.shareAppSwitch"));
   });
 
-  test("an App with several repositories renders no repository block either", () => {
+  test("an App with several repositories renders no repository block but keeps the App ops", () => {
     const many = { ...untargetedPayload, targets_many: true };
     expect(parseSettings(many)?.targets_many).toBe(true);
     const markup = renderDetail(many);
     expect(markup).not.toContain(t("en", "appDetail.targetsMany"));
     expect(markup).not.toContain(t("en", "appDetail.noRepository"));
-    expect(markup).not.toContain(t("en", "settings.ops"));
+    expect(markup).toContain(t("en", "settings.ops"));
+    expect(markup).toContain(t("en", "apps.actions.disable"));
+    expect(markup).toContain(t("en", "apps.actions.delete"));
     expect(markup).not.toContain(t("en", "settings.providers.title"));
     expect(markup).toContain(t("en", "apps.shareAppSwitch"));
     expect(parseSettings({ ...untargetedPayload, targets_many: "yes" })).toBeNull();
@@ -1191,7 +1196,7 @@ describe("the retired bots tab (Task 7)", () => {
   });
 });
 
-describe("F3 — the chain still reaches members on the identity-only face", () => {
+describe("the creator face carries no chain (ADR)", () => {
   const chainRows = async (markup: string): Promise<string[][]> =>
     withMarkup(markup, (container) => {
       const table = [...container.querySelectorAll("table")].find((node) =>
@@ -1203,14 +1208,17 @@ describe("F3 — the chain still reaches members on the identity-only face", () 
       );
     });
 
-  test("a member's identity-only face renders the read-only chain", async () => {
+  test("a creator member's face renders no chain table, no 添加机器人, no move controls", async () => {
     const markup = renderDetail(
       {
         ...identityPayload,
         chain: [chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5 })],
       },
     );
-    expect(markup).toContain(t("en", "apps.chain.title"));
-    expect((await chainRows(markup)).map((cells) => cells[0])).toEqual(["1"]);
+    expect(markup).not.toContain('data-slot="app-chain"');
+    expect(markup).not.toContain(t("en", "apps.chain.title"));
+    expect(markup).not.toContain(t("en", "apps.chain.addBot"));
+    expect(markup).not.toContain(t("en", "apps.chain.moveUp", { bot: "Mstar Standard" }));
+    expect(await chainRows(markup)).toEqual([]);
   });
 });
