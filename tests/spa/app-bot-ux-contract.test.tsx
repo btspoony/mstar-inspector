@@ -333,9 +333,16 @@ async function mountBot(payload: Record<string, unknown>, locale: SpaBoot["local
   };
 }
 
-const NO_RP = /\bRP\b/;
-/** A number and its Credits unit, the space between them optional. */
-const CREDITS_FIGURE = /(\d+(?:[.,]\d+)?)\s*Credits?/g;
+/** No word boundary: the retired unit also hides inside `620RP`. */
+const NO_RP = /RP/;
+/**
+ * A number and its Credits unit, the space between them optional. The number
+ * may not start mid-figure, or `1.2.34 Credits` matches as `2.34 Credits` and
+ * the orphaned `1.` escapes the foreign-unit scan below.
+ */
+const CREDITS_FIGURE = /(?<![\d.,])(\d+(?:[.,]\d+)?)\s*Credits?/g;
+/** Two decimal separators in one figure: a malformed amount no scan may excuse. */
+const DOUBLE_SEPARATOR = /\d+[.,]\d+[.,]\d+/;
 
 /**
  * EVERY rendered figure is a two-decimal amount with its unit. A single good
@@ -347,6 +354,7 @@ const CREDITS_FIGURE = /(\d+(?:[.,]\d+)?)\s*Credits?/g;
  * currency this product states.
  */
 function assertCreditsShape(text: string): void {
+  expect(text).not.toMatch(DOUBLE_SEPARATOR);
   const amounts = [...text.matchAll(CREDITS_FIGURE)].map((match) => match[1]);
   expect(amounts.length).toBeGreaterThan(0);
   for (const amount of amounts) expect(amount).toMatch(/^\d+\.\d{2}$/);
@@ -607,8 +615,12 @@ describe("5. Credits everywhere, RP nowhere", () => {
     expect(() => assertCreditsShape("1.34 Credits 2.1Credits")).toThrow();
     // A well-formed figure beside a decimal in another unit.
     expect(() => assertCreditsShape("1.34 Credits 2.1 tokens")).toThrow();
+    // A malformed amount must not be rescued by matching from its tail.
+    expect(() => assertCreditsShape("1.2.34 Credits")).toThrow();
     // A stray amount in the retired unit, even beside correct Credits.
     expect(() => assertCreditsShape("1.34 Credits · 620 RP")).toThrow();
+    // The unit also hides inside a figure, where `\b` never matched.
+    expect(() => assertCreditsShape("1.34 Credits · 620RP")).toThrow();
     expect(() => assertCreditsShape("no figures here")).toThrow();
   });
 
