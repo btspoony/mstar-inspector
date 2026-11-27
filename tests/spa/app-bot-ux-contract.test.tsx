@@ -167,10 +167,11 @@ function managerInstalledPayload(): SettingsManagePayload {
 function renderApp(
   payload: SettingsManagePayload | SettingsReadOnlyPayload | SettingsUntargetedPayload,
   from: AppDetailFrom | null = null,
+  locale: SpaBoot["locale"] = "en",
 ): string {
   return renderToStaticMarkup(
     createElement(AppDetailView, {
-      locale: "en",
+      locale,
       appId: "app-acme",
       payload,
       groups: [],
@@ -230,6 +231,21 @@ function botPayload(overrides: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
+/**
+ * The owner's live configuration, spelled so a leak is unmistakable. Every one
+ * of these is narrowed to empty/null by `botScopedSections` for a non-manager;
+ * a regressed route serves them, and this is what such a payload looks like.
+ */
+const LEAKED = {
+  keyTail: "9f3c",
+  keyId: "key_live_9f3c",
+  providerId: "acme-gateway",
+  baseUrl: "https://gateway.acme.internal/v1",
+  seatChain: "seat-nightly",
+  chainName: "nightly-fallback",
+  ownerChain: "acme-gateway/secret-model-v9",
+};
+
 /** The consumer read: not the owner, not manageable, and no official-workspace fact. */
 function consumerPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -238,12 +254,50 @@ function consumerPayload(overrides: Record<string, unknown> = {}): Record<string
     owned: false,
     official_workspace: undefined,
     app: { ...(botPayload().app as Record<string, unknown>), scope: "shared" },
+    keys: [
+      {
+        provider: "deepseek",
+        keyId: LEAKED.keyId,
+        last4: LEAKED.keyTail,
+        updatedAt: null,
+        verifiedAt: null,
+        verifiedStatus: "ok",
+      },
+    ],
+    model_chain: LEAKED.ownerChain,
+    model_roles: { review: LEAKED.seatChain },
+    model_chains: [
+      {
+        name: LEAKED.chainName,
+        chain: LEAKED.ownerChain,
+        is_default: false,
+        created_at: "2026-01-01 00:00:00",
+        updated_at: "2026-01-01 00:00:00",
+      },
+    ],
+    custom_providers: [
+      { provider_id: LEAKED.providerId, base_url: LEAKED.baseUrl, api: "openai-chat", model_ids: ["secret-model-v9"] },
+    ],
+    configured_providers: [
+      {
+        kind: "key",
+        provider: "deepseek",
+        key_id: LEAKED.keyId,
+        last4: LEAKED.keyTail,
+        updated_at: null,
+        verified_at: null,
+        verified_status: "ok",
+      },
+      { kind: "custom", provider_id: LEAKED.providerId, base_url: LEAKED.baseUrl, api: "openai-chat", model_ids: ["secret-model-v9"] },
+    ],
+    model_role_ids: ["review"],
+    custom_provider_api_ids: ["openai-chat"],
     ...overrides,
   };
 }
 
 /** Mount BotDetailPage against a stubbed network; the only way to read both bot faces. */
-async function mountBot(payload: Record<string, unknown>) {
+async function mountBot(payload: Record<string, unknown>, locale: SpaBoot["locale"] = "en") {
   const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: unknown) => {
@@ -260,14 +314,16 @@ async function mountBot(payload: Record<string, unknown>) {
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
   try {
-    await act(async () => root.render(createElement(BotDetailPage, { boot: BOOT, botId: "bot-1" })));
+    await act(async () => root.render(createElement(BotDetailPage, { boot: { ...BOOT, locale }, botId: "bot-1" })));
     for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
   } catch (err) {
     globalThis.fetch = realFetch;
     throw err;
   }
   return {
-    container,
+    // The shared DOM helpers below take the platform `HTMLElement`; happy-dom's
+    // own node type satisfies it structurally, only nominally distinct.
+    container: container as unknown as HTMLElement,
     text: () => container.textContent ?? "",
     async close() {
       await act(async () => root.unmount());
@@ -278,16 +334,41 @@ async function mountBot(payload: Record<string, unknown>) {
 }
 
 const NO_RP = /\bRP\b/;
-const CREDITS_AMOUNT = /\d+\.\d{2} Credits/g;
+const CREDITS_FIGURE = /[\d.,]+ Credits/g;
 
-/** Every rendered Credits figure is a two-decimal amount with its unit. */
+/**
+ * EVERY rendered figure is a two-decimal amount with its unit. A single good
+ * figure must not excuse a bad one: the first version only asked that ONE
+ * `N.NN Credits` matched somewhere, so "1 Credits" or "1.2 Credits" rode along
+ * unseen beside a well-formed figure.
+ */
 function assertCreditsShape(text: string): void {
-  const amounts = text.match(CREDITS_AMOUNT) ?? [];
-  expect(amounts.length).toBeGreaterThan(0);
-  // The rendered figures are ALWAYS bare "N.NN Credits"; a stray decimal with no
-  // unit, or one with three decimals or a different unit, would escape the match.
-  expect(text).not.toMatch(/\d+\.\d{3,} Credits/);
-  expect(text).not.toMatch(/\d+\.\d+ (?!Credits)[A-Za-z]/);
+  const figures = text.match(CREDITS_FIGURE) ?? [];
+  expect(figures.length).toBeGreaterThan(0);
+  for (const figure of figures) expect(figure).toMatch(/^\d+\.\d{2} Credits$/);
+  // A decimal figure with no unit at all escapes the scan above.
+  expect(text).not.toMatch(/\d+\.\d{2} (?!Credits)[A-Za-z]/);
+}
+
+/** No rendered attribute — the chain row's month tooltip included — says RP. */
+function assertNoRpInAttributes(container: HTMLElement): void {
+  const offenders = [...container.querySelectorAll("[title], [aria-label], [placeholder]")]
+    .flatMap((element) => ["title", "aria-label", "placeholder"].map((name) => element.getAttribute(name)))
+    .filter((value): value is string => value !== null && NO_RP.test(value));
+  expect(offenders).toEqual([]);
+}
+
+/** The metric band as key/value pairs, in render order. */
+function metricBand(container: HTMLElement): Array<{ key: string; value: string }> {
+  return [...container.querySelectorAll('[data-slot="metric"]')].map((metric) => ({
+    key: metric.querySelector('[data-slot="metric-key"]')?.textContent ?? "",
+    value: metric.querySelector('[data-slot="metric-value"]')?.textContent ?? "",
+  }));
+}
+
+/** A table row's whole text, found by one of its cells. */
+function rowText(container: HTMLElement, needle: string): string {
+  return [...container.querySelectorAll("tbody tr")].find((row) => row.textContent?.includes(needle))?.textContent ?? "";
 }
 
 /* ------------------------------------------------------------------ *
@@ -376,25 +457,73 @@ describe("2. the tab sets", () => {
 describe("3. absence — the installed face carries none of the creator machinery", () => {
   const markup = renderApp(managerInstalledPayload());
 
-  test("no credentials, share, delete, metadata refresh or delivery", () => {
-    for (const absent of [
-      t("en", "appDetail.credentialsTitle"),
-      t("en", "apps.shareAppSwitch"),
-      t("en", "settings.confirmDeleteTitle", { slug: "Acme Inspector" }),
-      t("en", "settings.appInfoRefresh"),
-      t("en", "appDetail.delivery.copy"),
-    ]) {
-      expect(markup.includes(absent), absent).toBe(false);
-    }
-    expect(markup).not.toContain("24h");
+  /**
+   * The entrypoints, not their dialog copy. The first version checked the
+   * delete CONFIRM title (which never renders with no dialog open) and a
+   * credentials heading this face never had — both assertions were true of
+   * any page. Delete / enable-disable / metadata refresh / share / the stored
+   * credential line are the things a reader could actually press or read.
+   */
+  test("delete, enable/disable, refresh, share and the credentials line are absent", async () => {
+    await withMarkup(markup, (container) => {
+      const text = container.textContent ?? "";
+      for (const absent of [
+        t("en", "apps.actions.delete"),
+        t("en", "apps.actions.enable"),
+        t("en", "apps.actions.disable"),
+        t("en", "settings.appInfoRefresh"),
+        t("en", "apps.shareAppSwitch"),
+        t("en", "appDetail.credentialsTitle"),
+        t("en", "appDetail.credentialsStored"),
+        t("en", "settings.ops"),
+        t("en", "appDetail.delivery.copy"),
+      ]) {
+        expect(text.includes(absent), absent).toBe(false);
+      }
+      // The share block has its own slot; its absence is structural, not copy.
+      expect(container.querySelector('[data-slot="app-share"]')).toBeNull();
+      expect(text).not.toContain("24h");
+    });
   });
 });
 
 describe("3. absence — the consumer bot face carries no owner machinery", () => {
-  test("no provider block, key list, seat control, chain control or pricing", async () => {
+  test("a recognisable owner payload renders none of it", async () => {
     const face = await mountBot(consumerPayload());
     try {
       const text = face.text();
+      // (a) Positive control: the read-only overview really rendered, so the
+      // absences below are about this page and not an error state.
+      expect(text).toContain(t("en", "botDetail.consumer.readOnlyNotice"));
+      for (const present of [
+        "botDetail.usage.title",
+        "bots.fieldCapability",
+        "bots.fieldMounted",
+      ] as const) {
+        expect(text, present).toContain(t("en", present));
+      }
+      expect(face.container.querySelectorAll('[data-slot="flow-section"]').length).toBe(3);
+      expect(text).toContain("Acme"); // the served billing source
+
+      // (b) Not one recognisable owner value, anywhere in the DOM — text or
+      // attribute. The previous fixture left keys/providers/chains empty, so a
+      // leak had nothing to show and the assertion proved nothing.
+      for (const secret of [
+        LEAKED.chainName,
+        LEAKED.keyTail,
+        LEAKED.keyId,
+        LEAKED.providerId,
+        LEAKED.baseUrl,
+        LEAKED.seatChain,
+        LEAKED.ownerChain,
+        "secret-model-v9",
+      ]) {
+        expect(text.includes(secret), secret).toBe(false);
+        expect(face.container.innerHTML.includes(secret), `${secret} (markup)`).toBe(false);
+      }
+
+      // ...and none of their controls. A section, a key form, a seat or chain
+      // editor would all be an `input`/`select`/`textarea` on this face.
       for (const absent of [
         t("en", "settings.providers.title"),
         t("en", "settings.seats"),
@@ -407,9 +536,7 @@ describe("3. absence — the consumer bot face carries no owner machinery", () =
       ]) {
         expect(text.includes(absent), absent).toBe(false);
       }
-      // Absence of CONTROLS, not disabled ones.
-      expect(face.container.querySelector(`input[aria-label="${t("en", "botDetail.identity.name")}"]`)).toBeNull();
-      expect(face.container.querySelector(`input[aria-label="${t("en", "botDetail.share.multiplier")}"]`)).toBeNull();
+      expect(face.container.querySelectorAll("input, select, textarea, [role=tablist]").length).toBe(0);
     } finally {
       await face.close();
     }
@@ -463,14 +590,44 @@ describe("5. Credits everywhere, RP nowhere", () => {
     expect(formatCredits(0, RATE)).toBe("0.00 Credits");
   });
 
-  test("the installed face states Credits at the payload rate and never RP", async () => {
+  test("the checker rejects a figure that is not `N.NN Credits`", () => {
+    // The assertion's own test: a well-formed figure must not excuse a bad one.
+    assertCreditsShape("1.34 Credits");
+    expect(() => assertCreditsShape("1 Credits")).toThrow();
+    expect(() => assertCreditsShape("1.2 Credits")).toThrow();
+    expect(() => assertCreditsShape("1.340 Credits")).toThrow();
+    expect(() => assertCreditsShape("1.34 Credits 2 Credits")).toThrow();
+    expect(() => assertCreditsShape("no figures here")).toThrow();
+  });
+
+  test("the installed face states every spend and ceiling figure in Credits, never RP", async () => {
     const markup = renderApp(managerInstalledPayload());
-    expect(markup).toContain("1.34 Credits");
-    // Rendered TEXT, not attributes: a tooltip is the ADR's own open residual
-    // (see the report), and this pins what a reader actually sees.
-    const text = await withMarkup(markup, (container) => container.textContent ?? "");
-    assertCreditsShape(text);
-    expect(text).not.toMatch(NO_RP);
+    // The band's total, the own row's spend, the shared row's spend AND its
+    // ceiling, and the archived row's spend — every one a two-decimal figure.
+    for (const figure of ["1.34 Credits", "1.24 Credits", "0.09 Credits", "2.00 Credits", "0.01 Credits"]) {
+      expect(markup, figure).toContain(figure);
+    }
+    await withMarkup(markup, (container) => {
+      assertCreditsShape(container.textContent ?? "");
+      expect(container.textContent ?? "").not.toMatch(NO_RP);
+      // Attributes too: the chain row's month tooltip is user-visible on hover.
+      assertNoRpInAttributes(container);
+    });
+  });
+
+  test.each(["en", "zh_CN"] as const)("the installed face reads the 本月 spend label as 本月已用 (%s)", async (locale) => {
+    const markup = renderApp(managerInstalledPayload(), null, locale);
+    await withMarkup(markup, (container) => {
+      const keys = metricBand(container).map((metric) => metric.key);
+      expect(keys).toContain(t(locale, "credits.usedThisMonth"));
+      // The rendered label, not the dictionary: 本月 is a prefix of 本月已用, so
+      // the bare shorthand can only be caught by an exact key comparison.
+      expect(keys).not.toContain(t(locale, "bots.monthLabel"));
+      // The chain's month column carries the same label.
+      expect([...container.querySelectorAll("thead th")].map((th) => th.textContent)).toContain(
+        t(locale, "credits.usedThisMonth"),
+      );
+    });
   });
 
   test("the owner bot face states Credits and never RP", async () => {
@@ -480,6 +637,18 @@ describe("5. Credits everywhere, RP nowhere", () => {
       assertCreditsShape(text);
       expect(text).toContain("2.48 Credits"); // 1,240 RP at 500 RP/Credit
       expect(text).not.toMatch(NO_RP);
+      assertNoRpInAttributes(face.container);
+    } finally {
+      await face.close();
+    }
+  });
+
+  test.each(["en", "zh_CN"] as const)("the owner bot face reads the 本月 spend label as 本月已用 (%s)", async (locale) => {
+    const face = await mountBot({ ...botPayload(), rp_per_credit: RATE }, locale);
+    try {
+      const keys = metricBand(face.container).map((metric) => metric.key);
+      expect(keys).toContain(t(locale, "credits.usedThisMonth"));
+      expect(keys).not.toContain(t(locale, "bots.monthLabel"));
     } finally {
       await face.close();
     }
@@ -491,15 +660,24 @@ describe("5. Credits everywhere, RP nowhere", () => {
       const text = face.text();
       assertCreditsShape(text);
       expect(text).not.toMatch(NO_RP);
+      assertNoRpInAttributes(face.container);
     } finally {
       await face.close();
     }
   });
 
-  test("the 本月 spend label reads 本月已用, never the bare month shorthand", () => {
-    // zh carries the ADR's exact wording; en says the same thing in its own
-    // words. The bare 本月 / "This month" shorthand is a DIFFERENT key, and it
-    // must never be the spend label — that is what makes the figure ambiguous.
+  test.each(["en", "zh_CN"] as const)("the consumer bot face reads the 本月 spend label as 本月已用 (%s)", async (locale) => {
+    const face = await mountBot({ ...consumerPayload(), rp_per_credit: RATE }, locale);
+    try {
+      const keys = metricBand(face.container).map((metric) => metric.key);
+      expect(keys).toContain(t(locale, "credits.usedThisMonth"));
+      expect(keys).not.toContain(t(locale, "bots.monthLabel"));
+    } finally {
+      await face.close();
+    }
+  });
+
+  test("the 本月 keys themselves carry the ADR's wording in both locales", () => {
     expect(t("zh_CN", "credits.usedThisMonth")).toBe("本月已用");
     expect(t("en", "credits.usedThisMonth")).toBe("Used this month");
     for (const locale of ["en", "zh_CN"] as const) {
@@ -588,6 +766,17 @@ function botsPayload(): UsableBotsPayload {
     bots: [
       botRow({ id: "bot-own", name: "My Bot", owned: true, description: "Mine to configure.", month_used_rp: 500 }),
       botRow({ id: "bot-retired", name: "Retired Bot", owned: true, archived: true }),
+      // Archived is a state fact in BOTH sections: a shared bot the owning
+      // workspace retired stays listed here, so its consumer can see why their
+      // chain skipped it. The earlier fixture only had an OWNED archived bot.
+      botRow({
+        id: "bot-retired-shared",
+        name: "Platform Retired Bot",
+        owned: false,
+        workspace_name: "platform",
+        scope: "shared",
+        archived: true,
+      }),
       botRow({ id: "bot-theirs", name: "Their Bot", owned: false, workspace_name: "platform" }),
     ],
   };
@@ -611,8 +800,8 @@ describe("7. the bots list", () => {
     });
   });
 
-  test("the create action sits in the owned header only for a manager", async () => {
-    const manager = renderToStaticMarkup(
+  test("the create action sits inside the owned section's header", async () => {
+    const markup = renderToStaticMarkup(
       createElement(BotsView, {
         locale: "en",
         base: "/dashboard/acme",
@@ -621,8 +810,55 @@ describe("7. the bots list", () => {
         onCreated: () => {},
       }),
     );
-    expect(manager.match(new RegExp(t("en", "bots.create.open"), "g")) ?? []).toHaveLength(1);
+    await withMarkup(markup, (container) => {
+      const cards = [...container.querySelectorAll('[data-slot="group-card"]')];
+      expect(cards.length).toBe(2);
+      const ownedCard = cards[0] as HTMLElement;
+      const sharedCard = cards[1] as HTMLElement;
+      expect(ownedCard.textContent).toContain(t("en", "bots.list.ownedSection"));
+      expect(sharedCard.textContent).toContain(t("en", "bots.list.sharedSection"));
 
+      // The trigger is inside the owned card's HEADER, not merely somewhere on
+      // the page: a page-wide text match cannot tell the two headers apart.
+      const header = ownedCard.querySelector('[data-slot="card-header"]');
+      const action = header?.querySelector('[data-slot="card-action"]');
+      expect(action?.textContent).toBe(t("en", "bots.create.open"));
+      expect(sharedCard.querySelector('[data-slot="card-action"]')).toBeNull();
+      expect(sharedCard.textContent).not.toContain(t("en", "bots.create.open"));
+    });
+  });
+
+  test("each row lands in the section its ownership implies", async () => {
+    const markup = renderToStaticMarkup(
+      createElement(BotsView, {
+        locale: "en",
+        base: "/dashboard/acme",
+        state: { kind: "ok", payload: botsPayload() },
+        canCreate: true,
+        onCreated: () => {},
+      }),
+    );
+    await withMarkup(markup, (container) => {
+      const cards = [...container.querySelectorAll('[data-slot="group-card"]')];
+      const namesIn = (card: Element): string[] =>
+        [...card.querySelectorAll("tbody tr")].map((row) => row.querySelector("a")?.textContent ?? "");
+      // Owned rows first, shared rows second — and NOT one flat table.
+      expect(namesIn(cards[0] as HTMLElement)).toEqual(["My Bot", "Retired Bot"]);
+      expect(namesIn(cards[1] as HTMLElement)).toEqual(["Platform Retired Bot", "Their Bot"]);
+      // An archived SHARED bot stays listed with 已归档, not dropped and not
+      // mislabelled as a live sharing state.
+      const sharedArchived = rowText(cards[1] as HTMLElement, "Platform Retired Bot");
+      expect(sharedArchived).toContain(t("en", "bots.list.archived"));
+      expect(sharedArchived).not.toContain(t("en", "bots.stateShared"));
+      const ownedArchived = rowText(cards[0] as HTMLElement, "Retired Bot");
+      expect(ownedArchived).toContain(t("en", "bots.list.archived"));
+      // The live rows still state their sharing state.
+      expect(rowText(cards[1] as HTMLElement, "Their Bot")).toContain(t("en", "bots.stateShared"));
+      expect(container.querySelectorAll("tbody tr").length).toBe(4);
+    });
+  });
+
+  test("the create action disappears for a member but the sections stay", async () => {
     const member = renderToStaticMarkup(
       createElement(BotsView, {
         locale: "en",

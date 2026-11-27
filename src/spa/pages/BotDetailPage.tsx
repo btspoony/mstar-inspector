@@ -182,9 +182,14 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   // bot's configured default chain is visible to its consumers; `model_chain`
   // stays owner-only configuration.
   const defaultChain = splitModelChain(overview?.default_chain ?? payload.model_chain);
-  const namedChains = payload.model_chains
-    .filter((entry) => entry.name !== "default")
-    .map((entry) => ({ name: entry.name, chain: splitModelChain(entry.chain) }));
+  // Defence in depth: the route already narrows `model_chains` to [] for a
+  // non-manager, but chain mechanics are owner-only on EVERY face, so a
+  // regressed payload must still print nothing here.
+  const namedChains = isOwner
+    ? payload.model_chains
+        .filter((entry) => entry.name !== "default")
+        .map((entry) => ({ name: entry.name, chain: splitModelChain(entry.chain) }))
+    : [];
 
   const monthValue = !overview
     ? t(locale, "bots.monthNone")
