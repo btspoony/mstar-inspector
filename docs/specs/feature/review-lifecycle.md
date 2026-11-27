@@ -149,6 +149,8 @@ CREATE TABLE review_checks (
   observed TEXT NOT NULL CHECK(observed IN ('unknown','in_progress','success','neutral','failure')),
   recovery_state TEXT NOT NULL CHECK(recovery_state IN ('pending','done','remote-unconfirmed','local-error','suspended')),
   publication_id TEXT REFERENCES review_publications(id),
+  -- migration 0126; the executing Review Bot, stamped once by `begin`:
+  -- executor_bot_id TEXT REFERENCES review_bots(id);  -- nullable, unindexed
   attempts INTEGER NOT NULL DEFAULT 0, next_attempt_ms INTEGER,
   last_error TEXT, terminal_ms INTEGER,
   -- migration 0052; the outcome is a closed enum:
