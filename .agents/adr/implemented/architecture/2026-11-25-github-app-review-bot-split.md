@@ -1,8 +1,8 @@
 # ADR: Split the GitHub App from the Review Bot and relay quota across an ordered bot chain
 Status: implemented — `github_apps` carries the App's credentials, installations and publishing identity, `review_bots` carries the review configuration and its multiplier, and the two meet only in the per-install chain `app_install_bots`, walked in position order by `selectReviewBot`
 Spec: docs/specs/feature/bot-scope-and-claiming.md § Current state
-Supersedes: .agents/adr/implemented/architecture/2026-11-15-review-bot-and-target-entities.md
-Supersedes: .agents/adr/implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md — the one-`scope`-answers-both question only
+Supersedes: 2026-11-15-review-bot-and-target-entities.md — the `review_bots`-as-one-execution-and-configuration-row half only; the `review_targets` half stands
+Supersedes: ../feature/2026-11-15-shared-bot-scope-and-claiming.md — the one-`scope`-answers-both question only
 
 ## Problem
 

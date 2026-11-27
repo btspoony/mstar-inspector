@@ -2,7 +2,7 @@
 
 Status: implemented — retrospective: `review_bots` and `review_targets` shipped in migrations `0056_review_bots_rename.sql` and `0057_review_targets.sql`; this record was filed after the fact.
 Spec: docs/specs/feature/review-targets.md § Entities
-Superseded-by: .agents/adr/implemented/architecture/2026-11-25-github-app-review-bot-split.md
+Superseded-by: 2026-11-25-github-app-review-bot-split.md — the `review_bots`-as-one-execution-and-configuration-row half only; the `review_targets` half stands
 
 ## Problem
 

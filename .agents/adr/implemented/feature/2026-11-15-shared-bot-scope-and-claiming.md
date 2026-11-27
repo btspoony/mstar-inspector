@@ -2,7 +2,7 @@
 
 Status: implemented — retrospective: `review_bots.scope`, the official-workspace designation and the `install_claims` bind shipped in migrations `0058_review_bot_scope.sql` and `0059_install_claims.sql`; this record was filed after the fact.
 Superseded-by: `.agents/adr/implemented/feature/2026-11-20-retire-install-claim.md` — the claim half only; the scope and designation decisions below stand
-Superseded-by: .agents/adr/implemented/architecture/2026-11-25-github-app-review-bot-split.md — the one-`scope`-answers-both question only; the designation, the bind refusal and the retired claim stand
+Superseded-by: ../architecture/2026-11-25-github-app-review-bot-split.md — the one-`scope`-answers-both question only; the designation, the bind refusal and the retired claim stand
 Spec: docs/specs/feature/bot-scope-and-claiming.md § Bot scope
 
 ## Problem
