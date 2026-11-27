@@ -779,6 +779,7 @@ function botRow(overrides: Partial<UsableBotRow> & { id: string; name: string; o
     scope: overrides.owned ? "owned" : "shared",
     multiplier: 1,
     month_used_rp: 0,
+    effective_ceiling: null,
     archived: false,
     ...overrides,
   };

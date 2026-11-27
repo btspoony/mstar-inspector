@@ -810,6 +810,11 @@ export type UsableBotListRow = {
   shared_at: string | null;
   multiplier: number;
   monthly_rp: number | null;
+  /**
+   * The ceiling the relay enforces for the CALLING workspace: its
+   * `bot_quota_overrides` row when one exists, else the bot's own default.
+   */
+  effective_ceiling: number | null;
   archived_at: string | null;
 };
 
@@ -820,7 +825,10 @@ export type UsableBotListRow = {
  */
 const USABLE_BOT_LIST_SQL = `
   SELECT r.id, r.name, r.description, r.workspace_id, r.scope, r.shared_at, r.multiplier, r.monthly_rp,
-         r.archived_at, ws.name AS workspace_name
+         r.archived_at, ws.name AS workspace_name,
+         COALESCE((SELECT o.monthly_rp FROM bot_quota_overrides o
+                    WHERE o.bot_id = r.id AND o.workspace_id = ?1), r.monthly_rp)
+           AS effective_ceiling
     FROM review_bots r
     JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
    WHERE r.deleted_at IS NULL AND (r.workspace_id = ?1 OR r.scope = 'shared')

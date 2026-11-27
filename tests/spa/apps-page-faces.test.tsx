@@ -353,3 +353,43 @@ describe("the installed empty state renders ONE create control", () => {
     expect(html).toContain(t("en", "apps.installed.browseShared"));
   });
 });
+
+/**
+ * QC F3-4: a browser Back/Forward onto the legacy `?tab=bots` address must land
+ * on `/bots`. The parsed tab can equal the CURRENT one (`?tab=bots` resolves to
+ * the real default, which may already be rendered), so a state-driven redirect
+ * effect would never run — the history handler itself must replace the URL.
+ */
+describe("a history entry carrying the legacy bots tab redirects", () => {
+  test("Back/Forward onto ?tab=bots lands on /bots even when the resolved tab does not change", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps?tab=installed");
+    const realFetch = globalThis.fetch;
+    // One installed row, so the real default is `installed` — the very tab the
+    // legacy spelling resolves to.
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(payload([app({ installed: true })])), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(AppsPage, { boot: BOOT })));
+      await act(async () => {});
+      expect(win.location.pathname).toBe("/dashboard/acme/apps");
+
+      // The entry a bookmark from before the split leaves in history.
+      win.history.pushState(null, "", "/dashboard/acme/apps?tab=bots");
+      await act(async () => win.dispatchEvent(new win.Event("popstate")));
+      await act(async () => {});
+
+      expect(win.location.pathname).toBe("/dashboard/acme/bots");
+      expect(win.location.search).toBe("");
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+});

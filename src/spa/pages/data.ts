@@ -185,6 +185,12 @@ export type UsableBotRow = {
   scope: BotScope;
   multiplier: number;
   month_used_rp: number;
+  /**
+   * The ceiling the relay enforces for THIS workspace: an override row when
+   * one exists, else the bot's own default. `null` is unlimited. Distinct from
+   * {@link UsableBotsPayload.plan_monthly_rp}, the workspace's plan allowance.
+   */
+  effective_ceiling: number | null;
   /** Archived is a state fact: the row stays listed, muted, never selected. */
   archived: boolean;
 };
@@ -214,6 +220,7 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     isBotScope(value.scope) &&
     isBotMultiplier(value.multiplier) &&
     typeof value.month_used_rp === "number" &&
+    (value.effective_ceiling === null || isRpCeiling(value.effective_ceiling)) &&
     typeof value.archived === "boolean"
   );
 }

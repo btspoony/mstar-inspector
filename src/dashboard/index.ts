@@ -2313,6 +2313,10 @@ async function usableBotsRead(
       scope: bot.scope,
       multiplier: bot.multiplier,
       month_used_rp: spend.get(bot.id) ?? 0,
+      // The ceiling that binds THIS viewer, not the plan's: an override for
+      // this workspace else the bot's default. The plan allowance is the
+      // separate, workspace-wide limit the payload states once.
+      effective_ceiling: bot.effective_ceiling,
       archived: bot.archived_at !== null,
     })),
   };

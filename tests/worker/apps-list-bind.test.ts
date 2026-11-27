@@ -79,6 +79,95 @@ function profileRate(db: TestD1): number {
 const APPS = `/dashboard/${WORKSPACE}/api/apps`;
 const BOTS = `/dashboard/${WORKSPACE}/api/review-bots`;
 
+/** A SHARED bot of another workspace, so this one only consumes it. */
+function seedSharedBot(
+  db: TestD1,
+  id: string,
+  workspaceId: string,
+  options: { multiplier?: number; monthlyRp?: number | null } = {},
+): void {
+  db.raw.run(
+    `INSERT OR IGNORE INTO workspaces (id, slug, name, created_at)
+       VALUES ('${workspaceId}', '${workspaceId}', '${workspaceId}', '2026-01-01T00:00:00.000Z');
+     INSERT INTO review_bots
+       (id, workspace_id, name, description, scope, sandbox_image_id, multiplier, monthly_rp, created_at, updated_at)
+     VALUES ('${id}', '${workspaceId}', '${id}', NULL, 'shared', 'omp', ${options.multiplier ?? 4},
+             ${options.monthlyRp === undefined || options.monthlyRp === null ? "NULL" : options.monthlyRp},
+             '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');`,
+  );
+}
+
+/**
+ * The plan allowance this workspace resolves to: the seeded `free` ceiling of
+ * the profile in force (it holds no subscription row, so `free` is its plan).
+ */
+function planCeiling(db: TestD1): number | null {
+  const row = db.raw
+    .query(
+      `SELECT q.monthly_rp AS monthlyRp
+         FROM quota_profile_plans q
+        WHERE q.profile_id = (SELECT p.id FROM quota_profiles p
+                               WHERE p.effective_from <= ? ORDER BY p.effective_from DESC LIMIT 1)`,
+    )
+    .get(new Date().toISOString()) as { monthlyRp: number | null } | null;
+  return row?.monthlyRp ?? null;
+}
+
+/**
+ * The directory's ceiling column is the BOT's enforced ceiling, never the
+ * workspace plan's: a bot capped below the plan must not read as the plan, and
+ * an override for this workspace must win over the bot's own default.
+ */
+describe("the bot list serves each row's effective ceiling", () => {
+  test("a bot default below the plan is served as the row's ceiling, distinct from the plan", async () => {
+    const db = await world();
+    const plan = planCeiling(db);
+    expect(plan).not.toBeNull();
+    seedSharedBot(db, "bot-capped", "ws-provider", { monthlyRp: 3000 });
+
+    const body = (await (await get(db, BOTS)).json()) as {
+      plan_monthly_rp: number | null;
+      bots: Array<{ id: string; effective_ceiling: number | null; monthly_rp?: number }>;
+    };
+    expect(body.plan_monthly_rp).toBe(plan);
+    const row = body.bots.find((bot) => bot.id === "bot-capped")!;
+    expect(row.effective_ceiling).toBe(3000);
+    expect(row.effective_ceiling).not.toBe(plan);
+    // The owner's raw default never rides the row — only the viewer's ceiling.
+    expect(row).not.toHaveProperty("monthly_rp");
+  });
+
+  test("this workspace's override wins over the bot default, and an unlimited bot reads null", async () => {
+    const db = await world();
+    seedSharedBot(db, "bot-overridden", "ws-provider", { monthlyRp: 3000 });
+    seedSharedBot(db, "bot-open", "ws-provider", { monthlyRp: null });
+    db.raw.run(
+      `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+         VALUES ('bot-overridden', '${WORKSPACE}', 7000, '2026-01-01T00:00:00.000Z')`,
+    );
+
+    const body = (await (await get(db, BOTS)).json()) as {
+      bots: Array<{ id: string; effective_ceiling: number | null }>;
+    };
+    expect(body.bots.find((bot) => bot.id === "bot-overridden")!.effective_ceiling).toBe(7000);
+    expect(body.bots.find((bot) => bot.id === "bot-open")!.effective_ceiling).toBeNull();
+  });
+
+  test("another workspace's override never reaches this viewer", async () => {
+    const db = await world();
+    seedSharedBot(db, "bot-scoped", "ws-provider", { monthlyRp: 3000 });
+    db.raw.run(
+      `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+         VALUES ('bot-scoped', 'ws-provider', 9000, '2026-01-01T00:00:00.000Z')`,
+    );
+
+    const body = (await (await get(db, BOTS)).json()) as {
+      bots: Array<{ id: string; effective_ceiling: number | null }>;
+    };
+    expect(body.bots.find((bot) => bot.id === "bot-scoped")!.effective_ceiling).toBe(3000);
+  });
+});
+
 describe("list payloads carry the real Credits rate", () => {
   test("both lists serve the profile in force's rate", async () => {
     const db = await world();

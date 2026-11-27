@@ -202,6 +202,7 @@ const bot = (overrides: Partial<UsableBotsPayload["bots"][number]> = {}): Usable
   scope: "owned",
   multiplier: 3,
   month_used_rp: 9000,
+  effective_ceiling: null,
   archived: false,
   ...overrides,
 });
@@ -223,13 +224,36 @@ const renderBots = (bots: UsableBotsPayload["bots"], plan: number | null): strin
   );
 
 describe("item 13 — one ceiling presentation on /bots", () => {
-  test("a ceiling states `已用 / 上限`; unlimited states it; own states unlimited (own bot)", () => {
-    const shared = bot({ id: "bot-shared", owned: false, scope: "shared", month_used_rp: 90 });
-    const withCeiling = renderBots([bot(), shared], 100000);
-    expect(withCeiling).toContain("0.09 Credits / 100.00 Credits");
-    const unlimited = renderBots([bot(), shared], null);
-    expect(unlimited).toContain(t("en", "credits.noCeiling", { used: "0.09" }));
-    expect(unlimited).toContain(t("en", "credits.unlimitedOwn", { used: "9.00" }));
+  test("each row states ITS enforced ceiling, never the workspace plan's", () => {
+    // The plan is 100,000 RP; the shared bot is capped at 3,000 by its owner.
+    // The row must read the bot's 3.00, and the owned row its own unlimited.
+    const plan = 100000;
+    const sharedCapped = bot({
+      id: "bot-shared",
+      name: "Capped shared",
+      owned: false,
+      scope: "shared",
+      month_used_rp: 90,
+      effective_ceiling: 3000,
+    });
+    const withCeiling = renderBots([bot(), sharedCapped], plan);
+    const cappedRow = withCeiling.split("<tr ").find((part) => part.includes("Capped shared")) ?? "";
+    expect(cappedRow).toContain("0.09 Credits / 3.00 Credits");
+    expect(cappedRow).not.toContain("100.00 Credits");
+    expect(withCeiling).toContain(t("en", "credits.unlimitedOwn", { used: "9.00" }));
+  });
+
+  test("a bot with no ceiling reads no-ceiling even when the plan has a finite one", () => {
+    const shared = bot({
+      id: "bot-shared",
+      owned: false,
+      scope: "shared",
+      month_used_rp: 90,
+      effective_ceiling: null,
+    });
+    const html = renderBots([shared], 100000);
+    expect(html).toContain(t("en", "credits.noCeiling", { used: "0.09" }));
+    expect(html).not.toContain(t("en", "credits.unlimitedOwn"));
   });
 
   test("an unshared bot reports ×1 in the list; a shared one shows its stored multiplier", () => {

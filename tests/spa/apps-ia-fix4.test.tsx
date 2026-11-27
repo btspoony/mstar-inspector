@@ -42,6 +42,7 @@ const botsPayload = (quota: { plan_monthly_rp: number | null; quota_error?: bool
       scope: "shared",
       multiplier: 1,
       month_used_rp: 42,
+      effective_ceiling: null,
       archived: false,
     },
   ],
@@ -166,8 +167,8 @@ describe("F10 — the bot detail branches on quota_error", () => {
 /**
  * A successful `save-sandbox-image` write whose FOLLOW-UP read fails must
  * report success (plus a stale notice) — and must not start a second full
- * load. The full load is counted by the models read, which only `load()`
- * issues.
+ * load. The full load's own options read is counted here: only `load()` (and
+ * its retry) issues `/api/models`, and neither may run for a section re-read.
  */
 describe("reload race — a landed write survives a failed follow-up read", () => {
   test("success message + stale notice, and no second full load", async () => {

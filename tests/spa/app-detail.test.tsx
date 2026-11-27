@@ -1270,6 +1270,7 @@ describe("the mount chooser never offers an archived bot (mounted behaviour)", (
     scope: "owned" as const,
     multiplier: 1,
     month_used_rp: 0,
+    effective_ceiling: null,
     archived,
   });
 

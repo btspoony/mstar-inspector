@@ -232,11 +232,13 @@ function botColumns(
       align: "right",
       cell: (bot) => (
         <span className="text-muted-foreground tabular-nums">
-          {/* F10: an unknown ceiling is an error, never "no ceiling". */}
+          {/* The BOT's enforced ceiling — an override for this workspace else
+              its default — never the workspace's plan allowance. F10: an
+              unknown ceiling is an error, never "no ceiling". */}
           {usageCeilingCell(locale, { used_rp: bot.month_used_rp }, {
             owned: bot.owned,
             quotaError: payload.quota_error === true,
-            ceilingRp: payload.plan_monthly_rp,
+            ceilingRp: bot.effective_ceiling,
             rpPerCredit: payload.rp_per_credit,
           })}
         </span>

@@ -186,3 +186,67 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
     }
   });
 });
+
+/**
+ * QC F3-3: the bot payload is the page. A held `/api/models` must not delay the
+ * overview, and only the editable owner face ever issues that read at all.
+ */
+describe("QC F3-3 — options never gate the page", () => {
+  async function mountHeld(payload: Record<string, unknown>) {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
+    const realFetch = globalThis.fetch;
+    let modelsCalls = 0;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(payload);
+      if (url.endsWith("/api/models")) {
+        modelsCalls += 1;
+        // Held forever: a pending options read must leave the page usable.
+        return new Promise<Response>(() => {});
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => root.render(createElement(BotDetailPage, { boot: BOOT, botId: "bot-1" })));
+    for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+    return {
+      container,
+      modelsCalls: () => modelsCalls,
+      text: () => container.textContent ?? "",
+      async close() {
+        await act(async () => root.unmount());
+        globalThis.fetch = realFetch;
+        cleanup();
+      },
+    };
+  }
+
+  test("the consumer overview renders while the options read is still pending, and never issues it", async () => {
+    const page = await mountHeld({ ...BOT_PAYLOAD, can_manage: false, owned: false });
+    try {
+      // Rendered from the bot payload alone.
+      expect(page.text()).toContain("Team bot");
+      expect(page.text()).toContain(t("en", "botDetail.usage.source"));
+      expect(page.container.querySelector('[role="tablist"]')).toBeNull();
+      // The consumer face has no options to show, so it asks for none.
+      expect(page.modelsCalls()).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  test("the owner page is usable while the options read is pending, and shows the editor's own loading state", async () => {
+    const page = await mountHeld(BOT_PAYLOAD);
+    try {
+      expect(page.text()).toContain("Team bot");
+      expect(page.text()).toContain(t("en", "botDetail.usage.source"));
+      expect(page.modelsCalls()).toBe(1);
+      // The only thing pending is the chain editor's option list.
+      expect(page.text()).toContain(t("en", "settings.modelChains"));
+    } finally {
+      await page.close();
+    }
+  });
+});

@@ -1193,9 +1193,9 @@ describe("review gate verdict mirror", () => {
 
 describe("R2 — the usable-bot parser accepts the producer's own payload", () => {
   /**
-   * The EXACT shape `usableBotsRead` (`src/dashboard/index.ts:2277-2288`) has
-   * always sent — no `monthly_rp` on a usable bot, because that row's ceiling
-   * comes from the plan, not from the bot. A nonempty list must parse.
+   * The EXACT shape `usableBotsRead` (`src/dashboard/index.ts`) sends — no
+   * `monthly_rp` on a usable bot (that column is the owner's stored default),
+   * only the viewer's `effective_ceiling`. A nonempty list must parse.
    */
   const PRODUCER_PAYLOAD = {
     workspace_id: "ws_0123456789abcdefghijkl",
@@ -1212,6 +1212,7 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
         scope: "owned",
         multiplier: 1,
         month_used_rp: 40,
+        effective_ceiling: null,
         archived: false,
       },
       {
@@ -1225,6 +1226,7 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
         scope: "shared",
         multiplier: 1.5,
         month_used_rp: 1240,
+        effective_ceiling: 20000,
         archived: false,
       },
     ],
@@ -1255,6 +1257,19 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
     for (const bogus of ["false", 0, null, undefined]) {
       expect(
         parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [{ ...first!, archived: bogus }] }),
+        String(bogus),
+      ).toBeNull();
+    }
+  });
+
+  // The row's ceiling is a served RP amount: it must sit in the same domain the
+  // writer accepts, and an ABSENT one is a payload the producer never sends.
+  test("the row's effective ceiling must be a real ceiling or explicit null", () => {
+    const [first] = PRODUCER_PAYLOAD.bots;
+    expect(parseUsableBots(PRODUCER_PAYLOAD)?.bots[1]?.effective_ceiling).toBe(20000);
+    for (const bogus of [0, -1, 1.5, "3000", undefined, Number.MAX_SAFE_INTEGER + 2]) {
+      expect(
+        parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [{ ...first!, effective_ceiling: bogus }] }),
         String(bogus),
       ).toBeNull();
     }

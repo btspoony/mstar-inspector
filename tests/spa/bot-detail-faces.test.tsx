@@ -502,3 +502,50 @@ describe("a confirmed restore whose re-read fails", () => {
     }
   });
 });
+
+/**
+ * QC F3-2: the ceiling semantics follow OWNERSHIP, not management rights. A
+ * plain member of the bot's own workspace still reads own-bot unlimited, even
+ * when a stored ceiling exists for that workspace; `can_manage` only decides
+ * which controls render.
+ */
+describe("ceiling semantics follow ownership, not manage permission", () => {
+  test("an owning-workspace member reads own-bot unlimited against a stored ceiling", async () => {
+    const memberPayload = botPayload({
+      can_manage: false,
+      owned: true,
+      official_workspace: undefined,
+      overview: {
+        provider_workspace: "Acme",
+        month_used_rp: 1240,
+        plan_monthly_rp: 100000,
+        // A ceiling the relay would enforce on a CONSUMER; the owner is not.
+        effective_ceiling: 3000,
+        default_chain: "anthropic/claude",
+        mounted_apps: [],
+      },
+    });
+    const face = await mountBot(memberPayload);
+    try {
+      const text = face.text();
+      expect(text).toContain(t("en", "credits.unlimitedOwn", { used: "1.24" }));
+      // Neither the finite ceiling nor the unknown marker may appear.
+      expect(text).not.toContain("3.00 Credits / 3.00 Credits");
+      expect(text).not.toContain(t("en", "bots.monthUnknown"));
+      // Still the read-only face: the ceiling fact does not hand out controls.
+      expect(face.container.querySelector('[role="tablist"]')).toBeNull();
+      expect(text).toContain(t("en", "botDetail.consumer.readOnlyNotice"));
+    } finally {
+      await face.close();
+    }
+  });
+
+  test("the same stored ceiling reads finite for a real consumer", async () => {
+    const face = await mountBot(CONSUMER);
+    try {
+      expect(face.text()).toContain("0.09 Credits / 3.00 Credits");
+    } finally {
+      await face.close();
+    }
+  });
+});

@@ -223,6 +223,9 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   // (default-omitted) spelling. A known tab is the reader's choice — kept.
   useEffect(() => {
     if (defaultTab === null) return;
+    // A legacy `?tab=bots` address is the bot directory's, not this page's:
+    // correcting it here would strip the spelling the redirect reads.
+    if (legacyBotsTabRedirect(window.location.pathname, window.location.search) !== null) return;
     const raw = new URLSearchParams(window.location.search).get("tab");
     if (raw !== null && APP_TABS.includes(raw as AppsTab)) {
       setTab(raw as AppsTab);
@@ -240,6 +243,15 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
 
   useEffect(() => {
     const onPop = () => {
+      // A history entry carrying the legacy `?tab=bots` spelling goes to the
+      // bot directory from the HANDLER, not from render: the parsed tab need
+      // not change (it can equal the current one), so a state-driven effect
+      // would never run and the retired list would render under it.
+      const legacy = legacyBotsTabRedirect(window.location.pathname, window.location.search);
+      if (legacy !== null) {
+        window.location.replace(legacy);
+        return;
+      }
       if (defaultTab === null) return;
       setTab(appsTabOf(window.location.search, defaultTab === "installed"));
     };

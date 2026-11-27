@@ -62,8 +62,9 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   // F14: a models failure is its OWN state. The page still renders; the owner
-  // config tab shows the error and a retry, and retry re-reads both sources.
+  // config tab shows the error and a retry.
   const [modelsError, setModelsError] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
   // A confirmed archive/restore whose follow-up read failed: the write stands,
   // so the face locks to the state it established instead of offering the
   // stale configuration the payload still describes.
@@ -72,18 +73,49 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   const sequenceRef = useRef(0);
   const base = apiBase();
 
+  /**
+   * The options read — the ONLY place `/api/models` is fetched. It is the owner
+   * editor's own source: a failed read keeps the error face with its retry, a
+   * body that does not parse is a failure too (never an empty catalog), and a
+   * successful one swaps the groups in place. It never touches the bot payload,
+   * so it cannot reset the page state or the editor.
+   */
+  const loadModels = async (): Promise<void> => {
+    // The page load that asked owns the answer: a workspace switch bumps the
+    // sequence, so a slower read from the previous page cannot land in it.
+    const sequence = sequenceRef.current;
+    setModelsLoading(true);
+    const settle = (failed: boolean, next: ModelOptionGroup[]): void => {
+      if (sequence !== sequenceRef.current) return;
+      setModelsError(failed);
+      setGroups(next);
+      setModelsLoading(false);
+    };
+    try {
+      const models = parseModels(await fetchJson(`${base}/api/models`));
+      // A body that does not parse is a failure too — never an empty catalog.
+      if (models === null) {
+        settle(true, []);
+        return;
+      }
+      settle(false, models.groups);
+    } catch {
+      settle(true, []);
+    }
+  };
+
   const load = async (): Promise<boolean> => {
     const sequence = ++sequenceRef.current;
     setModelsError(false);
-    // The two reads fail INDEPENDENTLY: a models failure must not take the bot
-    // payload down with it, and must not be flattened into "no models".
-    const [botRead, modelsRead] = await Promise.allSettled([
-      fetchJson(`${base}/api/review-bots/${encodeURIComponent(botId)}/bot`),
-      fetchJson(`${base}/api/models`),
-    ]);
+    // The bot payload is the page: it settles and renders on its own, so a
+    // consumer never waits for options it does not render, and a slow or hung
+    // `/api/models` cannot hold the overview back.
+    const botRead = await fetchJson(`${base}/api/review-bots/${encodeURIComponent(botId)}/bot`).then(
+      (value) => ({ ok: true as const, value }),
+      () => ({ ok: false as const }),
+    );
     if (sequence !== sequenceRef.current) return false;
-
-    if (botRead.status === "rejected") {
+    if (!botRead.ok) {
       setState("error");
       return false;
     }
@@ -94,42 +126,19 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
     }
     setPayload(parsed);
     setStaleArchiveState(null);
-    if (modelsRead.status === "rejected") {
-      setModelsError(true);
-      setGroups([]);
-    } else {
-      const models = parseModels(modelsRead.value);
-      // A body that does not parse is a failure too — never an empty catalog.
-      setModelsError(models === null);
-      setGroups(models?.groups ?? []);
-    }
     setState("ok");
+    // Options are the OWNER EDITOR's own read: only the editable owner face
+    // renders them, so no other viewer issues the request at all.
+    if (parsed.owned === true && parsed.can_manage) void loadModels();
     return true;
   };
 
   /**
-   * The options retry: `/api/models` ONLY. It must never re-enter the page
-   * load — that would discard unsaved identity/pricing drafts, re-render the
-   * chain rows and reset the editor, and delay a consumer overview behind a
-   * read it does not need. A failed retry keeps the error face; a successful
-   * one swaps the groups in place.
+   * The options retry is the same read: it must never re-enter the page load —
+   * that would discard unsaved identity/pricing drafts, re-render the chain
+   * rows and reset the editor.
    */
-  const retryModels = async (): Promise<void> => {
-    try {
-      const models = parseModels(await fetchJson(`${base}/api/models`));
-      // A body that does not parse is a failure too — never an empty catalog.
-      if (models === null) {
-        setModelsError(true);
-        setGroups([]);
-        return;
-      }
-      setModelsError(false);
-      setGroups(models.groups);
-    } catch {
-      setModelsError(true);
-      setGroups([]);
-    }
-  };
+  const retryModels = loadModels;
 
   /**
    * The editor's own re-read. It fetches ONLY the bot payload (the section the
@@ -211,12 +220,14 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
     : [];
 
   // One ceiling semantics everywhere (F3/13): a consumer's metric states the
-  // enforced ceiling as `已用 / 上限`; the owner is never metered against one.
+  // enforced ceiling as `已用 / 上限`; the OWNER of the bot — whoever in that
+  // workspace is reading — is never metered against one. Ownership decides
+  // this; `can_manage` only decides which controls exist.
   const monthValue = usageCeilingCell(
     locale,
     overview ? { used_rp: overview.month_used_rp } : null,
     {
-      owned: isOwner,
+      owned,
       quotaError: payload.quota_error === true,
       ceilingRp: overview?.effective_ceiling ?? null,
       rpPerCredit,
@@ -256,7 +267,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
 
   const readOnlySections = (
     <>
-      <BotUsageSection locale={locale} payload={payload} owner={isOwner} rpPerCredit={rpPerCredit} />
+      <BotUsageSection locale={locale} payload={payload} owned={owned} rpPerCredit={rpPerCredit} />
       <BotCapabilitySection locale={locale} payload={payload} defaultChain={defaultChain} namedChains={namedChains} />
       <BotMountsSection locale={locale} overview={overview} />
     </>
@@ -324,7 +335,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
               locale={locale}
               payload={payload}
               groups={groups}
-              modelsLoading={false}
+              modelsLoading={modelsLoading}
               notice={null}
               onReload={reloadSection}
             />
@@ -347,12 +358,13 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
 function BotUsageSection({
   locale,
   payload,
-  owner,
+  owned,
   rpPerCredit,
 }: {
   locale: SpaBoot["locale"];
   payload: BotSettingsPayload;
-  owner: boolean;
+  /** Whose bot it is — the fact that decides "own bot → unlimited". */
+  owned: boolean;
   rpPerCredit?: number;
 }) {
   const overview = payload.overview;
@@ -364,7 +376,7 @@ function BotUsageSection({
   // the ceiling the relay enforces on THIS workspace (its override else the
   // bot default). An unresolvable ceiling is an error state (F10), never "no
   // ceiling".
-  const capValue = owner
+  const capValue = owned
     ? none
     : quotaError
       ? t(locale, "bots.monthUnknown")
@@ -372,7 +384,7 @@ function BotUsageSection({
         ? none
         : formatCredits(cap, rpPerCredit);
   const remainingValue =
-    !owner && !quotaError && cap !== null ? formatCredits(Math.max(0, cap - used), rpPerCredit) : none;
+    !owned && !quotaError && cap !== null ? formatCredits(Math.max(0, cap - used), rpPerCredit) : none;
   return (
     <FlowSection title={t(locale, "botDetail.usage.title")} subtitle={t(locale, "botDetail.usage.utcHint")}>
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
