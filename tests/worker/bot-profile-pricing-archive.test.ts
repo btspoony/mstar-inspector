@@ -3,6 +3,7 @@ import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { setBotArchived, updateBotPricing, updateBotProfile } from "../../src/dashboard/apps-store";
 
 const SESSION_SECRET = ["test", "bot", "face", "writes", "secret", "32-bytes!"].join("-");
@@ -264,7 +265,7 @@ describe("PATCH /api/review-bots/:botId/pricing", () => {
     expect(stored(HOME_BOT_ROW).multiplier).toBe(1);
   });
 
-  test("multiplier 0 or a negative/absent one is 400 with zero writes", async () => {
+  test("a multiplier of 0, negative or non-numeric is 400, and so is an empty body", async () => {
     world();
     db.raw.prepare("UPDATE review_bots SET multiplier = 1, monthly_rp = NULL WHERE id = ?").run(HOME_BOT_ROW);
 
@@ -273,6 +274,20 @@ describe("PATCH /api/review-bots/:botId/pricing", () => {
       expect(res.status, JSON.stringify(body)).toBe(400);
     }
     expect(stored(HOME_BOT_ROW).multiplier).toBe(1);
+  });
+
+  test("a ceiling-only save omits the multiplier, which stays untouched", async () => {
+    world();
+    // The page omits `multiplier` while unshared; the ceiling must still save.
+    db.raw.prepare("UPDATE review_bots SET multiplier = 3.5, monthly_rp = NULL WHERE id = ?").run(HOME_BOT_ROW);
+
+    const res = await patch(OFFICIAL, HOME_BOT_ROW, "pricing", "dana", { monthly_rp: 250000 });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    const row = stored(HOME_BOT_ROW);
+    expect(row.multiplier).toBe(3.5);
+    expect(row.monthly_rp).toBe(250000);
   });
 
   test("a zero, negative or fractional monthly_rp is 400 with zero writes", async () => {
@@ -377,6 +392,122 @@ describe("PATCH /api/review-bots/:botId/archive", () => {
     const seen = (await (await getBot(OTHER, HOME_BOT_ROW, "erin")).json()) as { archived: boolean; can_manage: boolean };
     expect(seen.archived).toBe(true);
     expect(seen.can_manage).toBe(false);
+  });
+});
+
+/**
+ * The owner machinery is manager-only. A plain member of the OWNNING workspace
+ * reads the consumer face, so their payload must not carry the owner's keys,
+ * seats, named chains, custom providers or ceiling exceptions — and the share
+ * switch's official-workspace fact exists only for a manager.
+ */
+describe("GET /bot narrows the owner machinery to managers", () => {
+  async function seedOwnerMachinery(): Promise<void> {
+    const store = createAppConfigStore(db, TEST_ENCRYPTION_KEY);
+    const authority = { botId: HOME_BOT_ROW, workspaceId: OFFICIAL, role: "owner" as const };
+    await store.addProviderKey(authority, HOME_BOT_ROW, "anthropic", "sk-ant-fixture-key");
+    await store.upsertModelChain(authority, HOME_BOT_ROW, "named", "anthropic/claude");
+    await store.setModelChainSeat(authority, HOME_BOT_ROW, "code-reviewer", "named");
+    await store.upsertCustomProvider(
+      authority,
+      HOME_BOT_ROW,
+      {
+        provider_id: "acme-llm",
+        base_url: "https://llm.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["acme-7b"],
+      },
+      "sk-custom-fixture-key",
+    );
+    db.raw
+      .prepare(
+        `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+         VALUES (?, ?, 1200, '2026-01-06T00:00:00.000Z')`,
+      )
+      .run(HOME_BOT_ROW, OTHER);
+  }
+
+  type BotFace = {
+    can_manage: boolean;
+    official_workspace?: boolean;
+    rp_per_credit?: number;
+    quota_overrides?: Array<{ workspaceId: string }>;
+    keys: unknown[];
+    model_roles: Record<string, string>;
+    model_chains: Array<{ name: string }>;
+    custom_providers: unknown[];
+    configured_providers: unknown[];
+    overview: { effective_ceiling: number | null; plan_monthly_rp: number | null };
+  };
+
+  test("a plain member of the owning workspace receives no owner machinery", async () => {
+    world();
+    await seedOwnerMachinery();
+
+    const member = (await (await getBot(OFFICIAL, HOME_BOT_ROW, "mallory")).json()) as BotFace;
+    expect(member.can_manage).toBe(false);
+    expect(member.keys).toEqual([]);
+    expect(member.model_roles).toEqual({});
+    expect(member.model_chains).toEqual([]);
+    expect(member.custom_providers).toEqual([]);
+    expect(member.configured_providers).toEqual([]);
+    // The switch's fact and the exception list are manager answers only.
+    expect("official_workspace" in member).toBe(false);
+    expect("quota_overrides" in member).toBe(false);
+  });
+
+  test("the manager of the owning workspace still reads all of it", async () => {
+    world();
+    await seedOwnerMachinery();
+
+    const owner = (await (await getBot(OFFICIAL, HOME_BOT_ROW, "dana")).json()) as BotFace;
+    expect(owner.can_manage).toBe(true);
+    expect(owner.official_workspace).toBe(true);
+    expect(owner.keys).toHaveLength(2); // the provider key plus the custom-provider key
+    expect(owner.model_roles).toEqual({ "code-reviewer": "named" });
+    expect(owner.model_chains.map((row) => row.name)).toContain("named");
+    expect(owner.custom_providers).toHaveLength(1);
+    expect(owner.quota_overrides?.map((row) => row.workspaceId)).toEqual([OTHER]);
+  });
+
+  test("the served rate and the enforced ceiling reach owner and consumer alike", async () => {
+    world();
+    await seedOwnerMachinery();
+    db.raw.prepare("UPDATE review_bots SET monthly_rp = 3000 WHERE id = ?").run(HOME_BOT_ROW);
+
+    const owner = (await (await getBot(OFFICIAL, HOME_BOT_ROW, "dana")).json()) as BotFace;
+    expect(typeof owner.rp_per_credit).toBe("number");
+    // The owner's own workspace has no override: the bot default applies.
+    expect(owner.overview.effective_ceiling).toBe(3000);
+
+    const consumer = (await (await getBot(OTHER, HOME_BOT_ROW, "erin")).json()) as BotFace;
+    expect(typeof consumer.rp_per_credit).toBe("number");
+    // The consumer's negotiated 1,200 RP override wins over the 3,000 default,
+    // and no plan ceiling is confused with it.
+    expect(consumer.overview.effective_ceiling).toBe(1200);
+    expect("quota_overrides" in consumer).toBe(false);
+    // A consumer has no share switch to reach, so the fact is not served.
+    expect("official_workspace" in consumer).toBe(false);
+
+    // The switch itself still answers for an owner outside the official
+    // workspace: the fact is served, and it is false.
+    const otherOwner = (await (await getBot(OTHER, OTHER_BOT_ROW, "erin")).json()) as BotFace;
+    expect(otherOwner.can_manage).toBe(true);
+    expect(otherOwner.official_workspace).toBe(false);
+  });
+
+  test("an empty quota_profiles table omits the rate instead of failing the read", async () => {
+    world();
+    db.raw.run(
+      `DELETE FROM workspace_quota_binding;
+       DELETE FROM quota_profile_plans;
+       DELETE FROM quota_profiles;`,
+    );
+
+    const res = await getBot(OFFICIAL, HOME_BOT_ROW, "dana");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect("rp_per_credit" in body).toBe(false);
   });
 });
 

@@ -865,6 +865,9 @@ export type BotSettingsAppMeta = {
   description?: string | null;
   shared_at?: string | null;
   multiplier?: number | null;
+  /** The bot's own ceiling (RP); `null` = none of its own. Owner-only on the
+   * settings face, served on the bot face. */
+  monthly_rp?: number | null;
   status: string | null;
   scope: BotScope;
   /** BOT configuration: the bot payload always carries it; the App face
@@ -913,14 +916,20 @@ export type BotConfigSections = {
  * the workspace that OWNS the bot" — a consuming workspace gets these sections
  * read-only, and the bot's scope never enters the answer.
  */
-/** The bot detail page's overview block (D23): the provider, the caller's
- * month, the consuming workspace's plan ceiling, and the mounts — the
- * editable sections stay out of this shape so the read-only region proves
- * nothing the API did not serve. */
+/**
+ * The bot detail page's overview block (D23): the provider, the caller's
+ * month, the plan ceiling, the ceiling this bot actually enforces on the
+ * caller's workspace, and the mounts — the editable sections stay out of this
+ * shape so the read-only region proves nothing the API did not serve.
+ */
 export type BotOverview = {
   provider_workspace: string;
   month_used_rp: number;
+  /** The workspace's plan allowance; a separate limit from the bot's own. */
   plan_monthly_rp: number | null;
+  /** The ceiling the relay enforces here: this workspace's override else the
+   * bot's default. `null` = no bot-level ceiling. */
+  effective_ceiling: number | null;
   default_chain: string | null;
   mounted_apps: Array<{ id: string; github_app_id: number; name: string }>;
   mounted_bot_ids?: string[];
@@ -931,6 +940,13 @@ function parseBotOverview(value: unknown): BotOverview | null {
   if (typeof value.provider_workspace !== "string") return null;
   if (typeof value.month_used_rp !== "number") return null;
   if (value.plan_monthly_rp !== null && typeof value.plan_monthly_rp !== "number") return null;
+  if (
+    value.effective_ceiling !== undefined &&
+    value.effective_ceiling !== null &&
+    typeof value.effective_ceiling !== "number"
+  ) {
+    return null;
+  }
   if (value.default_chain !== null && typeof value.default_chain !== "string") return null;
   if (!Array.isArray(value.mounted_apps)) return null;
   for (const row of value.mounted_apps) {
@@ -948,6 +964,7 @@ function parseBotOverview(value: unknown): BotOverview | null {
     provider_workspace: value.provider_workspace,
     month_used_rp: value.month_used_rp,
     plan_monthly_rp: value.plan_monthly_rp,
+    effective_ceiling: value.effective_ceiling ?? null,
     default_chain: value.default_chain,
     mounted_apps: value.mounted_apps.map((row) => ({
       id: row.id,
@@ -972,6 +989,9 @@ export type BotSettingsPayload = {
   /** Whose bot it is — independent of `scope` (publication) and `can_manage`. */
   owned?: boolean;
   official_workspace?: boolean;
+  /** The operator profile's credit rate; ABSENT when that profile is
+   * unreadable, so readers use the ADR 1,000 RP fallback. */
+  rp_per_credit?: number;
   overview?: BotOverview;
 } & BotConfigSections;
 

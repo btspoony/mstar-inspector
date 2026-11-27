@@ -69,6 +69,10 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   // config tab shows the error and a retry, and retry re-reads both sources.
   const [modelsError, setModelsError] = useState(false);
   const [modelsRetry, setModelsRetry] = useState(0);
+  // A confirmed archive/restore whose follow-up read failed: the write stands,
+  // so the face locks to the state it established instead of offering the
+  // stale configuration the payload still describes.
+  const [staleArchiveState, setStaleArchiveState] = useState<boolean | null>(null);
 
   const sequenceRef = useRef(0);
   const base = apiBase();
@@ -94,6 +98,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
       return false;
     }
     setPayload(parsed);
+    setStaleArchiveState(null);
     if (modelsRead.status === "rejected") {
       setModelsError(true);
       setGroups([]);
@@ -127,6 +132,17 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
     }
   };
 
+  /**
+   * A confirmed archive/restore followed by its re-read. The write stands even
+   * when the read fails, so the face locks to the state the write established
+   * and the page says the stored state could not be re-read — never leaves the
+   * old actionable configuration on screen.
+   */
+  const archiveSettled = async (next: boolean): Promise<void> => {
+    setStaleArchiveState(next);
+    if (await reloadSection()) setStaleArchiveState(null);
+  };
+
   // F15: keyed on BOTH the workspace base and the bot id — switching workspace
   // while keeping the bot id must reload, not retain the prior workspace's
   // provider, spend or permissions.
@@ -150,12 +166,12 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   // manage rights on that workspace. A plain member of the owning workspace
   // reads the consumer face.
   const isOwner = owned && payload.can_manage;
-  const archived = payload.archived === true;
+  // A confirmed write wins over the stale payload it could not re-read.
+  const archived = staleArchiveState ?? payload.archived === true;
   const shared = app.scope === "shared";
   // Served by the route only when the operator profile is readable; absent ⇒
-  // formatCredits' ADR fallback. The parser passes unknown fields through, so
-  // the rate is narrowed here rather than asserted.
-  const rawRate = "rp_per_credit" in payload ? payload.rp_per_credit : undefined;
+  // formatCredits' ADR fallback.
+  const rawRate = payload.rp_per_credit;
   const rpPerCredit =
     typeof rawRate === "number" && Number.isFinite(rawRate) && rawRate > 0 ? rawRate : undefined;
   // F4: the capability summary reads the NON-OWNER overview read, so a shared
@@ -172,7 +188,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
       ? t(locale, "bots.monthUnknown")
       : isOwner
         ? t(locale, "credits.unlimitedOwn", { used: creditAmount(overview.month_used_rp, rpPerCredit) })
-        : overview.plan_monthly_rp === null
+        : overview.effective_ceiling === null
           ? t(locale, "credits.noCeiling", { used: creditAmount(overview.month_used_rp, rpPerCredit) })
           : formatCredits(overview.month_used_rp, rpPerCredit);
   const metrics: Metric[] = [
@@ -228,7 +244,14 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   return (
     <div className="flex flex-col gap-6">
       {header}
-      {archived ? <ArchivedOwnerBanner locale={locale} botId={app.id} onReload={reloadSection} /> : null}
+      {archived ? (
+        <ArchivedOwnerBanner
+          locale={locale}
+          botId={app.id}
+          onSettled={archiveSettled}
+          stale={staleArchiveState !== null}
+        />
+      ) : null}
       <Tabs defaultValue="overview">
         <TabsList>
           <TabsTrigger value="overview">{t(locale, "botDetail.tab.overview")}</TabsTrigger>
@@ -271,7 +294,14 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
               onReload={reloadSection}
             />
           </fieldset>
-          {archived ? null : <BotArchiveSection locale={locale} botId={app.id} onReload={reloadSection} />}
+          {archived ? null : (
+            <BotArchiveSection
+              locale={locale}
+              botId={app.id}
+              onSettled={archiveSettled}
+              stale={staleArchiveState !== null}
+            />
+          )}
         </TabsContent>
       </Tabs>
     </div>
@@ -292,12 +322,13 @@ function BotUsageSection({
 }) {
   const overview = payload.overview;
   const used = overview?.month_used_rp ?? 0;
-  const cap = overview?.plan_monthly_rp ?? null;
+  const cap = overview?.effective_ceiling ?? null;
   const quotaError = payload.quota_error === true;
   const none = t(locale, "bots.monthNone");
-  // The owner's own bot has no enforced ceiling; a consumer reads the ceiling
-  // the store enforces on THIS workspace. An unresolvable ceiling is an error
-  // state (F10), never "no ceiling".
+  // The owner's own bot has no enforced ceiling on this face; a consumer reads
+  // the ceiling the relay enforces on THIS workspace (its override else the
+  // bot default). An unresolvable ceiling is an error state (F10), never "no
+  // ceiling".
   const capValue = owner
     ? none
     : quotaError
@@ -450,7 +481,7 @@ function BotProfileEditor({
         </label>
         <div className="flex items-center gap-3">
           <Button type="button" disabled={busy || name.trim().length === 0} onClick={() => void save()}>
-            {t(locale, "admin.workspaces.officialSave")}
+            {t(locale, "common.save")}
           </Button>
           <NoticeRegion notice={notice} />
         </div>
@@ -463,11 +494,13 @@ function BotProfileEditor({
 function BotArchiveSection({
   locale,
   botId,
-  onReload,
+  onSettled,
+  stale,
 }: {
   locale: SpaBoot["locale"];
   botId: string;
-  onReload: () => Promise<boolean>;
+  onSettled: (next: boolean) => Promise<void>;
+  stale: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -484,7 +517,7 @@ function BotArchiveSection({
         return;
       }
       setOpen(false);
-      await onReload();
+      await onSettled(true);
     } catch {
       setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
     } finally {
@@ -501,6 +534,7 @@ function BotArchiveSection({
           </Button>
           <NoticeRegion notice={notice} />
         </div>
+        {stale ? <PageNotice kind="warn" message={t(locale, "botDetail.archive.staleAfterArchive")} /> : null}
       </FlowSection>
       <Dialog
         open={open}
@@ -533,11 +567,13 @@ function BotArchiveSection({
 function ArchivedOwnerBanner({
   locale,
   botId,
-  onReload,
+  onSettled,
+  stale,
 }: {
   locale: SpaBoot["locale"];
   botId: string;
-  onReload: () => Promise<boolean>;
+  onSettled: (next: boolean) => Promise<void>;
+  stale: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
@@ -552,7 +588,7 @@ function ArchivedOwnerBanner({
         setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
         return;
       }
-      await onReload();
+      await onSettled(false);
     } catch {
       setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
     } finally {
@@ -561,14 +597,17 @@ function ArchivedOwnerBanner({
   }
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <PageNotice kind="warn" message={t(locale, "botDetail.archive.ownerBanner")} />
-        <NoticeRegion notice={notice} />
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <PageNotice kind="warn" message={t(locale, "botDetail.archive.ownerBanner")} />
+          <NoticeRegion notice={notice} />
+        </div>
+        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void restore()}>
+          {t(locale, "botDetail.archive.restore")}
+        </Button>
       </div>
-      <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void restore()}>
-        {t(locale, "botDetail.archive.restore")}
-      </Button>
+      {stale ? <PageNotice kind="warn" message={t(locale, "botDetail.archive.staleAfterArchive")} /> : null}
     </div>
   );
 }

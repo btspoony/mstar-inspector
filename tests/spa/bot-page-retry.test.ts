@@ -57,6 +57,7 @@ const BOT_PAYLOAD = {
     provider_workspace: "Acme",
     month_used_rp: 0,
     plan_monthly_rp: null,
+    effective_ceiling: null,
     default_chain: null,
     mounted_apps: [],
   },

@@ -81,16 +81,16 @@ export function BotPricingSection({
   // `review_bots.id`, never the numeric App id space.
   const botApiPath = `${apiBase()}/api/review-bots/${encodeURIComponent(app.id)}`;
   const shared = app.scope === "shared";
-  // The route serves these columns without declaring them on the shared meta
-  // type; narrow rather than assert. Absent rate ⇒ the ADR fallback.
-  const rawRate = "rp_per_credit" in payload ? payload.rp_per_credit : undefined;
+  // Absent when the operator profile is unreadable ⇒ formatCredits' ADR
+  // fallback (1 Credit = 1,000 RP).
+  const rawRate = payload.rp_per_credit;
   const rpPerCredit =
     typeof rawRate === "number" && Number.isFinite(rawRate) && rawRate > 0 ? rawRate : undefined;
   const rate = rpPerCredit ?? 1000;
-  const rawMonthly = "monthly_rp" in app ? app.monthly_rp : undefined;
-  const monthlyRp = typeof rawMonthly === "number" && Number.isSafeInteger(rawMonthly) && rawMonthly > 0
-    ? rawMonthly
-    : null;
+  const monthlyRp =
+    typeof app.monthly_rp === "number" && Number.isSafeInteger(app.monthly_rp) && app.monthly_rp > 0
+      ? app.monthly_rp
+      : null;
 
   const [multiplier, setMultiplier] = useState(String(app.multiplier ?? 1));
   const [cap, setCap] = useState(monthlyRp === null ? "" : String(monthlyRp / rate));
@@ -139,7 +139,7 @@ export function BotPricingSection({
     if (shared) {
       nextMultiplier = Number(multiplier);
       if (!Number.isFinite(nextMultiplier) || nextMultiplier <= 0) {
-        setNotice({ kind: "error", message: t(locale, "bots.overrideInvalid") });
+        setNotice({ kind: "error", message: t(locale, "botDetail.share.multiplierInvalid") });
         return;
       }
     }
@@ -230,7 +230,7 @@ export function BotPricingSection({
           )}
           <div className="flex items-center gap-3">
             <Button type="button" disabled={busy} onClick={() => void savePricing()}>
-              {t(locale, "admin.workspaces.officialSave")}
+              {t(locale, "common.save")}
             </Button>
             <NoticeRegion notice={notice} />
           </div>

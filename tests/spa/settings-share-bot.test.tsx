@@ -124,6 +124,17 @@ async function mount(overrides: Partial<BotSettingsPayload> = {}, status = 200, 
   };
 }
 
+type FixtureWindow = ReturnType<typeof installDom>["win"];
+
+/** Set a controlled input's value inside `act`, so React flushes the change. */
+async function typeInto(win: FixtureWindow, input: Element | null, value: string): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+  await act(async () => {
+    setter?.call(input, value);
+    input?.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+  });
+}
+
 describe("the bot page's share switch", () => {
   test("sharing confirms first, then PATCHes the shared scope and reloads", async () => {
     const view = await mount();
@@ -203,6 +214,55 @@ describe("the bot page's share switch", () => {
       expect(view.reloads).toEqual([]);
       expect(view.container.textContent).toContain(t(locale, "botSettings.shareOutsideOfficial"));
       expect(view.container.textContent).not.toContain(t(locale, "botSettings.shareSaved"));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("an unshared save sends the ceiling alone — the inert multiplier is omitted", async () => {
+    const view = await mount();
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, capInput, "12");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { monthly_rp: 12000 } }]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("the ceiling converts at the served rate, not a guessed 1,000", async () => {
+    const view = await mount({ rp_per_credit: 500 });
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, capInput, "3");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing.at(0)?.body).toEqual({ monthly_rp: 1500 });
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a bad multiplier names the multiplier, not the ceiling integer", async () => {
+    const view = await mount({ app: { ...payload().app, scope: "shared", multiplier: 2 } });
+    try {
+      const input = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.multiplier")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, input, "0");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      const rendered = String(view.container.textContent);
+      expect(rendered).toContain(t(locale, "botDetail.share.multiplierInvalid"));
+      expect(rendered).not.toContain(t(locale, "bots.overrideInvalid"));
     } finally {
       await view.cleanup();
     }

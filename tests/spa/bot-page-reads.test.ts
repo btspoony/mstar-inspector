@@ -44,6 +44,7 @@ const botPayload = {
     provider_workspace: "Acme",
     month_used_rp: 0,
     plan_monthly_rp: null,
+    effective_ceiling: null,
     default_chain: "anthropic/claude",
     mounted_apps: [],
   },

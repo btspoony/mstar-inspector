@@ -59,6 +59,7 @@ function botPayload(overrides: Record<string, unknown> = {}): Record<string, unk
       provider_workspace: "Acme",
       month_used_rp: 1240,
       plan_monthly_rp: null,
+      effective_ceiling: null,
       default_chain: "anthropic/claude",
       mounted_apps: [{ id: "app-1", github_app_id: 4803300, name: "Wood's Inspector" }],
     },
@@ -75,6 +76,8 @@ const CONSUMER = botPayload({
     provider_workspace: "platform",
     month_used_rp: 90,
     plan_monthly_rp: 5000,
+    // The bot's own ceiling binds this workspace: it wins over the plan.
+    effective_ceiling: 3000,
     default_chain: "anthropic/claude",
     mounted_apps: [{ id: "app-1", github_app_id: 4803300, name: "Wood's Inspector" }],
   },
@@ -184,6 +187,23 @@ describe("the owner face", () => {
 });
 
 describe("the consumer face", () => {
+  test("a member of the owning workspace gets the same read-only face, no machinery", async () => {
+    // The route's member answer: owned but not manageable, and no
+    // `official_workspace` fact (the switch is a manager surface).
+    const face = await mountBot({
+      ...botPayload({ can_manage: false, model_chains: [] }),
+      official_workspace: undefined,
+    });
+    try {
+      expect(face.container.querySelector('[role="tablist"]')).toBeNull();
+      expect(face.container.querySelector(`input[aria-label="${t("en", "botDetail.share.multiplier")}"]`)).toBeNull();
+      expect(face.text()).not.toContain(t("en", "botDetail.share.switch"));
+      expect(face.text()).toContain(t("en", "botDetail.consumer.readOnlyNotice"));
+    } finally {
+      await face.close();
+    }
+  });
+
   test("has no tab bar and none of the owner's machinery — absence, not disabled", async () => {
     const face = await mountBot(CONSUMER);
     try {
@@ -223,13 +243,27 @@ describe("the consumer face", () => {
     const face = await mountBot(CONSUMER);
     try {
       const text = face.text();
-      // 90 RP at the 1,000 fallback rate, 5,000 RP ceiling — both in Credits.
+      // 90 RP at the 1,000 fallback rate, and the BOT's 3,000 RP ceiling — not
+      // the 5,000 RP plan allowance, which is a separate limit.
       expect(text).toContain("0.09 Credits");
-      expect(text).toContain("5.00 Credits");
+      expect(text).toContain("3.00 Credits");
+      expect(text).toContain("2.91 Credits");
+      expect(text).not.toContain("5.00 Credits");
       expect(text).toContain("×4");
       // The billing source names the providing workspace.
       expect(text).toContain(t("en", "botDetail.usage.source"));
       expect(text).toContain("platform");
+    } finally {
+      await face.close();
+    }
+  });
+
+  test("the served credit rate converts the consumer's spend and ceiling", async () => {
+    const face = await mountBot({ ...CONSUMER, rp_per_credit: 500 });
+    try {
+      const text = face.text();
+      expect(text).toContain("0.18 Credits");
+      expect(text).toContain("6.00 Credits");
     } finally {
       await face.close();
     }
@@ -273,6 +307,91 @@ describe("the archived faces", () => {
       expect(text).not.toContain(t("en", "botDetail.archive.open"));
     } finally {
       await face.close();
+    }
+  });
+});
+
+describe("a confirmed archive whose re-read fails", () => {
+  test("the confirmation names the selection consequence in both locales", () => {
+    for (const locale of ["en", "zh_CN"] as const) {
+      const hint = t(locale, "botDetail.archive.dangerHint");
+      expect(hint).toMatch(locale === "en" ? /selected/i : /选中/);
+      // The other consequences stay named: the archived badge and restore.
+      expect(hint).toMatch(locale === "en" ? /archived/i : /已归档/);
+      expect(hint).toMatch(locale === "en" ? /restore/i : /恢复/);
+    }
+  });
+
+  test("both save buttons render the generic save label", async () => {
+    const face = await mountBot(
+      botPayload({ app: { ...(botPayload().app as Record<string, unknown>), scope: "shared", multiplier: 2 } }),
+    );
+    try {
+      const labels = [...face.container.querySelectorAll("button")].map((button) => button.textContent);
+      // 基本信息 and 共享与定价 each carry their own save, spelled by the
+      // generic key in both dictionaries.
+      expect(labels.filter((label) => label === t("en", "common.save"))).toHaveLength(2);
+      expect(t("zh_CN", "common.save").length).toBeGreaterThan(0);
+    } finally {
+      await face.close();
+    }
+  });
+  test("locks the face to the archived state instead of leaving the old config editable", async () => {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
+    const realFetch = globalThis.fetch;
+    let archivedWritten = false;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/review-bots/bot-1/bot")) {
+        // The archive landed; the follow-up read of it does not.
+        return archivedWritten
+          ? new Response("unavailable", { status: 503 })
+          : Response.json(botPayload());
+      }
+      if (url.endsWith("/api/review-bots/bot-1/archive") && init?.method === "PATCH") {
+        archivedWritten = true;
+        return Response.json({ ok: true });
+      }
+      if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+      if (url.includes("/api/provider-catalog")) {
+        return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const click = async (node: Element | null | undefined) => {
+      await act(async () => {
+        node?.dispatchEvent(
+          new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as unknown as Event,
+        );
+      });
+      await act(async () => {});
+    };
+    const buttonWith = (label: string, scope: ParentNode) =>
+      [...scope.querySelectorAll("button")].find((button) => button.textContent === label);
+    try {
+      await act(async () => root.render(createElement(BotDetailPage, { boot: BOOT, botId: "bot-1" })));
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+
+      await click(buttonWith(t("en", "botDetail.archive.open"), container as unknown as ParentNode));
+      await click(buttonWith(t("en", "botDetail.archive.confirm"), win.document.body as unknown as ParentNode));
+
+      // The confirmed state wins over the payload the page could not re-read:
+      // the config is locked, the archive action is gone, and the failure is
+      // stated with a reload path.
+      expect(archivedWritten).toBe(true);
+      const fieldset = container.querySelector("fieldset[disabled]");
+      expect(fieldset).not.toBeNull();
+      expect(fieldset?.querySelector(`input[aria-label="${t("en", "botDetail.identity.name")}"]`)).not.toBeNull();
+      expect(container.textContent).not.toContain(t("en", "botDetail.archive.open"));
+      expect(container.textContent).toContain(t("en", "botDetail.archive.staleAfterArchive"));
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
     }
   });
 });

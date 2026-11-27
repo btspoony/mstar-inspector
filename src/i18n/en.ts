@@ -92,6 +92,7 @@ export const en = {
     loadFailed: "Could not load this page.",
     saveFailed: "Could not save your changes.",
     saving: "Saving…",
+    save: "Save",
     cancel: "Cancel",
     retry: "Retry",
   },
@@ -149,7 +150,7 @@ export const en = {
     overrideSave: "Save ceiling",
     overrideClearLabel: "Clear",
     overrideClear: "Clear the ceiling for {workspace}",
-    overrideInvalid: "Enter a whole number greater than 0, or leave blank.",
+    overrideInvalid: "Enter a number of Credits greater than 0, or leave blank.",
     overridesFailed: "The ceiling was not saved — nothing changed.",
     overviewTitle: "Overview",
     editableTitle: "Configuration",
@@ -197,6 +198,7 @@ export const en = {
       title: "Share & pricing",
       switch: "Share with other workspaces",
       multiplier: "Multiplier",
+      multiplierInvalid: "Enter a multiplier greater than 0.",
       monthlyCap: "Monthly ceiling",
       monthlyCapHint: "The Credits a single workspace may spend per month; blank = no ceiling.",
       inactiveHint:
@@ -217,7 +219,9 @@ export const en = {
     archive: {
       dangerTitle: "Danger zone",
       dangerHint:
-        "Once archived, no App's review will use this bot; workspaces using it see \u201cArchived\u201d. You can restore it at any time.",
+        "Once archived, this bot stops being selected by any review; workspaces using it see \u201cArchived\u201d. You can restore it at any time.",
+      staleAfterArchive:
+        "The change was saved, but this page could not re-read the bot — reload before editing the configuration.",
       open: "Archive this bot",
       dialogTitle: "Archive this bot",
       confirm: "Archive",

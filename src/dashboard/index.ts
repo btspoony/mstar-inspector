@@ -3081,7 +3081,10 @@ async function botScopedSections(
 ) {
   const apps = createReviewBotsStore(db);
   const store = createAppConfigStore(db, encryptionKey);
-  const owner = canWriteBotScope(app, scope);
+  // Ownership alone is not enough: a plain member of the bot's own workspace
+  // reads the consumer face, so they must not receive its keys, seats, named
+  // chains or custom providers either.
+  const owner = canWriteBotScope(app, scope) && canManageApp(scope);
   // The mount list is EMPTY on the bot face: physical
   // github_app_installations are App-side state a bot payload never sources
   // through a same-id join (D44).
@@ -3343,7 +3346,8 @@ const appBotRoute = async (c: DashboardContext) => {
   }
   const month = quotaMonth(new Date());
   const apps = createReviewBotsStore(member.db);
-  const [sections, provider, spendRow, mountRows, quota, defaultChain] = await Promise.all([
+  const [sections, provider, spendRow, mountRows, quota, defaultChain, overrides, rpPerCredit, officialWorkspaceId, overrideRow] =
+    await Promise.all([
     botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope),
     member.db
       .prepare(`SELECT name FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
@@ -3376,6 +3380,24 @@ const appBotRoute = async (c: DashboardContext) => {
     // F4: the capability summary reads the DEFAULT chain without owner
     // authority — no keys, no named chains, nothing secret.
     apps.readDefaultChainSummary(bot.id),
+    // The owner's price exceptions; omitted for every other viewer.
+    member.scope.workspaceId === bot.workspace_id && canManageApp(member.scope)
+      ? apps.listBotQuotaOverrides(bot.id)
+      : Promise.resolve([]),
+    // The same rate the App routes serve: absent when the operator profile is
+    // unreadable, so the SPA's ADR fallback decides.
+    rpPerCreditRead(member.db, member.scope.workspaceId).catch((err) => {
+      logSettingsFailure("api_quota_profile_bot", bot.id, err);
+      return null;
+    }),
+    readOfficialWorkspaceId(member.db),
+    // THIS workspace's ceiling exception over the bot default — the same
+    // resolution the chain row applies, scoped so no other workspace's
+    // negotiated ceiling reaches this payload.
+    member.db
+      .prepare(`SELECT monthly_rp FROM bot_quota_overrides WHERE bot_id = ? AND workspace_id = ?`)
+      .bind(bot.id, member.scope.workspaceId)
+      .first<{ monthly_rp: number }>(),
   ]);
   const mountIdentities = await apps.listAppIdentities(
     mountRows.results.map((row) => row.github_app_id),
@@ -3391,9 +3413,11 @@ const appBotRoute = async (c: DashboardContext) => {
     archived: bot.archived_at !== null,
     // The owner's exception layer, read only for the owner: a consumer never sees
     // another workspace's negotiated ceiling.
-    ...(canManage
-      ? { quota_overrides: await createReviewBotsStore(member.db).listBotQuotaOverrides(bot.id) }
-      : {}),
+    ...(canManage ? { quota_overrides: overrides } : {}),
+    // The share switch only exists on the official workspace, and only its
+    // managers can reach it — a consumer needs no such fact.
+    ...(canManage ? { official_workspace: officialWorkspaceId === bot.workspace_id } : {}),
+    ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
     // F10: the top-level flag every consumer branches on. An unknown ceiling is
     // an ERROR state — never "no ceiling".
     ...(quota.kind === "unknown" ? { quota_error: true } : {}),
@@ -3421,6 +3445,9 @@ const appBotRoute = async (c: DashboardContext) => {
       month_used_rp: Number(spendRow?.total ?? 0),
       plan_quota: quota.kind,
       plan_monthly_rp: quota.kind === "ceiling" ? quota.rp : null,
+      // The ceiling the relay actually enforces on THIS workspace: its
+      // override when one exists, else the bot's own default.
+      effective_ceiling: overrideRow === null ? bot.monthly_rp : overrideRow.monthly_rp,
       default_chain: defaultChain,
       mounted_apps: mountIdentities.map((row) => ({
         id: row.id,
@@ -3575,8 +3602,8 @@ const BOT_FACE_WRITE_COPY: Record<
   },
   pricing: {
     notFound: "unknown bot",
-    shape: "body must be { multiplier, monthly_rp? }",
-    invalid: "multiplier must be greater than 0 and monthly_rp a whole number greater than 0, or null",
+    shape: "body must be { multiplier?, monthly_rp? } with at least one of them",
+    invalid: "multiplier must be greater than 0 when given, and monthly_rp a whole number greater than 0, or null",
   },
   archive: {
     notFound: "unknown bot",
@@ -3629,8 +3656,17 @@ function botFaceWriteRoute(kind: BotFaceWriteKind) {
         now,
       });
     } else if (kind === "pricing") {
-      const multiplier = body.multiplier;
-      if (typeof multiplier !== "number" || !Number.isFinite(multiplier) || multiplier <= 0) return invalid();
+      // Each field is independently optional: omitted = untouched, and only
+      // the columns the store defines as nullable accept an explicit null.
+      // The page omits `multiplier` while unshared, so a ceiling-only save
+      // must pass the shape gate and leave the stored multiplier alone.
+      const rawMultiplier = body.multiplier;
+      if (
+        rawMultiplier !== undefined &&
+        !(typeof rawMultiplier === "number" && Number.isFinite(rawMultiplier) && rawMultiplier > 0)
+      ) {
+        return invalid();
+      }
       const rawMonthly = body.monthly_rp;
       if (
         rawMonthly !== undefined &&
@@ -3639,9 +3675,10 @@ function botFaceWriteRoute(kind: BotFaceWriteKind) {
       ) {
         return invalid();
       }
+      if (rawMultiplier === undefined && rawMonthly === undefined) return invalid();
       outcome = await updateBotPricing(gate.db, {
         botId: bot.id,
-        multiplier,
+        ...(rawMultiplier === undefined ? {} : { multiplier: rawMultiplier as number }),
         ...(rawMonthly === undefined ? {} : { monthlyRp: rawMonthly as number | null }),
         authority,
         now,
