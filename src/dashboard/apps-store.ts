@@ -664,7 +664,7 @@ export const APP_READ_SQL = {
   listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
-const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.app_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.app_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL) OR EXISTS (SELECT 1 FROM app_installations ai WHERE ai.github_app_id = g.id AND ai.workspace_id = ?2)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
 
 /**
  * The bot-scoped read faces: the BOT's own columns, authorized from its own

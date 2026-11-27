@@ -754,6 +754,14 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     db.raw
       .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
       .run(sharedId, OTHER_WS);
+    // `syncSplitPair` mapped this App to `default` before it was pointed at its
+    // real owner, so it left an install state here. The scoped resolve admits an
+    // App on that row alone, and this case must hold no such row: it is about
+    // target-based reach, which `bindInstallation` grants further down.
+    db.raw.run(
+      `DELETE FROM app_install_bots WHERE github_app_id = '${sharedId}' AND workspace_id = 'default';
+       DELETE FROM app_installations WHERE github_app_id = '${sharedId}' AND workspace_id = 'default';`,
+    );
     await createReviewBotsStore(db).upsertInstallation({
       appId: sharedId,
       installationId: INSTALLATION,

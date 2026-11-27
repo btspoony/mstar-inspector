@@ -165,6 +165,57 @@ describe("GET /api/apps/:appId — rp_per_credit", () => {
     const consumer = (await (await get(db, TENANT_DETAIL, "mallory")).json()) as Record<string, unknown>;
     expect(consumer.rp_per_credit).toBe(expected);
   });
+
+  test("an empty quota_profiles table omits the rate instead of failing the read", async () => {
+    const db = await world();
+    // The bindings and the plan ceilings reference the profiles, so they go
+    // first; the table then holds no version at all.
+    db.raw.run(
+      `DELETE FROM workspace_quota_binding;
+       DELETE FROM quota_profile_plans;
+       DELETE FROM quota_profiles;`,
+    );
+
+    const owner = await get(db, DETAIL, "dana");
+    expect(owner.status).toBe(200);
+    const body = (await owner.json()) as Record<string, unknown>;
+    expect(body.viewer_relation).toBe("both");
+    expect("rp_per_credit" in body).toBe(false);
+
+    const consumer = await get(db, TENANT_DETAIL, "mallory");
+    expect(consumer.status).toBe(200);
+    expect("rp_per_credit" in ((await consumer.json()) as Record<string, unknown>)).toBe(false);
+  });
+});
+
+describe("GET /api/apps/:appId — visibility follows the install state", () => {
+  test("an installer with no live target resolves the App", async () => {
+    const db = await world();
+    // The installed face exists for exactly this viewer: install state, no
+    // target. The scoped resolve must admit it.
+    db.raw.run(`DELETE FROM review_targets WHERE workspace_id = '${TENANT_WS}'`);
+
+    const res = await get(db, TENANT_DETAIL, "mallory");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.viewer_relation).toBe("installed");
+  });
+
+  test("a live target without install state is admitted but claims no installation", async () => {
+    const db = await world();
+    // The reverse edge: the target admits the App, the install state is what
+    // the relation must read — so the payload states no relation at all.
+    db.raw.run(
+      `DELETE FROM app_install_bots WHERE github_app_id = '${APP_ID}' AND workspace_id = '${TENANT_WS}';
+       DELETE FROM app_installations WHERE github_app_id = '${APP_ID}' AND workspace_id = '${TENANT_WS}';`,
+    );
+
+    const res = await get(db, TENANT_DETAIL, "mallory");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.can_manage).toBe(false);
+    expect("viewer_relation" in body).toBe(false);
+  });
 });
 
 describe("chain rows carry archived", () => {
