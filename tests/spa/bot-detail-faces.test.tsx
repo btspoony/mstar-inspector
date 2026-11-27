@@ -398,3 +398,81 @@ describe("a confirmed archive whose re-read fails", () => {
     }
   });
 });
+
+describe("a confirmed restore whose re-read fails", () => {
+  test("keeps the face locked until a later re-read succeeds", async () => {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
+    const realFetch = globalThis.fetch;
+    // The stub tracks the last confirmed write: reads serve the state that
+    // write established, except the restore re-read the test fails on purpose.
+    let lastArchived: boolean | null = null;
+    let readFails = true;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/review-bots/bot-1/archive") && init?.method === "PATCH") {
+        lastArchived = JSON.parse(String(init.body)).archived === true;
+        return Response.json({ ok: true });
+      }
+      if (url.includes("/api/review-bots/bot-1/bot")) {
+        // The restore landed; the follow-up read of it does not — until it does.
+        if (lastArchived === false && readFails) return new Response("unavailable", { status: 503 });
+        return Response.json(botPayload({ archived: lastArchived !== false }));
+      }
+      if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+      if (url.includes("/api/provider-catalog")) {
+        return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const click = async (node: Element | null | undefined) => {
+      await act(async () => {
+        node?.dispatchEvent(
+          new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as unknown as Event,
+        );
+      });
+      await act(async () => {});
+    };
+    const buttonWith = (label: string, scope: ParentNode) =>
+      [...scope.querySelectorAll("button")].find((button) => button.textContent === label);
+    try {
+      await act(async () => root.render(createElement(BotDetailPage, { boot: BOOT, botId: "bot-1" })));
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+
+      // The restore write succeeds but its re-read fails: the confirmed write
+      // wins over the stale payload, so the config stays LOCKED even though the
+      // stored bot is no longer archived.
+      await click(buttonWith(t("en", "botDetail.archive.restore"), container as unknown as ParentNode));
+      await act(async () => {});
+
+      expect(lastArchived).toBe(false);
+      const fieldset = container.querySelector("fieldset[disabled]");
+      expect(fieldset).not.toBeNull();
+      expect(fieldset?.querySelector(`input[aria-label="${t("en", "botDetail.identity.name")}"]`)).not.toBeNull();
+      expect(container.textContent).toContain(t("en", "botDetail.archive.lockedNotice"));
+      // The failure is stated with a refresh path, the same as the archive mirror.
+      expect(container.textContent).toContain(t("en", "botDetail.archive.staleAfterArchive"));
+
+      // The only remaining writer on the locked face is the archive section:
+      // archiving again re-reads successfully, and its restore completes the
+      // round trip. Once a re-read succeeds the lock must clear.
+      await click(buttonWith(t("en", "botDetail.archive.open"), container as unknown as ParentNode));
+      await click(buttonWith(t("en", "botDetail.archive.confirm"), win.document.body as unknown as ParentNode));
+      expect(lastArchived).toBe(true);
+      readFails = false;
+      await click(buttonWith(t("en", "botDetail.archive.restore"), container as unknown as ParentNode));
+      await act(async () => {});
+
+      expect(container.querySelector("fieldset[disabled]")).toBeNull();
+      expect(container.textContent).not.toContain(t("en", "botDetail.archive.lockedNotice"));
+      expect(container.textContent).not.toContain(t("en", "botDetail.archive.staleAfterArchive"));
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+});
