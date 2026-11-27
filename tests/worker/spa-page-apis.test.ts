@@ -277,6 +277,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       "blocked",
       "blocked_reason",
       "can_manage",
+      "viewer_relation",
       "workspace_id",
     ]);
     expect(Object.keys(otherBody.app).sort()).toEqual([

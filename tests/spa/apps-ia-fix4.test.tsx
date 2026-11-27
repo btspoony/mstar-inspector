@@ -42,6 +42,7 @@ const botsPayload = (quota: { plan_monthly_rp: number | null; quota_error?: bool
       scope: "shared",
       multiplier: 1,
       month_used_rp: 42,
+      archived: false,
     },
   ],
 });
@@ -73,6 +74,7 @@ describe("F10 — the bots table branches on quota_error", () => {
 const BOT_PAYLOAD = {
   can_manage: true,
   owned: false,
+  archived: false,
   app: {
     github_app_id: null,
     id: "bot-shared",
@@ -139,7 +141,7 @@ describe("F10 — the bot detail branches on quota_error", () => {
     const page = await mountBot({ ...BOT_PAYLOAD, quota_error: true });
     try {
       expect(page.text).toContain(t("en", "bots.monthUnknown"));
-      expect(page.text).not.toContain(t("en", "bots.monthNoCeiling", { used: 42 }));
+      expect(page.text).not.toContain(t("en", "credits.noCeiling", { used: "0.04" }));
     } finally {
       await page.cleanup();
     }
@@ -148,7 +150,7 @@ describe("F10 — the bot detail branches on quota_error", () => {
   test("a KNOWN unlimited plan still reads 'no ceiling'", async () => {
     const page = await mountBot(BOT_PAYLOAD);
     try {
-      expect(page.text).toContain(t("en", "bots.monthNoCeiling", { used: 42 }));
+      expect(page.text).toContain(t("en", "credits.noCeiling", { used: "0.04" }));
       expect(page.text).not.toContain(t("en", "bots.monthUnknown"));
     } finally {
       await page.cleanup();

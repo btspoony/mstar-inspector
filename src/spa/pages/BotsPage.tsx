@@ -215,8 +215,8 @@ function botColumns(
         bot.archived ? (
           <StatusBadge tone="neutral">{t(locale, "bots.list.archived")}</StatusBadge>
         ) : (
-          <StatusBadge tone={bot.owned ? "neutral" : "accent"}>
-            {t(locale, bot.owned ? "bots.stateOwn" : "bots.stateShared")}
+          <StatusBadge tone={bot.scope === "shared" ? "accent" : "neutral"}>
+            {t(locale, bot.scope === "shared" ? "bots.stateShared" : "bots.stateOwn")}
           </StatusBadge>
         ),
     },

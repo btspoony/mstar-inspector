@@ -1212,6 +1212,7 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
         scope: "owned",
         multiplier: 1,
         month_used_rp: 40,
+        archived: false,
       },
       {
         id: "app-b",
@@ -1224,6 +1225,7 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
         scope: "shared",
         multiplier: 1.5,
         month_used_rp: 1240,
+        archived: false,
       },
     ],
   };
@@ -1239,5 +1241,22 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
     const parsed = parseUsableBots({ ...PRODUCER_PAYLOAD, plan_monthly_rp: null, quota_error: true });
     expect(parsed?.quota_error).toBe(true);
     expect(parsed?.plan_monthly_rp).toBeNull();
+  });
+
+  // `archived` decides whether a row is offered for selection, so an absent or
+  // malformed value must fail the parse — never read as "live".
+  test("a row with NO archived field rejects the whole payload", () => {
+    const { archived: _omitted, ...first } = PRODUCER_PAYLOAD.bots[0]!;
+    expect(parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [first] })).toBeNull();
+  });
+
+  test("a row whose archived is not a boolean rejects the whole payload", () => {
+    const [first] = PRODUCER_PAYLOAD.bots;
+    for (const bogus of ["false", 0, null, undefined]) {
+      expect(
+        parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [{ ...first!, archived: bogus }] }),
+        String(bogus),
+      ).toBeNull();
+    }
   });
 });

@@ -109,6 +109,7 @@ describe("F3 — a failed read is not an empty list", () => {
         scope: "owned",
         multiplier: 1,
         month_used_rp: 10,
+        archived: false,
       },
     ],
   };
@@ -143,6 +144,7 @@ describe("F5 — ownership and manage permission are separate from publication s
     scope: "owned" as const,
     multiplier: 1,
     month_used_rp: 7,
+    archived: false,
     ...overrides,
   });
   const face = (rows: UsableBotsPayload["bots"]): string =>

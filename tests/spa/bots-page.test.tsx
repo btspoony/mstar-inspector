@@ -25,6 +25,7 @@ const OWNED = {
   scope: "owned" as const,
   multiplier: 1,
   month_used_rp: 1240,
+  archived: false,
 };
 
 const SHARED = {
@@ -38,6 +39,7 @@ const SHARED = {
   scope: "shared" as const,
   multiplier: 4,
   month_used_rp: 90,
+  archived: false,
 };
 
 const payload = (bots: UsableBotsPayload["bots"] = [OWNED, SHARED]): UsableBotsPayload => ({
@@ -116,6 +118,19 @@ describe("row facts", () => {
     const archivedRow = html.split("<tr ").find((part) => part.includes("Security Scanner")) ?? "";
     expect(archivedRow).toContain(t("en", "bots.list.archived"));
     expect(archivedRow).not.toContain(t("en", "bots.stateShared"));
+  });
+
+  test("an owned bot published as shared reads 共享, not 未共享", () => {
+    const published = { ...OWNED, scope: "shared" as const };
+    const html = render(payload([published, SHARED]));
+    const row = html.split("<tr ").find((part) => part.includes(OWNED.name)) ?? "";
+    expect(row).toContain(t("en", "bots.stateShared"));
+    expect(row).not.toContain(t("en", "bots.stateOwn"));
+    // Ownership still decides the section, not the pill.
+    const ownedAt = html.indexOf(t("en", "bots.list.ownedSection"));
+    const sharedAt = html.indexOf(t("en", "bots.list.sharedSection"));
+    expect(html.indexOf(OWNED.name)).toBeGreaterThan(ownedAt);
+    expect(html.indexOf(OWNED.name)).toBeLessThan(sharedAt);
   });
 
   test("an empty read offers each section its own empty face", () => {

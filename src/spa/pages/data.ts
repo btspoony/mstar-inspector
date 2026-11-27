@@ -167,7 +167,7 @@ export type UsableBotRow = {
   multiplier: number;
   month_used_rp: number;
   /** Archived is a state fact: the row stays listed, muted, never selected. */
-  archived?: boolean;
+  archived: boolean;
 };
 
 export type UsableBotsPayload = {
@@ -195,7 +195,7 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     isBotScope(value.scope) &&
     typeof value.multiplier === "number" &&
     typeof value.month_used_rp === "number" &&
-    (value.archived === undefined || typeof value.archived === "boolean")
+    typeof value.archived === "boolean"
   );
 }
 
