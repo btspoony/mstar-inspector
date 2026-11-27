@@ -2711,58 +2711,94 @@ async function botWriteAuthority(
   return "ok";
 }
 
-/** The name and description the bot detail writes together. */
+/**
+ * One bot face-write statement: only the columns the caller carries, plus
+ * `updated_at`. `sets` is built from fixed literals in this file, never from
+ * request input, so a column name cannot be injected; omitting a column in a
+ * partial body leaves whatever another manager wrote to it in between.
+ */
+async function writeBotFace(
+  db: AppsStoreD1,
+  botId: string,
+  now: string,
+  sets: string[],
+  values: unknown[],
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE review_bots SET ${sets.join(", ")}, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .bind(...values, now, botId)
+    .run();
+}
+
+/**
+ * The bot's profile face. An omitted `name` or `description` is untouched; an
+ * explicit `null` description clears it.
+ */
 export async function updateBotProfile(
   db: AppsStoreD1,
   input: {
     botId: string;
-    name: string;
-    description: string | null;
+    name?: string;
+    description?: string | null;
     authority: { workspaceId: string; role: WorkspaceRole };
     now: string;
   },
 ): Promise<BotWriteOutcome> {
   const gate = await botWriteAuthority(db, input.botId, input.authority);
   if (gate !== "ok") return gate;
-  if (input.name.trim().length === 0) return "invalid";
-  await db
-    .prepare(
-      `UPDATE review_bots SET name = ?, description = ?, updated_at = ?
-        WHERE id = ? AND deleted_at IS NULL`,
-    )
-    .bind(input.name.trim(), input.description, input.now, input.botId)
-    .run();
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (input.name !== undefined) {
+    const name = input.name.trim();
+    if (name.length === 0) return "invalid";
+    sets.push("name = ?");
+    values.push(name);
+  }
+  if (input.description !== undefined) {
+    sets.push("description = ?");
+    values.push(input.description);
+  }
+  if (sets.length === 0) return "invalid";
+  await writeBotFace(db, input.botId, input.now, sets, values);
   return "ok";
 }
 
 /**
  * The bot's price face: `multiplier` (> 0) and `monthly_rp` (NULL = no bot-level
- * ceiling). Both columns move together, so a price edit never writes half a
- * pair.
+ * ceiling). Each is written only when carried, so a multiplier-only edit never
+ * restores or clears a ceiling another manager set at the same time.
  */
 export async function updateBotPricing(
   db: AppsStoreD1,
   input: {
     botId: string;
-    multiplier: number;
-    monthlyRp: number | null;
+    multiplier?: number;
+    monthlyRp?: number | null;
     authority: { workspaceId: string; role: WorkspaceRole };
     now: string;
   },
 ): Promise<BotWriteOutcome> {
   const gate = await botWriteAuthority(db, input.botId, input.authority);
   if (gate !== "ok") return gate;
-  if (!Number.isFinite(input.multiplier) || input.multiplier <= 0) return "invalid";
-  if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
-    return "invalid";
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (input.multiplier !== undefined) {
+    if (!Number.isFinite(input.multiplier) || input.multiplier <= 0) return "invalid";
+    sets.push("multiplier = ?");
+    values.push(input.multiplier);
   }
-  await db
-    .prepare(
-      `UPDATE review_bots SET multiplier = ?, monthly_rp = ?, updated_at = ?
-        WHERE id = ? AND deleted_at IS NULL`,
-    )
-    .bind(input.multiplier, input.monthlyRp, input.now, input.botId)
-    .run();
+  if (input.monthlyRp !== undefined) {
+    if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
+      return "invalid";
+    }
+    sets.push("monthly_rp = ?");
+    values.push(input.monthlyRp);
+  }
+  if (sets.length === 0) return "invalid";
+  await writeBotFace(db, input.botId, input.now, sets, values);
   return "ok";
 }
 

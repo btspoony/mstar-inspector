@@ -3,6 +3,7 @@ import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { setBotArchived, updateBotPricing, updateBotProfile } from "../../src/dashboard/apps-store";
 
 const SESSION_SECRET = ["test", "bot", "face", "writes", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -79,7 +80,33 @@ function world(): void {
   seedTarget(db, HOME_BOT_ROW, { workspaceId: OTHER, repoOwner: "acme", repoName: "widgets" });
 }
 
-async function patch(ref: string, botId: string, face: string, login: string, body?: unknown): Promise<Response> {
+/**
+ * A DB whose first `UPDATE review_bots` statement competes with it: a second
+ * manager writes `column` between this request's read and its write. That is
+ * the interleaving an omitted field must not undo.
+ */
+function racingDb(column: string, value: unknown): TestD1 {
+  let fired = false;
+  return {
+    prepare(query: string) {
+      if (!fired && query.includes("UPDATE review_bots SET")) {
+        fired = true;
+        db.raw.prepare(`UPDATE review_bots SET ${column} = ? WHERE id = ?`).run(value as never, HOME_BOT_ROW);
+      }
+      return db.prepare(query);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+  } as unknown as TestD1;
+}
+
+async function patch(
+  ref: string,
+  botId: string,
+  face: string,
+  login: string,
+  body?: unknown,
+  racing?: TestD1,
+): Promise<Response> {
   const session = await createSessionValue(login, null, SESSION_SECRET);
   return worker.fetch(
     new Request("https://worker.local/dashboard/" + ref + "/api/review-bots/" + botId + "/" + face, {
@@ -90,7 +117,7 @@ async function patch(ref: string, botId: string, face: string, login: string, bo
       },
       body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
     }),
-    envFor(),
+    racing === undefined ? envFor() : ({ ...envFor(), DB: racing } as unknown as Env),
   );
 }
 
@@ -189,6 +216,25 @@ describe("PATCH /api/review-bots/:botId/profile", () => {
     expect(stored(HOME_BOT_ROW).name).toBe("original");
   });
 
+  test("a name-only write keeps a description another manager set while it was in flight", async () => {
+    world();
+    db.raw.prepare("UPDATE review_bots SET name = 'original', description = 'kept' WHERE id = ?").run(HOME_BOT_ROW);
+
+    const res = await patch(
+      OFFICIAL,
+      HOME_BOT_ROW,
+      "profile",
+      "dana",
+      { name: "Renamed" },
+      racingDb("description", "set while renaming"),
+    );
+
+    expect(res.status).toBe(200);
+    const row = stored(HOME_BOT_ROW);
+    expect(row.name).toBe("Renamed");
+    expect(row.description).toBe("set while renaming");
+  });
+
   test("an unknown bot is 404", async () => {
     world();
     const res = await patch(OFFICIAL, "no-such-bot", "profile", "dana", { name: "x" });
@@ -239,11 +285,40 @@ describe("PATCH /api/review-bots/:botId/pricing", () => {
     expect(stored(HOME_BOT_ROW).monthly_rp).toBeNull();
   });
 
+  test("a multiplier-only write keeps a ceiling another manager set while it was in flight", async () => {
+    world();
+    db.raw.prepare("UPDATE review_bots SET multiplier = 1, monthly_rp = NULL WHERE id = ?").run(HOME_BOT_ROW);
+
+    const res = await patch(
+      OFFICIAL,
+      HOME_BOT_ROW,
+      "pricing",
+      "dana",
+      { multiplier: 2 },
+      racingDb("monthly_rp", 500000),
+    );
+
+    expect(res.status).toBe(200);
+    const row = stored(HOME_BOT_ROW);
+    expect(row.multiplier).toBe(2);
+    expect(row.monthly_rp).toBe(500000);
+  });
+
   test("a plain member is 403 and writes nothing", async () => {
     world();
     const res = await patch(OFFICIAL, HOME_BOT_ROW, "pricing", "mallory", { multiplier: 3 });
     expect(res.status).toBe(403);
     expect(stored(HOME_BOT_ROW).multiplier).toBe(1);
+  });
+
+  test("a consumer of a shared bot is 403 and writes nothing", async () => {
+    world();
+    db.raw.prepare("UPDATE review_bots SET monthly_rp = 1000 WHERE id = ?").run(HOME_BOT_ROW);
+    const res = await patch(OTHER, HOME_BOT_ROW, "pricing", "erin", { multiplier: 3 });
+    expect(res.status).toBe(403);
+    const row = stored(HOME_BOT_ROW);
+    expect(row.multiplier).toBe(1);
+    expect(row.monthly_rp).toBe(1000);
   });
 });
 
@@ -277,6 +352,13 @@ describe("PATCH /api/review-bots/:botId/archive", () => {
     expect((await patch(OFFICIAL, "no-such-bot", "archive", "dana", { archived: true })).status).toBe(404);
   });
 
+  test("a consumer of a shared bot is 403 and cannot archive it", async () => {
+    world();
+    const res = await patch(OTHER, HOME_BOT_ROW, "archive", "erin", { archived: true });
+    expect(res.status).toBe(403);
+    expect(stored(HOME_BOT_ROW).archived_at).toBeNull();
+  });
+
   test("GET /bot reports archived: true once the bot is archived", async () => {
     world();
     const before = (await (await getBot(OFFICIAL, HOME_BOT_ROW, "dana")).json()) as { archived: boolean };
@@ -287,4 +369,76 @@ describe("PATCH /api/review-bots/:botId/archive", () => {
     const after = (await (await getBot(OFFICIAL, HOME_BOT_ROW, "dana")).json()) as { archived: boolean };
     expect(after.archived).toBe(true);
   });
+
+  test("GET /bot reports archived: true to a consumer of the shared bot", async () => {
+    world();
+    expect((await patch(OFFICIAL, HOME_BOT_ROW, "archive", "dana", { archived: true })).status).toBe(200);
+
+    const seen = (await (await getBot(OTHER, HOME_BOT_ROW, "erin")).json()) as { archived: boolean; can_manage: boolean };
+    expect(seen.archived).toBe(true);
+    expect(seen.can_manage).toBe(false);
+  });
+});
+
+/**
+ * The store's own re-check, called with no route in front of it. The route
+ * gates first, so only these direct calls prove the store refuses on its own.
+ */
+describe("bot writers refuse in the store itself", () => {
+  const NOW = "2026-02-01T00:00:00.000Z";
+
+  for (const [label, authority] of [
+    ["a plain member of the owning workspace", { workspaceId: OFFICIAL, role: "member" as const }],
+    ["an owner of a different workspace", { workspaceId: OTHER, role: "owner" as const }],
+  ] as const) {
+    test(updateBotProfile.name + " refuses " + label + " and writes nothing", async () => {
+      world();
+      db.raw.prepare("UPDATE review_bots SET name = 'original', description = 'kept' WHERE id = ?").run(HOME_BOT_ROW);
+
+      const outcome = await updateBotProfile(db, {
+        botId: HOME_BOT_ROW,
+        name: "hijacked",
+        description: null,
+        authority,
+        now: NOW,
+      });
+
+      expect(outcome).toBe("forbidden");
+      const row = stored(HOME_BOT_ROW);
+      expect(row.name).toBe("original");
+      expect(row.description).toBe("kept");
+    });
+
+    test(updateBotPricing.name + " refuses " + label + " and writes nothing", async () => {
+      world();
+      db.raw.prepare("UPDATE review_bots SET multiplier = 1, monthly_rp = 1000 WHERE id = ?").run(HOME_BOT_ROW);
+
+      const outcome = await updateBotPricing(db, {
+        botId: HOME_BOT_ROW,
+        multiplier: 9,
+        monthlyRp: null,
+        authority,
+        now: NOW,
+      });
+
+      expect(outcome).toBe("forbidden");
+      const row = stored(HOME_BOT_ROW);
+      expect(row.multiplier).toBe(1);
+      expect(row.monthly_rp).toBe(1000);
+    });
+
+    test(setBotArchived.name + " refuses " + label + " and writes nothing", async () => {
+      world();
+
+      const outcome = await setBotArchived(db, {
+        botId: HOME_BOT_ROW,
+        archived: true,
+        authority,
+        now: NOW,
+      });
+
+      expect(outcome).toBe("forbidden");
+      expect(stored(HOME_BOT_ROW).archived_at).toBeNull();
+    });
+  }
 });

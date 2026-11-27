@@ -3534,8 +3534,9 @@ const BOT_FACE_WRITE_COPY: Record<
  * manager gate and the store's own ownership+role re-check inside, so a caller
  * that bypasses this route cannot write another workspace's bot.
  *
- * An omitted field keeps the stored value: the route already holds the row it
- * resolved for the 404, so a partial body can never clear a column by omission.
+ * An omitted field is NOT passed to the store, so the UPDATE leaves that column
+ * alone: a partial write cannot overwrite a value another manager set between
+ * this route's read and the write.
  */
 function botFaceWriteRoute(kind: BotFaceWriteKind) {
   return async (c: DashboardContext): Promise<Response> => {
@@ -3562,30 +3563,30 @@ function botFaceWriteRoute(kind: BotFaceWriteKind) {
     if (kind === "profile") {
       const name = body.name;
       if (typeof name !== "string" || name.trim().length === 0) return invalid();
-      const rawDescription = body.description === undefined ? bot.description : body.description;
-      let description: string | null;
-      if (rawDescription === null) description = null;
-      else if (typeof rawDescription === "string") description = rawDescription;
-      else return invalid();
+      const rawDescription = body.description;
+      if (rawDescription !== undefined && rawDescription !== null && typeof rawDescription !== "string") return invalid();
       outcome = await updateBotProfile(gate.db, {
         botId: bot.id,
         name,
-        description,
+        ...(rawDescription === undefined ? {} : { description: rawDescription as string | null }),
         authority,
         now,
       });
     } else if (kind === "pricing") {
       const multiplier = body.multiplier;
       if (typeof multiplier !== "number" || !Number.isFinite(multiplier) || multiplier <= 0) return invalid();
-      const rawMonthly = body.monthly_rp === undefined ? bot.monthly_rp : body.monthly_rp;
-      let monthlyRp: number | null;
-      if (rawMonthly === null) monthlyRp = null;
-      else if (typeof rawMonthly === "number" && Number.isInteger(rawMonthly) && rawMonthly > 0) monthlyRp = rawMonthly;
-      else return invalid();
+      const rawMonthly = body.monthly_rp;
+      if (
+        rawMonthly !== undefined &&
+        rawMonthly !== null &&
+        !(typeof rawMonthly === "number" && Number.isInteger(rawMonthly) && rawMonthly > 0)
+      ) {
+        return invalid();
+      }
       outcome = await updateBotPricing(gate.db, {
         botId: bot.id,
         multiplier,
-        monthlyRp,
+        ...(rawMonthly === undefined ? {} : { monthlyRp: rawMonthly as number | null }),
         authority,
         now,
       });
