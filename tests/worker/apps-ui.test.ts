@@ -1640,7 +1640,9 @@ describe("F4 — pending-bind is a shared-App fact (D47)", () => {
       makeEnv(db),
       { installationId: "4201" },
     );
+    // One opaque answer for every non-bindable App: an owned App must not be
+    // distinguishable from a missing one (`bot is not shared` said which it was).
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: "bot is not shared" });
+    expect(await res.json()).toEqual({ error: "unknown app" });
   });
 });

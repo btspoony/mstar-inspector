@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
-import { isChainMultiplier } from "../../src/contracts/rp-limits";
+import { isServedChainProduct } from "../../src/contracts/rp-limits";
 
 const TS = "2026-10-24T00:00:00.000Z";
 
@@ -354,13 +354,13 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
 });
 
 /**
- * The chain's product is the Apps list's `month.multiplier`, which
- * `isChainMultiplier` requires to be strictly positive and at most
- * `CHAIN_MULTIPLIER_MAX`. A write the reader would refuse turns the whole Apps
- * page into a load error, so the store refuses it first — and the refusal must
- * leave the previous chain byte-identical.
+ * A NEW mount may not push the chain's product past `CHAIN_MULTIPLIER_MAX` — the
+ * most a storable ceiling can cover. That is a WRITE bound: the reader accepts
+ * any positive finite product, because a legal price edit or a sub-1 removal
+ * creates one without any write this guard sees. The refusal must leave the
+ * previous chain byte-identical.
  */
-describe("replaceInstallChain — the chain product stays in the served domain", () => {
+describe("replaceInstallChain — a new mount stays inside the write bound", () => {
   function seedBotWithMultiplier(db: TestD1, id: string, multiplier: number): void {
     db.raw
       .prepare(
@@ -417,7 +417,7 @@ describe("replaceInstallChain — the chain product stays in the served domain",
     const chain = (await store.listInstallChainBots("default")).get("app-1") ?? [];
     const product = chain.reduce((total, bot) => total * bot.multiplier, 1);
     expect(product).toBe(3_000_000);
-    expect(isChainMultiplier(product)).toBe(true);
+    expect(isServedChainProduct(product)).toBe(true);
     db.raw.close();
   });
 
@@ -454,7 +454,7 @@ describe("replaceInstallChain — the chain product stays in the served domain",
   /**
    * The floor's other half: each factor was writable under the OLD predicate
    * (`> 0`, no floor), and two of them multiply to `0` in a double. The served
-   * `month.multiplier` would be `0`, which `isChainMultiplier` refuses, so the
+   * `month.multiplier` would be `0`, which `isServedChainProduct` refuses, so the
    * store must refuse the mount — and, like the ceiling case, leave the old
    * chain standing.
    */
@@ -501,7 +501,7 @@ describe("replaceInstallChain — the chain product stays in the served domain",
       await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-tiny"] }),
     ).toBe("ok");
     const chain = (await store.listInstallChainBots("default")).get("app-1") ?? [];
-    expect(isChainMultiplier(chain.reduce((product, bot) => product * bot.multiplier, 1))).toBe(true);
+    expect(isServedChainProduct(chain.reduce((product, bot) => product * bot.multiplier, 1))).toBe(true);
     db.raw.close();
   });
 });

@@ -21,7 +21,7 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, seedWorkspaceMember, type TestD1 } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 import type { Env } from "../../src/worker/env";
@@ -61,10 +61,13 @@ const call = async (db: TestD1, path: string, init: RequestInit): Promise<Respon
  * a pending installation the caller may bind. That single association is the
  * fact the case below removes.
  */
+let ACTOR_ID = "";
+
 async function world(): Promise<TestD1> {
   const db = createMigratedTestD1();
   await createUser(db, { login: "alice", role: "member" });
   seedDefaultMemberships(db, { alice: "owner" });
+  ACTOR_ID = seedWorkspaceMember(db, CALLER_WS, "alice", "owner");
   db.raw
     .prepare("INSERT INTO workspaces (id, slug, name, created_by, created_at) VALUES (?, ?, ?, 'x', datetime('now'))")
     .run(OWNER_WS, OWNER_WS, OWNER_WS);
@@ -136,6 +139,77 @@ function stubGithub(): void {
   }) as unknown as typeof fetch;
 }
 
+describe("C4 — the bind start answers ONE opaque 404 for every non-bindable id", () => {
+  const postBind = async (db: TestD1, login: string, githubAppId: number | string): Promise<Response> =>
+    await call(db, `/dashboard/${CALLER_WS}/api/apps/${githubAppId}/bind-installation`, {
+      method: "POST",
+      headers: { ...(await headers(login)), "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ installationId: String(INSTALLATION) }).toString(),
+    });
+
+  /**
+   * Four ids with four DIFFERENT underlying facts — missing, foreign-unshared,
+   * retired, and bindable-but-not-pending — that a caller must not be able to
+   * tell apart: the first three exist (or existed) as another workspace's App.
+   */
+  type FourIds = { missing: number; private: number; retired: number; notPending: number };
+
+  async function fourIds(): Promise<{ db: TestD1; ids: FourIds }> {
+    const db = await world();
+    const addForeign = (row: string, githubAppId: number, scope: string, deleted: string | null): void => {
+      db.raw
+        .prepare(
+          `INSERT INTO github_apps
+             (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+              created_by, status, scope, shared_at, deleted_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'enc', 'enc', 'x', 'active', ?, NULL, ?, datetime('now'), datetime('now'))`,
+        )
+        .run(row, row, githubAppId, row, scope, deleted);
+      db.raw.prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)").run(row, OWNER_WS);
+    };
+    // A foreign App its owner never shared.
+    addForeign("app-private", 9811, "owned", null);
+    // A retired one that WAS shared.
+    addForeign("app-retired", 9812, "owned", "2026-02-02T00:00:00.000Z");
+    // The bindable App with an installation that is not pending here.
+    addForeign("app-not-pending", 9813, "shared", null);
+    return { db, ids: { missing: 9899, private: 9811, retired: 9812, notPending: 9813 } };
+  }
+
+  test("missing, foreign-unshared, retired and non-bindable ids all answer the same 404 body", async () => {
+    const { db, ids } = await fourIds();
+    const answers = await Promise.all(
+      Object.entries(ids).map(async ([name, id]) => {
+        const res = await postBind(db, "alice", id);
+        return { name, status: res.status, body: await res.json() };
+      }),
+    );
+    for (const answer of answers) {
+      expect(answer, answer.name).toEqual({ name: answer.name, status: 404, body: { error: "unknown app" } });
+    }
+    // The four bodies are byte-identical: no field distinguishes them.
+    expect(new Set(answers.map((answer) => JSON.stringify(answer.body))).size).toBe(1);
+  });
+
+  test("a member is refused by ROLE before any App is looked up", async () => {
+    const { db, ids } = await fourIds();
+    const bob = seedWorkspaceMember(db, CALLER_WS, "bob", "member");
+    expect(bob.length).toBeGreaterThan(0);
+    for (const id of Object.values<number>(ids)) {
+      const res = await postBind(db, "bob", id);
+      expect(res.status, String(id)).toBe(403);
+    }
+  });
+
+  test("a bindable App with a pending installation is still admitted", async () => {
+    const db = await world();
+    const res = await postBind(db, "alice", GITHUB_APP_ID);
+    expect(res.status).toBe(200);
+    const body: unknown = await res.json();
+    expect(body).toMatchObject({ bound: false });
+  });
+});
+
 describe("F2-1 — the write re-checks the App's bindability, not only the route", () => {
   test("an App unshared after the admission refuses the write and leaves nothing behind", async () => {
     const db = await world();
@@ -149,7 +223,7 @@ describe("F2-1 — the write re-checks the App's bindability, not only the route
     // The owner unshares between the check and the write.
     db.raw.run(`UPDATE github_apps SET scope = 'owned', shared_at = NULL WHERE id = '${APP_ROW}'`);
 
-    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS)).toBe("app_unavailable");
+    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS, ACTOR_ID)).toBe("app_unavailable");
     expect(boundTo(db)).toBeNull();
     // No install state and no chain row either: the batch's guard is the UPDATE.
     expect(installStates(db)).toEqual([{ workspace_id: OWNER_WS }]);
@@ -166,7 +240,7 @@ describe("F2-1 — the write re-checks the App's bindability, not only the route
       .prepare("UPDATE github_apps SET deleted_at = datetime('now') WHERE id = ?")
       .run(APP_ROW);
 
-    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS)).toBe("app_unavailable");
+    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS, ACTOR_ID)).toBe("app_unavailable");
     expect(boundTo(db)).toBeNull();
     expect(installStates(db)).toEqual([{ workspace_id: OWNER_WS }]);
   });
@@ -183,16 +257,49 @@ describe("F2-1 — the write re-checks the App's bindability, not only the route
       .run(OWNER_WS);
     expect(await apps.getLiveSharedAppById(APP_ROW)).toBeNull();
 
-    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS)).toBe("app_unavailable");
+    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS, ACTOR_ID)).toBe("app_unavailable");
     expect(boundTo(db)).toBeNull();
     expect(installStates(db)).toEqual([{ workspace_id: OWNER_WS }]);
   });
 
   test("a still-bindable App binds exactly as before — the guard refuses only what changed", async () => {
     const db = await world();
-    expect(await createReviewBotsStore(db).bindInstallation(APP_ROW, INSTALLATION, CALLER_WS)).toBe("bound");
+    expect(await createReviewBotsStore(db).bindInstallation(APP_ROW, INSTALLATION, CALLER_WS, ACTOR_ID)).toBe("bound");
     expect(boundTo(db)).toBe(CALLER_WS);
     expect(installStates(db)).toEqual([{ workspace_id: CALLER_WS }, { workspace_id: OWNER_WS }]);
+  });
+
+  // C5: the route proves the role twice over the OAuth round trip, then the
+  // batch proves it once more INSIDE the statement that writes. A demotion in
+  // the gap between the final read and the batch must bind nothing.
+  test("a manager demoted between the last role read and the batch binds nothing", async () => {
+    const db = await world();
+    const apps = createReviewBotsStore(db);
+    // The role the route last saw: owner of the caller's workspace.
+    expect(await apps.getLiveSharedAppById(APP_ROW)).not.toBeNull();
+    db.raw
+      .prepare("UPDATE workspace_members SET role = 'member' WHERE workspace_id = ? AND user_id = ?")
+      .run(CALLER_WS, ACTOR_ID);
+
+    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS, ACTOR_ID)).toBe("not_manager");
+    expect(boundTo(db)).toBeNull();
+    // Neither the install state nor the chain follows a refused bind.
+    expect(installStates(db)).toEqual([{ workspace_id: OWNER_WS }]);
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n FROM app_install_bots WHERE workspace_id = ?").get(CALLER_WS),
+    ).toEqual({ n: 0 });
+  });
+
+  test("membership REMOVED between the last role read and the batch binds nothing either", async () => {
+    const db = await world();
+    db.raw
+      .prepare("DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?")
+      .run(CALLER_WS, ACTOR_ID);
+
+    expect(await createReviewBotsStore(db).bindInstallation(APP_ROW, INSTALLATION, CALLER_WS, ACTOR_ID)).toBe(
+      "not_manager",
+    );
+    expect(boundTo(db)).toBeNull();
   });
 });
 

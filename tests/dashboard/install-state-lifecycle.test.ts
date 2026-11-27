@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedWorkspaceMember, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 
 // The install-state lifecycle: the two writers (`createApp`, `bindInstallation`)
@@ -89,6 +89,15 @@ function chain(db: TestD1): Array<{ github_app_id: string; workspace_id: string;
         ORDER BY github_app_id, workspace_id, position`,
     )
     .all() as Array<{ github_app_id: string; workspace_id: string; position: number; bot_id: string }>;
+}
+
+/**
+ * The verified actor a bind requires. The write re-checks this user's CURRENT
+ * owner/admin membership inside its own statement, so every direct store call
+ * here names a real manager of the workspace it binds into.
+ */
+function binder(db: TestD1, workspaceId: string, role: "owner" | "admin" | "member" = "owner"): string {
+  return seedWorkspaceMember(db, workspaceId, `binder-${workspaceId}`, role);
 }
 
 function count(db: TestD1, table: string, where = ""): number {
@@ -185,7 +194,7 @@ describe("bindInstallation writes the install state and copies the owner's chain
   test("a first bind creates exactly one state and copies the rows the consumer may mount", async () => {
     const db = bindWorld();
 
-    expect(await createReviewBotsStore(db).bindInstallation("app-shared", 501, CONSUMER)).toBe("bound");
+    expect(await createReviewBotsStore(db).bindInstallation("app-shared", 501, CONSUMER, binder(db, CONSUMER))).toBe("bound");
 
     expect(states(db)).toEqual([
       { github_app_id: "app-shared", workspace_id: OWNER },
@@ -206,9 +215,9 @@ describe("bindInstallation writes the install state and copies the owner's chain
     const store = createReviewBotsStore(db);
     seedInstallation(db, { appId: "app-shared", installationId: 502, bound: null });
 
-    await store.bindInstallation("app-shared", 501, CONSUMER);
+    await store.bindInstallation("app-shared", 501, CONSUMER, binder(db, CONSUMER));
     const afterFirst = { states: states(db), chain: chain(db) };
-    expect(await store.bindInstallation("app-shared", 502, CONSUMER)).toBe("bound");
+    expect(await store.bindInstallation("app-shared", 502, CONSUMER, binder(db, CONSUMER))).toBe("bound");
 
     // The fixed point: the state row is the same one, and the chain is
     // byte-identical — in particular no SECOND row at position 1.
@@ -241,7 +250,7 @@ describe("bindInstallation writes the install state and copies the owner's chain
     );
     seedInstallation(db, { appId: "app-bare", installationId: 601, bound: null });
 
-    await createReviewBotsStore(db).bindInstallation("app-bare", 601, CONSUMER);
+    await createReviewBotsStore(db).bindInstallation("app-bare", 601, CONSUMER, binder(db, CONSUMER));
 
     expect(states(db)).toContainEqual({ github_app_id: "app-bare", workspace_id: CONSUMER });
     expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([]);
@@ -253,7 +262,7 @@ describe("bindInstallation writes the install state and copies the owner's chain
     const db = bindWorld();
     seedInstallation(db, { appId: "app-shared", installationId: 502, bound: OTHER });
 
-    expect(await createReviewBotsStore(db).bindInstallation("app-shared", 502, CONSUMER)).toBe("bound_elsewhere");
+    expect(await createReviewBotsStore(db).bindInstallation("app-shared", 502, CONSUMER, binder(db, CONSUMER))).toBe("bound_elsewhere");
 
     expect(states(db)).toEqual([{ github_app_id: "app-shared", workspace_id: OWNER }]);
     db.raw.close();
@@ -359,7 +368,7 @@ describe("uninstall removes the aggregate only when the App is no longer install
     await store.markInstallationRemoved("app-shared", 702);
     seedInstallation(db, { appId: "app-shared", installationId: 703, bound: null });
 
-    expect(await store.bindInstallation("app-shared", 703, CONSUMER)).toBe("bound");
+    expect(await store.bindInstallation("app-shared", 703, CONSUMER, binder(db, CONSUMER))).toBe("bound");
     expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
       { github_app_id: "app-shared", workspace_id: CONSUMER },
     ]);
@@ -793,7 +802,7 @@ describe("F2 R2 — the revival decision lives inside the batch", () => {
   test("reconcile that clears nothing restores nothing and sweeps nothing", async () => {
     const db = await sweptByRemoval();
     const store = createReviewBotsStore(db);
-    await store.bindInstallation("app-shared", 1701, CONSUMER);
+    await store.bindInstallation("app-shared", 1701, CONSUMER, binder(db, CONSUMER));
     await Bun.sleep(2);
     const observedAt = await store.currentTimestamp();
     const before = { states: states(db), chain: chain(db) };

@@ -9,7 +9,7 @@ import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import { applyMigrations, APPS_UI_MIGRATIONS } from "../helpers/migration-shapes";
 import { createTestD1 } from "../store/helpers";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
-import { isChainMultiplier } from "../../src/contracts/rp-limits";
+import { isServedChainProduct } from "../../src/contracts/rp-limits";
 
 const SESSION_SECRET = ["test", "chain", "route", "session", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -161,7 +161,7 @@ describe("PATCH /api/apps/:appId/chain", () => {
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { chain: Array<{ multiplier: number }> };
-    expect(isChainMultiplier(body.chain.reduce((product, row) => product * row.multiplier, 1))).toBe(true);
+    expect(isServedChainProduct(body.chain.reduce((product, row) => product * row.multiplier, 1))).toBe(true);
     db.raw.close();
   });
 });

@@ -377,27 +377,33 @@ describe("apps-store (createReviewBotsStore)", () => {
     expect((await store(db).getAppById(app.id))?.deleted_at).not.toBeNull();
   });
 
-  test("getAppByGithubId finds the row by GitHub's numeric id, and only through the tenant join", async () => {
+  test("getBindableAppByGithubId finds a live shared App by GitHub's numeric id", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db, { githubAppId: 987654 });
-    expect((await store(db).getAppByGithubId(987654))?.id).toBe(app.id);
-    expect(await store(db).getAppByGithubId(1)).toBeNull();
+    expect(await store(db).getBindableAppByGithubId(987654)).toBeNull();
+    // `createApp` writes an OWNED App; only a shared one is bindable.
+    rawRun(db, "UPDATE github_apps SET scope = 'shared' WHERE id = ?", app.id);
+    expect((await store(db).getBindableAppByGithubId(987654))?.id).toBe(app.id);
+    expect(await store(db).getBindableAppByGithubId(1)).toBeNull();
   });
 
-  test("getAppByGithubId resolves a soft-deleted row but NOT a soft-deleted workspace", async () => {
+  test("getBindableAppByGithubId answers null for a soft-deleted App and a soft-deleted workspace", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db, { githubAppId: 987655 });
+    rawRun(db, "UPDATE github_apps SET scope = 'shared' WHERE id = ?", app.id);
     await store(db).softDeleteApp(app.id);
-    expect((await store(db).getAppByGithubId(987655))?.deleted_at).not.toBeNull();
+    // Retired and missing are the SAME answer: a bind cannot probe existence.
+    expect(await store(db).getBindableAppByGithubId(987655)).toBeNull();
 
     rawRun(
       db,
       `INSERT INTO workspaces (id, slug, name, created_by, created_at) VALUES ('second', 'second', 'Second', NULL, '2026-10-21T00:00:00.000Z')`,
     );
     const second = await seedApp(db, { githubAppId: 987656, workspaceId: "second" });
-    expect((await store(db).getAppByGithubId(987656))?.id).toBe(second.id);
+    rawRun(db, "UPDATE github_apps SET scope = 'shared' WHERE id = ?", second.id);
+    expect((await store(db).getBindableAppByGithubId(987656))?.id).toBe(second.id);
     rawRun(db, "UPDATE workspaces SET deleted_at = datetime('now') WHERE id = 'second'");
-    expect(await store(db).getAppByGithubId(987656)).toBeNull();
+    expect(await store(db).getBindableAppByGithubId(987656)).toBeNull();
   });
 
   test("a soft-deleted workspace makes both resolution reads null; listApps still sees the App", async () => {
@@ -868,7 +874,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     };
     const s = createReviewBotsStore(db);
     await s.getAppForWebhook("workspace", "app");
-    await s.getAppByGithubId(1);
+    await s.getBindableAppByGithubId(1);
     await s.getAppById("id");
     await s.listApps();
     expect(queries).toHaveLength(4);

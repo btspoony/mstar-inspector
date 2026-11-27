@@ -16,6 +16,7 @@ import { syncSplitPair,
   migrationsAfter,
   seedDefaultMemberships,
   seedTarget,
+  seedWorkspaceMember,
   type TestD1,
 } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
@@ -457,6 +458,7 @@ describe("shared bot installations are bound to one workspace", () => {
         SHARED_BOT,
         INSTALLATION_A,
         WS_B,
+        seedWorkspaceMember(db, WS_B, "bob", "owner"),
       ),
     ).toBe("bound_elsewhere");
     expect(boundTo(db, INSTALLATION_A)).toBe(WS_A);
@@ -465,9 +467,14 @@ describe("shared bot installations are bound to one workspace", () => {
   test("a webhook upsert never binds or unbinds an installation", async () => {
     const db = await twoTenantWorld();
     const apps = createReviewBotsStore(db);
-    expect(await apps.bindInstallation(SHARED_BOT, INSTALLATION_A, WS_A)).toBe(
-      "bound",
-    );
+    expect(
+      await apps.bindInstallation(
+        SHARED_BOT,
+        INSTALLATION_A,
+        WS_A,
+        seedWorkspaceMember(db, WS_A, "alice", "owner"),
+      ),
+    ).toBe("bound");
     await apps.upsertInstallation({
       appId: SHARED_BOT,
       installationId: INSTALLATION_A,
@@ -507,9 +514,14 @@ describe("shared bot installations are bound to one workspace", () => {
   test("a binding whose workspace was deleted no longer holds the installation", async () => {
     const db = await twoTenantWorld();
     const apps = createReviewBotsStore(db);
-    expect(await apps.bindInstallation(SHARED_BOT, INSTALLATION_A, WS_A)).toBe(
-      "bound",
-    );
+    expect(
+      await apps.bindInstallation(
+        SHARED_BOT,
+        INSTALLATION_A,
+        WS_A,
+        seedWorkspaceMember(db, WS_A, "alice", "owner"),
+      ),
+    ).toBe("bound");
     db.raw
       .prepare(
         "UPDATE workspaces SET deleted_at = datetime('now') WHERE id = ?",
@@ -534,6 +546,7 @@ describe("shared bot installations are bound to one workspace", () => {
         SHARED_BOT,
         INSTALLATION_A,
         WS_A,
+        seedWorkspaceMember(db, WS_A, "alice", "owner"),
       ),
     ).toBe("bound");
     expect(await deleteWorkspace(db, WS_A, new Date().toISOString())).toBe(

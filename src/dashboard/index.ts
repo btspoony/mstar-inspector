@@ -2219,7 +2219,15 @@ const appListRoute = async (c: DashboardContext) => {
             : {
                 used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
                 owned: chain.every((bot) => bot.owned),
-                multiplier: chain.reduce((product, bot) => product * bot.multiplier, 1),
+                // The served factor counts only what the relay would RUN: a row
+                // whose bot stopped being available is skipped before any price
+                // applies, so folding its stored factor in would both misprice
+                // the chain and disclose the owner's current price. Recorded
+                // spend stays `used_rp` above — that is history, not a price.
+                multiplier: chain.reduce(
+                  (product, bot) => (bot.available ? product * bot.multiplier : product),
+                  1,
+                ),
               },
         bot_id: app.id,
         github_name: app.github_name ?? null,
@@ -2531,12 +2539,18 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
   const target = live.length === 1 ? live[0]! : null;
   const targetsMany = live.length > 1;
   const blockedReason = blockedReasonFor(appRow, member.scope.workspaceId);
+  // Who is asking, from TWO independent facts: does this workspace OWN the App
+  // (creator data: App-wide activity, credentials, creation operations), and is
+  // the caller a manager (the installer operations it may perform). An installer
+  // manager is not a creator and must not be served the creator's projection.
+  const owned = appRow.workspace_id === member.scope.workspaceId;
+  const manages = canManageApp(member.scope);
   try {
     c.header("Cache-Control", "private, no-store");
     const defaults = await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId);
     // Both facts hold for EVERY viewer, so they precede the role split: the SPA
     // chooses the face before it learns whether this member manages.
-    const [viewerRelation, rpPerCredit] = await Promise.all([
+    const [relation, rpPerCredit] = await Promise.all([
       // The scoped read already admitted this viewer, so the live target it
       // found is this workspace's use relation — no second query for it.
       viewerRelationRead(member.db, appRow, member.scope.workspaceId, live.length > 0),
@@ -2548,11 +2562,20 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         return null;
       }),
     ]);
-    if (!canManageApp(member.scope)) {
+    const viewerRelation = relation.relation;
+    const chainCapability = chainCapabilityOf(member.scope, relation.installed);
+    // A manager who does NOT own the App is an installer: it may bind, reorder
+    // and manage its own install state, but the creator's projection — the
+    // App-wide activity stamp, the metadata sync state, the delivery summary and
+    // the creation operations — belongs to the owning workspace and is withheld
+    // below. Hiding the creator tabs is a rendering choice; this is the read.
+    const creator = owned;
+    if (!manages) {
       return c.json({
         can_manage: false,
         workspace_id: member.scope.workspaceId,
         viewer_relation: viewerRelation,
+        ...chainCapability,
         ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
         ...(target === null ? {} : { target_id: target.id }),
         blocked: blockedReason !== null,
@@ -2591,6 +2614,7 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
       const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(member.db)).value;
       return c.json({
         can_manage: true,
+        ...chainCapability,
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: member.scope.workspaceId,
@@ -2639,8 +2663,12 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
     const checkGate = effective === null ? null : checkGateOf(effective);
     const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(member.db)).value;
     const officialWorkspaceId = await readOfficialWorkspaceId(member.db);
+    // The target-owned review slice is the CREATOR's App-level policy. An
+    // installer manager reads its own repository policy on the target page; its
+    // App payload states the mount, the roster and the blocked state only, so
+    // `target_id` is absent rather than naming a policy this face cannot show.
     const targetOwned =
-      target === null
+      !creator || target === null
         ? { app: {}, top: {} }
         : {
             app: {
@@ -2667,7 +2695,10 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
     // bot's configuration lives only on `/bots/:botId`.
     const catalog = await providerCatalog();
     const appInstallations = await installationsVisibleTo(store, appRow, member.scope.workspaceId);
-    const appDelivery = await store.deliverySummary(appRow.id, member.scope.workspaceId);
+    // The delivery summary is the App's own activity, read for the creator's
+    // tab. An installer reads its own chain and roster; it is not served the
+    // consuming workspace's view of another workspace's App log.
+    const appDelivery = creator ? await store.deliverySummary(appRow.id, member.scope.workspaceId) : null;
     const sections = {
       installations: [] as Array<unknown>,
       keys: [] as Array<unknown>,
@@ -2681,21 +2712,26 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
       model_role_ids: MODEL_ROLE_IDS,
       custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
       sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
-      delivery_summary: {
-        latest: appDelivery.latest
-          ? {
-              event_name: appDelivery.latest.event_name,
-              outcome: appDelivery.latest.outcome,
-              status_code: appDelivery.latest.status_code,
-              created_at: appDelivery.latest.created_at,
-            }
-          : null,
-        rejected24h: appDelivery.rejected24h,
-      },
+      ...(appDelivery === null
+        ? {}
+        : {
+            delivery_summary: {
+              latest: appDelivery.latest
+                ? {
+                    event_name: appDelivery.latest.event_name,
+                    outcome: appDelivery.latest.outcome,
+                    status_code: appDelivery.latest.status_code,
+                    created_at: appDelivery.latest.created_at,
+                  }
+                : null,
+              rejected24h: appDelivery.rejected24h,
+            },
+          }),
     };
     const installations = appInstallations;
     return c.json({
       can_manage: true,
+      ...chainCapability,
       workspace_id: member.scope.workspaceId,
       viewer_relation: viewerRelation,
       ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
@@ -2705,9 +2741,18 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         github_app_id: appRow.github_app_id,
         status: appRow.status,
         created_by: appRow.created_by,
-        last_webhook_at: appRow.last_webhook_at ?? null,
         // F11: no same-id bot read — sandbox_image_id is the BOT's column. The
         // App payload omits it; the bot page is where it is configured.
+        //
+        // The webhook stamp and the metadata sync stamp are the App's OWN
+        // activity, updated by App id for every installing workspace at once.
+        // They belong to the creator's face; an installer is not served them.
+        ...(creator
+          ? {
+              last_webhook_at: appRow.last_webhook_at ?? null,
+              github_metadata_synced_at: appRow.github_metadata_synced_at ?? null,
+            }
+          : {}),
 
         github_name: appRow.github_name ?? null,
         github_slug: appRow.github_slug ?? null,
@@ -2717,7 +2762,6 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         github_description: appRow.github_description ?? null,
         github_html_url: appRow.github_html_url ?? null,
         github_avatar_url: appRow.github_avatar_url ?? null,
-        github_metadata_synced_at: appRow.github_metadata_synced_at ?? null,
         ...targetOwned.app,
       },
       installation: binding,
@@ -5008,19 +5052,35 @@ export type ViewerRelation = "both" | "created" | "installed";
  * state or a live target.
  *
  * The relation selects the FACE; whether an `app_installations` row exists is a
- * separate fact the list payload reports as `installed`.
+ * separate fact — the list payload reports it as `installed`, and the detail
+ * uses it for {@link AppDetailChainCapability.can_edit_chain}, because that is
+ * the row the chain write demands.
  */
 async function viewerRelationRead(
   db: DashboardDb,
   app: Pick<GithubAppRow, "id" | "workspace_id">,
   workspaceId: string,
   hasLiveTarget: boolean,
-): Promise<ViewerRelation> {
-  const installed = await db
+): Promise<{ relation: ViewerRelation; installed: boolean }> {
+  const installedRow = await db
     .prepare(`SELECT 1 AS present FROM app_installations WHERE github_app_id = ?1 AND workspace_id = ?2`)
     .bind(app.id, workspaceId)
     .first<{ present: number }>();
-  return viewerRelationOf(app.workspace_id === workspaceId, installed !== null || hasLiveTarget);
+  const installed = installedRow !== null;
+  return { relation: viewerRelationOf(app.workspace_id === workspaceId, installed || hasLiveTarget), installed };
+}
+
+/**
+ * The chain-edit capability the installed face renders from. It is the server's
+ * own answer to "would `PATCH /api/apps/:appId/chain` write?" — an actual
+ * `app_installations` row for this workspace (the store's `not_installer` check)
+ * AND an owner/admin role (the route's `can_manage`). `viewer_relation` is NOT
+ * enough: a target-only viewer reads `installed` with no install row at all.
+ */
+type AppDetailChainCapability = { can_edit_chain: boolean };
+
+function chainCapabilityOf(scope: WorkspaceScope, installed: boolean): AppDetailChainCapability {
+  return { can_edit_chain: installed && canManageApp(scope) };
 }
 
 /**
@@ -5273,11 +5333,12 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
     return c.json({ error: "installationId required" }, 400);
   }
   const githubAppId = parseGithubAppId(c.req.param("appId") ?? "");
-  const named = githubAppId === null ? null : await apps.getAppByGithubId(githubAppId);
-  if (named === null) return c.json({ error: "unknown app" }, 404);
+  // The ROLE first: a member must never learn whether an App it cannot bind
+  // exists. The lookup below is also scoped to what a bind may act on, so the
+  // four "no" answers — missing, retired, foreign-unshared, not bindable — are
+  // one opaque 404 rather than four distinguishable ones.
   if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
-  if (named.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
-  const app = named.deleted_at === null ? await apps.getLiveSharedAppById(named.id) : null;
+  const app = githubAppId === null ? null : await apps.getBindableAppByGithubId(githubAppId);
   if (app === null) return c.json({ error: "unknown app" }, 404);
   const admission = await bindAdmission(apps, app, installationId, member.scope.workspaceId);
   if (admission.kind === "bound") {
@@ -5353,11 +5414,14 @@ async function completeInstallationBind(
   }
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
-  const stillManager = async () => {
+  // The role read ALSO carries the actor's `users.id`, which the bind's own
+  // statement re-checks: the round trip below can demote or remove them, and
+  // the same manager must still be one when the row is written.
+  const manager = async () => {
     const access = await getWorkspaceAccessById(db, state.workspaceId, session.login);
-    return access !== null && canManageRole(access.role);
+    return access !== null && access.user !== null && canManageRole(access.role) ? access.user.id : null;
   };
-  if (!(await stillManager())) return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
+  if ((await manager()) === null) return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
   const apps = createReviewBotsStore(db);
   // The signed state names the App and the installation the start route
   // admitted. The relation-free resolver is the ONLY correct one here: a first
@@ -5392,9 +5456,14 @@ async function completeInstallationBind(
   if (!administers) return fail("common.oauth.bindDenied", 403, "not_account_admin");
   const maintenance = await getMaintenanceMode(db);
   if (maintenanceClosed(maintenance)) return maintenanceResponse(c, maintenance);
-  if (!(await stillManager())) return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
-  const outcome = await apps.bindInstallation(app.id, state.installationId, state.workspaceId);
+  const actorUserId = await manager();
+  if (actorUserId === null) return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
+  const outcome = await apps.bindInstallation(app.id, state.installationId, state.workspaceId, actorUserId);
   if (outcome === "bound_elsewhere") return fail("common.oauth.bindConflict", 409, "bound_elsewhere");
+  // The role was proven twice above, but the batch proves it a third time inside
+  // the statement that writes: a demotion in the last few instructions refuses
+  // here rather than binding an installation a member may no longer claim.
+  if (outcome === "not_manager") return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
   // `app_unavailable` is the App losing its live/shared state during the OAuth
   // round trip: the write's own predicate refused it. The caller learns the same
   // `unknown app` the start route answers, never that an App existed.

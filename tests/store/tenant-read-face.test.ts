@@ -44,15 +44,17 @@ describe("apps-store tenant read face", () => {
     expect(rows[0]!.workspace_id).toBe("default");
   });
 
-  test("an orphan App is null from getAppById, getAppForWebhook and getAppByGithubId", async () => {
+  test("an orphan App is null from getAppById, getAppForWebhook and getBindableAppByGithubId", async () => {
     const { db, mapped, orphan } = await seedMappedAndOrphan();
     const store = createReviewBotsStore(db);
     expect((await store.getAppById(mapped.id))?.workspace_id).toBe("default");
     expect(await store.getAppById(orphan.id)).toBeNull();
     expect((await store.getAppForWebhook("default", mapped.id))?.workspace_id).toBe("default");
     expect(await store.getAppForWebhook("default", orphan.id)).toBeNull();
-    expect((await store.getAppByGithubId(1))?.workspace_id).toBe("default");
-    expect(await store.getAppByGithubId(2)).toBeNull();
+    // The bind resolver is ONE predicate over "may a bind act on this App": with
+    // no live association the mapped App answers null exactly like an absent one.
+    expect(await store.getBindableAppByGithubId(1)).toBeNull();
+    expect(await store.getBindableAppByGithubId(2)).toBeNull();
   });
 });
 

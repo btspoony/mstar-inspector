@@ -7,6 +7,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser } from "../../src/dashboard/users";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
+import { parseSettings } from "../../src/spa/pages/data";
 
 const SESSION_SECRET = ["test", "relation", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 5).toString("base64");
@@ -273,6 +274,90 @@ describe("chain rows carry archived", () => {
   });
 });
 
+describe("GET /api/apps/:appId — a consuming manager reads installer facts only", () => {
+  test("the App-wide activity, creator operations and delivery summary are absent; install and chain are not", async () => {
+    const db = await world();
+    // A SHARED App is the unblocked installer case; an owned one is the blocked
+    // face, which is a different (already-scoped) shape.
+    db.raw.run(
+      `UPDATE github_apps SET scope = 'shared', last_webhook_at = '2026-02-02T00:00:00.000Z' WHERE id = '${APP_ID}';
+       INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, bound_workspace_id)
+       VALUES ('inst-tenant', '${APP_ID}', 7301, 'acme', '2026-01-01T00:00:00.000Z', '${TENANT_WS}')`,
+    );
+    const res = await get(db, TENANT_DETAIL, "carol");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      can_manage: boolean;
+      viewer_relation: string;
+      chain: Array<Record<string, unknown>>;
+      installations: Array<Record<string, unknown>>;
+      target_id?: string;
+      app: Record<string, unknown>;
+    } & Record<string, unknown>;
+    // carol manages the tenant but does not own the App: the installer face.
+    expect(body.can_manage).toBe(true);
+    expect(body.viewer_relation).toBe("installed");
+
+    // The App's OWN activity is the creator's read, served by App id for every
+    // installing workspace at once — never to a consumer.
+    expect(body.app).not.toHaveProperty("last_webhook_at");
+    expect(body.app).not.toHaveProperty("github_metadata_synced_at");
+    expect(body.app).not.toHaveProperty("review_enabled");
+    expect(body).not.toHaveProperty("delivery_summary");
+    // The target-owned review policy is the creator's App-level slice; the
+    // installer reads its repository policy on the target page.
+    expect(body).not.toHaveProperty("target_id");
+    // …while the facts it IS entitled to survive.
+    expect(body.chain.map((row) => row.bot_id)).toEqual([APP_ID]);
+    expect(body.installations).toEqual([
+      expect.objectContaining({ installation_id: expect.any(Number) }),
+    ]);
+    expect(body.can_edit_chain).toBe(true);
+    // The SPA parses what the server sends: a narrower projection must not need
+    // a parser change to render.
+    expect(parseSettings(body)).not.toBeNull();
+  });
+
+  test("the owning manager still reads the App-wide stamp and the creator sections", async () => {
+    const db = await world();
+    db.raw.run(
+      `UPDATE github_apps SET last_webhook_at = '2026-02-02T00:00:00.000Z' WHERE id = '${APP_ID}'`,
+    );
+    const body = (await (await get(db, DETAIL, "dana")).json()) as Record<string, unknown> & {
+      app: Record<string, unknown>;
+    };
+    expect(body.can_manage).toBe(true);
+    expect(body.app.last_webhook_at).toBe("2026-02-02T00:00:00.000Z");
+    expect(body).toHaveProperty("delivery_summary");
+  });
+});
+
+describe("GET /api/apps/:appId — can_edit_chain states the install fact", () => {
+  test("a target-only manager reads installed but cannot edit the chain", async () => {
+    const db = await world();
+    // Remove the tenant's install state and chain, keeping only its target: the
+    // relation stays `installed` (a target is a use relation) but the store would
+    // answer `not_installer` to a chain write.
+    db.raw.run(
+      `DELETE FROM app_install_bots WHERE github_app_id = '${APP_ID}' AND workspace_id = '${TENANT_WS}';
+       DELETE FROM app_installations WHERE github_app_id = '${APP_ID}' AND workspace_id = '${TENANT_WS}';`,
+    );
+
+    const manager = (await (await get(db, TENANT_DETAIL, "carol")).json()) as Record<string, unknown>;
+    expect(manager.viewer_relation).toBe("installed");
+    expect(manager.can_edit_chain).toBe(false);
+
+    // A member of a workspace that DOES install it reads the same false.
+    const member = (await (await get(db, TENANT_DETAIL, "mallory")).json()) as Record<string, unknown>;
+    expect(member.can_edit_chain).toBe(false);
+  });
+
+  test("the installer manager reads can_edit_chain true", async () => {
+    const body = (await (await get(await world(), TENANT_DETAIL, "carol")).json()) as Record<string, unknown>;
+    expect(body.can_edit_chain).toBe(true);
+  });
+});
+
 /**
  * F1-3: project only what the reader may see. A retained mount keeps its
  * availability and its history; the owner's default selector, runtime harness
@@ -309,9 +394,44 @@ describe("an unshared mount keeps availability and history, not configuration", 
       archived: false,
       default_chain: null,
       runtime: null,
+      // The PRICE is configuration too: an unavailable mount reads the effective
+      // ×1 it now costs here and states no ceiling, so a later private edit to
+      // the owner's multiplier/ceiling never reaches this workspace.
+      multiplier: 1,
+      effective_monthly_rp: null,
     });
     // The mount and its name survive: a reader can still see what is mounted.
     expect(after.chain[0]).toMatchObject({ name: "app-relation", provider_workspace: "Default" });
+  });
+
+  test("a later price edit on an unavailable mount reaches neither the row nor the aggregate", async () => {
+    const db = await world();
+    // A second, OWN bot of the tenant so the chain has a live factor besides the
+    // foreign mount, and the aggregate has something to hold.
+    const ownBot = "bot-tenant-own";
+    db.raw.run(
+      `INSERT INTO review_bots (id, workspace_id, name, scope, multiplier, created_at, updated_at)
+       VALUES ('${ownBot}', '${TENANT_WS}', 'own', 'owned', 2, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+       UPDATE review_bots SET multiplier = 5 WHERE id = '${APP_ID}';
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+       VALUES ('${APP_ID}', '${TENANT_WS}', 2, '${ownBot}');`,
+    );
+    const aggregate = async (): Promise<number | null> => {
+      const list = (await (await get(db, TENANT_LIST, "mallory")).json()) as {
+        apps: Array<{ bot_id: string; month: { multiplier: number } | null }>;
+      };
+      return list.apps.find((app) => app.bot_id === APP_ID)?.month?.multiplier ?? null;
+    };
+    // 5 (foreign, shared) × 2 (own) = 10.
+    expect(await aggregate()).toBe(10);
+
+    // The owner unshares and then reprices privately — twice, so a single stale
+    // read cannot explain the answer. The served factor must stay the own row's.
+    db.raw.run(`UPDATE review_bots SET scope = 'owned' WHERE id = '${APP_ID}'`);
+    const afterUnshare = await aggregate();
+    db.raw.run(`UPDATE review_bots SET multiplier = 1000, monthly_rp = 900000 WHERE id = '${APP_ID}'`);
+    expect(await aggregate()).toBe(afterUnshare);
+    expect(afterUnshare).toBe(2);
   });
 
   test("a consumer's /bot payload carries no raw ceiling, and the owner's does", async () => {

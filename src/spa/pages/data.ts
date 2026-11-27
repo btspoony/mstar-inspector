@@ -1,9 +1,9 @@
 
 import { FREE_SLOT_REFUSAL, WORKSPACE_CREATION_CLOSED_REFUSAL } from "../../dashboard/entitlement";
 import {
-  isChainMultiplier,
   isRpAmount,
   isRpCeiling,
+  isServedChainProduct,
   isStoredBotMultiplier,
   isStoredRpPerCredit,
   RP_CEILING_MAX,
@@ -149,8 +149,10 @@ function isAppsRowMonth(value: unknown): value is { used_rp: number; owned: bool
     isRpAmount(value.used_rp) &&
     typeof value.owned === "boolean" &&
     // The server serves the PRODUCT of the mounted chain, not one bot's stored
-    // factor: a valid two-bot chain exceeds the single-bot bound.
-    isChainMultiplier(value.multiplier)
+    // factor, and the products a legal write can produce are not bounded by the
+    // write guard (a price edit or a sub-1 removal lifts one). Any positive
+    // finite product parses; the price is guarded where it is spent.
+    isServedChainProduct(value.multiplier)
   );
 }
 

@@ -5,7 +5,7 @@ import { SHARED_BOT_REFUSAL } from "../../src/dashboard/entitlement";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { syncSplitPair, createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedDefaultMemberships, seedTarget, seedWorkspaceMember, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
 import type { Env } from "../../src/worker/env";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -786,7 +786,14 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     expect(written.n).toBe(0);
 
     seedTarget(db, sharedId, { workspaceId: "default", repoId: 1302, repoOwner: "acme", repoName: "web" });
-    expect(await createReviewBotsStore(db).bindInstallation(sharedId, INSTALLATION, "default")).toBe("bound");
+    expect(
+      await createReviewBotsStore(db).bindInstallation(
+        sharedId,
+        INSTALLATION,
+        "default",
+        seedWorkspaceMember(db, "default", "mallory", "owner"),
+      ),
+    ).toBe("bound");
     const accepted = await post(db, "/dashboard/default/api/targets", "mallory", body);
     expect(accepted.status).toBe(201);
     const acceptedBody = (await accepted.json()) as { created: Array<{ repo_id: number }>; duplicates: unknown[] };

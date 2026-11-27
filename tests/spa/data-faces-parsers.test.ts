@@ -564,16 +564,22 @@ describe("amount guards — the parsers apply the writer's domain", () => {
       month: { used_rp: 40, owned: false, multiplier: 1 },
     };
     expect(parseApps({ viewer, apps: [row] })).not.toBeNull();
-    // The multiplier here is the CHAIN's product, so a value past the
-    // single-bot bound is legal; only one past the price domain is not.
+    // The multiplier here is the CHAIN's product and the READ domain is any
+    // positive finite number: a legal price edit or a sub-1 removal can lift an
+    // admitted chain past the WRITE bound, and that must never fail the list.
     expect(parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: 100 * 100 } }] })).not.toBeNull();
+    expect(parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: 10_000_000 } }] })).not.toBeNull();
+    expect(
+      parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: CHAIN_MULTIPLIER_MAX + 1 } }] }),
+    ).not.toBeNull();
     expect(
       parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: CHAIN_MULTIPLIER_MAX } }] }),
     ).not.toBeNull();
     for (const bad of [
       { used_rp: 1.5, owned: false, multiplier: 1 },
       { used_rp: 40, owned: false, multiplier: 0 },
-      { used_rp: 40, owned: false, multiplier: CHAIN_MULTIPLIER_MAX + 1 },
+      { used_rp: 40, owned: false, multiplier: -1 },
+      { used_rp: 40, owned: false, multiplier: Number.POSITIVE_INFINITY },
       { used_rp: 40, owned: "no", multiplier: 1 },
       "month",
     ]) {

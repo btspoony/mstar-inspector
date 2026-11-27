@@ -17,8 +17,8 @@ import {
   CHAIN_MULTIPLIER_MAX,
   RP_CEILING_MAX,
   isBotMultiplier,
-  isChainMultiplier,
   isRpCeiling,
+  isServedChainProduct,
   isStoredBotMultiplier,
 } from "../../src/contracts/rp-limits";
 import { rpFor, type QuotaProfile } from "../../src/store/quota-store";
@@ -128,21 +128,27 @@ describe("the shared RP domain", () => {
   });
 
   // The Apps list serves `month.multiplier` as the PRODUCT of the mounted
-  // chain, so the single-bot bound is the wrong guard for it: two max-valid
-  // bots multiply past it and the whole list would fail to parse.
-  test("a chain's product is bounded by its price, not by the single-bot bound", () => {
-    expect(isBotMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
-    expect(isChainMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
-    expect(isChainMultiplier(BOT_MULTIPLIER_MAX * BOT_MULTIPLIER_MAX)).toBe(true);
-    expect(isChainMultiplier(CHAIN_MULTIPLIER_MAX)).toBe(true);
-    expect(isChainMultiplier(CHAIN_MULTIPLIER_MAX + 1)).toBe(false);
-    expect(isChainMultiplier(Number.POSITIVE_INFINITY)).toBe(false);
-    expect(isChainMultiplier(0)).toBe(false);
-    // Two factors each written before the floor underflow to 0: a 0 product is
-    // outside the domain exactly like an overshoot is.
+  // chain. The READ domain is any positive finite product: a legal price edit on
+  // one mounted bot, or removing a factor below 1, lifts an admitted product past
+  // the write bound, and refusing that would make a legal write fail the list.
+  test("a served chain product parses whenever it is positive and finite", () => {
+    expect(isServedChainProduct(BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isServedChainProduct(BOT_MULTIPLIER_MAX * BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isServedChainProduct(CHAIN_MULTIPLIER_MAX)).toBe(true);
+    // Past the WRITE bound is still readable: these are exactly the products a
+    // price edit or a sub-1 removal creates from an admitted chain.
+    expect(isServedChainProduct(CHAIN_MULTIPLIER_MAX + 1)).toBe(true);
+    expect(isServedChainProduct(10_000_000)).toBe(true);
+    expect(isServedChainProduct(1e-200)).toBe(true);
+    expect(isServedChainProduct(Number.POSITIVE_INFINITY)).toBe(false);
+    expect(isServedChainProduct(Number.NaN)).toBe(false);
+    expect(isServedChainProduct(0)).toBe(false);
+    expect(isServedChainProduct(-1)).toBe(false);
+    // Two factors each written before the floor underflow to 0: that product is
+    // outside the read domain exactly like a negative one.
     expect(1e-200 * 1e-200).toBe(0);
-    expect(isChainMultiplier(1e-200 * 1e-200)).toBe(false);
-    // The bound is exactly "no storable ceiling could cover one review".
+    expect(isServedChainProduct(1e-200 * 1e-200)).toBe(false);
+    // The WRITE bound is exactly "no storable ceiling could cover one review".
     expect(isRpCeiling(CHAIN_MULTIPLIER_MAX * 300)).toBe(true);
     expect(CHAIN_MULTIPLIER_MAX * 300 <= RP_CEILING_MAX).toBe(true);
   });
@@ -340,9 +346,16 @@ describe("the SPA parser applies the same domain", () => {
       return { ...base, apps: [{ ...only, month }] };
     };
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 100 * 100 }))).not.toBeNull();
+    // The three products a LEGAL write creates from an admitted chain — a 1000×
+    // price edit, a sub-1 removal, and the aggregate of both — must parse. The
+    // write guard is a write guard: it never runs for either of those edits.
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 10_000_000 }))).not.toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 100_000_000 }))).not.toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 0.01 }))).not.toBeNull();
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: CHAIN_MULTIPLIER_MAX }))).not.toBeNull();
-    // Past the price domain no stored ceiling could cover the chain's review.
-    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: CHAIN_MULTIPLIER_MAX + 1 }))).toBeNull();
+    // Only an unrenderable product fails: zero, negative, infinite or NaN.
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 0 }))).toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: -1 }))).toBeNull();
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: Number.POSITIVE_INFINITY }))).toBeNull();
   });
 });

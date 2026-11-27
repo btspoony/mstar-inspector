@@ -21,7 +21,16 @@
  * `CHAIN_MULTIPLIER_MAX` is the same price rule for a CHAIN's aggregate factor
  * — the product the Apps list serves as `month.multiplier`. It is not one
  * stored value, so it legitimately exceeds the single-bot bound (two 100× bots
- * give 10,000); it is bounded by the price the whole chain produces.
+ * give 10,000); it bounds what a NEW mount may produce, so no chain an operator
+ * builds prices a review above any storable ceiling.
+ *
+ * It is a WRITE bound only. A served product can leave that range without any
+ * illegal write: a price edit on one mounted bot, or REMOVING a factor below 1,
+ * raises the product of a chain the writer admitted. {@link isServedChainProduct}
+ * is therefore the READ half — any positive finite product parses — because a
+ * legal edit must never turn the whole Apps list into a load error. The price
+ * itself stays guarded where it is spent: `rpFor` and `chargeUsage` refuse a
+ * product they cannot price.
  *
  * `BOT_MULTIPLIER_MIN` is the same fact at the other end: a product of legal
  * factors must still be STRICTLY POSITIVE in floating point, or the chain it
@@ -72,9 +81,17 @@ export function isBotMultiplier(value: unknown): value is number {
   );
 }
 
-/** A chain's factor: the product of its bots' multipliers — finite, > 0, and priced in domain. */
-export function isChainMultiplier(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= CHAIN_MULTIPLIER_MAX;
+/**
+ * A SERVED chain's factor: the product of the mounted bots' multipliers, as the
+ * Apps list and the App detail serve it. Finite and strictly positive is the
+ * whole READ domain — the writer's `CHAIN_MULTIPLIER_MAX` is not re-applied
+ * here, because a legal price edit or a removal can lift an admitted product
+ * past it, and refusing that would fail the entire list for data no rule
+ * forbids. `0`, negatives, `Infinity`, `NaN` and non-numbers fail: they are
+ * products no reader can render, and `rpFor` prices none of them anyway.
+ */
+export function isServedChainProduct(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 /**

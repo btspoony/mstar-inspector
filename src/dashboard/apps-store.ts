@@ -142,7 +142,13 @@ export type AppInstallationRow = {
  * write: the write refuses, and the route answers the same `unknown app` it
  * answers for an App that was never there.
  */
-export type BindInstallationOutcome = "bound" | "bound_elsewhere" | "unknown" | "app_unavailable";
+export type BindInstallationOutcome =
+  | "bound"
+  | "bound_elsewhere"
+  | "unknown"
+  | "app_unavailable"
+  /** The actor stopped being an owner/admin before the batch ran. */
+  | "not_manager";
 
 /**
  * One installation INCLUDING a removed one — the bound-state read. Unlike
@@ -465,12 +471,22 @@ function countOf(result: AppsStoreBatchResult): number {
  *  - the App is still BINDABLE (`APP_BINDABLE_SQL` — live, shared, at least one
  *    live association): the very predicate the route admitted through, so an
  *    App unshared or deleted after the route checked it refuses HERE;
- *  - the binding workspace is itself live.
+ *  - the binding workspace is itself live;
+ *  - the ACTOR is currently an owner/admin of that workspace. The OAuth round
+ *    trip and the GitHub account proof sit between the route's role read and
+ *    this write, so a manager removed or demoted in that window must bind
+ *    nothing: workspace liveness is not actor authorization.
  *
  * Being one UPDATE means the check and the write cannot be split by another
  * writer: SQLite evaluates the predicate against the row it writes.
  */
-function bindUpdate(db: AppsStoreD1, appId: string, installationId: number, workspaceId: string): AppsStoreStatement {
+function bindUpdate(
+  db: AppsStoreD1,
+  appId: string,
+  installationId: number,
+  workspaceId: string,
+  actorUserId: string,
+): AppsStoreStatement {
   return db
     .prepare(
       `UPDATE github_app_installations SET bound_workspace_id = ?3
@@ -479,9 +495,12 @@ function bindUpdate(db: AppsStoreD1, appId: string, installationId: number, work
                OR NOT EXISTS (SELECT 1 FROM workspaces w
                                WHERE w.id = github_app_installations.bound_workspace_id AND w.deleted_at IS NULL))
           AND EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ?1 AND ${APP_BINDABLE_SQL})
-          AND EXISTS (SELECT 1 FROM workspaces ws WHERE ws.id = ?3 AND ws.deleted_at IS NULL)`,
+          AND EXISTS (SELECT 1 FROM workspaces ws WHERE ws.id = ?3 AND ws.deleted_at IS NULL)
+          AND EXISTS (SELECT 1 FROM workspace_members wm
+                       WHERE wm.workspace_id = ?3 AND wm.user_id = ?4
+                         AND wm.role IN ('owner', 'admin'))`,
     )
-    .bind(appId, installationId, workspaceId);
+    .bind(appId, installationId, workspaceId, actorUserId);
 }
 
 /**
@@ -515,6 +534,28 @@ function installStateInsert(
 
 /** The bind precondition: the batch's own UPDATE wrote the binding. */
 const BIND_WROTE_GUARD = " AND changes() > 0";
+
+/**
+ * Is this user, RIGHT NOW, an owner/admin of this live workspace? The bind's
+ * refusal path asks the same question the write's WHERE clause already asked,
+ * so a bind refused for that reason is reported as the authorization failure it
+ * is instead of as a missing App.
+ */
+async function isWorkspaceManager(
+  db: AppsStoreD1,
+  workspaceId: string,
+  actorUserId: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS present FROM workspace_members wm
+         JOIN workspaces ws ON ws.id = wm.workspace_id AND ws.deleted_at IS NULL
+        WHERE wm.workspace_id = ?1 AND wm.user_id = ?2 AND wm.role IN ('owner', 'admin')`,
+    )
+    .bind(workspaceId, actorUserId)
+    .first<{ present: number }>();
+  return row !== null;
+}
 
 /**
  * The chain for the state the PREVIOUS statement created, on the BIND path —
@@ -697,7 +738,6 @@ function installStateSweep(db: AppsStoreD1, appId: string): AppsStoreStatement[]
 export const APP_READ_SQL = {
   getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
   getAppForWebhook: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
-  getAppByGithubId: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
   listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
@@ -1147,9 +1187,25 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .first<GithubAppTenantRow>();
     },
 
-    async getAppByGithubId(githubAppId: number): Promise<GithubAppTenantRow | null> {
+    /**
+     * The App a bind may act on, by GitHub's numeric id: live, SHARED and
+     * still associated with a live workspace ({@link APP_BINDABLE_SQL}).
+     *
+     * ONE predicate, deliberately — a caller resolving a bind cannot learn
+     * whether an App it may not bind exists. Missing, retired, owned by someone
+     * else, sharing revoked and left with no live association all answer
+     * `null`, and the route turns that into its single opaque 404. The caller's
+     * manager role is checked BEFORE this read, so a member never reaches it.
+     */
+    async getBindableAppByGithubId(githubAppId: number): Promise<GithubAppTenantRow | null> {
       return db
-        .prepare(APP_READ_SQL.getAppByGithubId)
+        .prepare(
+          `SELECT g.*, w.workspace_id FROM github_apps g
+             INNER JOIN app_workspaces w ON w.app_id = g.id
+             INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
+            WHERE g.github_app_id = ?1 AND ${APP_BINDABLE_SQL}
+            LIMIT 1`,
+        )
         .bind(githubAppId)
         .first<GithubAppTenantRow>();
     },
@@ -1528,18 +1584,23 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      *
      * This write RE-STATES the route's admission in its own WHERE clause
      * (`bindUpdate`), because the OAuth round trip happens between the two: an
-     * App unshared or deleted, or this workspace deleted, in that window
-     * refuses here instead of binding an installation the route no longer
-     * admits. The batch's guard is that same UPDATE, so the install state and
-     * the chain follow only a bind that actually wrote.
+     * App unshared or deleted, this workspace deleted, or the ACTOR removed or
+     * demoted from owner/admin, in that window, refuses here instead of binding
+     * an installation the route no longer admits. The batch's guard is that same
+     * UPDATE, so the install state and the chain follow only a bind that
+     * actually wrote.
+     *
+     * `actorUserId` is the verified session user's `users.id` — the role read the
+     * route already made, re-proven inside the statement that writes.
      */
     async bindInstallation(
       appId: string,
       installationId: number,
       workspaceId: string,
+      actorUserId: string,
     ): Promise<BindInstallationOutcome> {
       const [res] = await db.batch([
-        bindUpdate(db, appId, installationId, workspaceId),
+        bindUpdate(db, appId, installationId, workspaceId, actorUserId),
         // The workspace's install state, written in the same batch as the
         // ownership proof: this bind is its first installation of the App. A
         // refused bind (an UPDATE that matched nothing) writes none, and a later
@@ -1550,11 +1611,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         installChainCopy(db, appId, workspaceId),
       ]);
       if (res!.meta.changes > 0) return "bound";
-      // Refused. Which fact failed decides what the caller is told, and the
-      // question is asked with the SAME "a dead binding counts as unbound" rule
-      // the UPDATE and `bindAdmission` use: a LEFT JOIN onto live workspaces
-      // nulls a binding whose workspace was deleted, so it is never reported as
-      // a conflict the user could act on.
+      // Refused. The actor's CURRENT role is the one fact the caller can act on:
+      // it means "you are no longer a manager", not "the App vanished".
+      if (!(await isWorkspaceManager(db, workspaceId, actorUserId))) return "not_manager";
+      // Refused, and the actor still manages. Which other fact failed decides
+      // what the caller is told, and the question is asked with the SAME "a dead
+      // binding counts as unbound" rule the UPDATE and `bindAdmission` use: a
+      // LEFT JOIN onto live workspaces nulls a binding whose workspace was
+      // deleted, so it is never reported as a conflict the user could act on.
       const binding = await db
         .prepare(
           `SELECT i.removed_at, w.id AS bound_workspace_id FROM github_app_installations i
@@ -1723,14 +1787,17 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * mountable, the guard row's CHECK fires, and the whole batch rolls back.
      *
      * The chain's PRICE rides the same batch: the Apps list serves the product
-     * of the mounted multipliers, and `isChainMultiplier` requires that product
-     * to be strictly positive and at most `CHAIN_MULTIPLIER_MAX`, so a chain
-     * that overshoots — or underflows to `0` — would make the whole page fail to
-     * parse. The product is computed from the ids being written against the
-     * multipliers stored at write time — never from a pre-batch read. A rewrite
-     * that only SHRINKS an already-out-of-domain chain (a removal, a reorder) is
-     * admitted: refusing it would leave the operator unable to repair the chain,
-     * and the served product can only fall.
+     * of the mounted multipliers, and a NEW mount may not push that product past
+     * `CHAIN_MULTIPLIER_MAX` (the most a storable ceiling can cover), because
+     * then no workspace could afford the review the chain prices. The product is
+     * computed from the ids being written against the multipliers stored at
+     * write time — never from a pre-batch read.
+     *
+     * This is a WRITE bound and nothing more. The reader accepts any positive
+     * finite product (`isServedChainProduct`), because a legal price edit on one
+     * mounted bot or a removal of a sub-1 factor lifts an admitted product past
+     * the bound, and neither write is this batch's to refuse. The charge stays
+     * guarded where the money is taken: `rpFor`/`chargeUsage` fail closed.
      */
     async replaceInstallChain(
       input: { appId: string; workspaceId: string; botIds: readonly string[] },
@@ -1769,14 +1836,17 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                SELECT ?1, ?2, n FROM unadmitted WHERE n <> 0`,
             )
             .bind(input.appId, input.workspaceId, requested),
-          // The PRICE guard, same recipe, same table: a row is inserted only
-          // when this rewrite would serve a chain product outside
-          // [`> 0`, `CHAIN_MULTIPLIER_MAX`] — above the bound, or multiplied
-          // down to `0` by enough small (each individually legal) factors. Both
-          // are products `isChainMultiplier` refuses, so both would turn the
-          // Apps list into a load error. It deliberately omits `n`, so its
-          // refusal is the column's NOT NULL rather than the table's CHECK —
-          // that is what tells the two refusals apart below.
+          // The PRICE guard, same recipe, same table. Both halves ride the
+          // "mounts a NEW id" clause because ONLY a new mount can change the
+          // product in a way the reader refuses: multiplying in small (each
+          // individually legal) factors can underflow it to `0`, and new ids can
+          // push it past the write bound. A removal divides by a positive factor
+          // and a reorder keeps the same factors, so neither can produce a
+          // non-positive product and neither is ever vetoed — that is the
+          // operator's only way to repair an oversize chain, and the reader
+          // accepts the overshoot it leaves. It omits `n`, so its refusal is the
+          // column's NOT NULL rather than the table's CHECK — that is what tells
+          // the two refusals apart below.
           //
           // The product is taken in `json_each` key order (left to right, the
           // same order the served `month.multiplier` reduces in), so an
@@ -1878,25 +1948,34 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       // into N+1 for a whole Apps page. The override's column is NOT NULL, so
       // COALESCE expresses "override else default" exactly.
       //
-      // The bot's DEFAULT selector and its runtime harness are the owner's
-      // configuration: a retained row whose bot stopped being available here
-      // (unshared, or owned by someone else) still shows its mount and its
+      // The bot's DEFAULT selector, its runtime harness AND its price are the
+      // owner's configuration: a retained row whose bot stopped being available
+      // here (unshared, or owned by someone else) still shows its mount and its
       // history, but not the configuration written after this workspace's
       // relation ended. The availability predicate is the same one the mapper
       // applies, so the two cannot drift.
+      //
+      // The PRICE is withheld to the effective `1` / `null` rather than nulled
+      // outright: `multiplier` is a number on the wire, and a factor of 1 is
+      // exactly what an unshared bot costs here (nothing runs it), so the served
+      // value states the truth without disclosing a price the owner can still
+      // change. `effective_monthly_rp` becomes `null` for the same reason — the
+      // relay skips the row, so no ceiling applies to it.
       const available = `(r.scope = 'shared' OR r.workspace_id = ?1)`;
       const res = await db
         .prepare(
           `SELECT ib.github_app_id AS app_id, ib.position, ib.bot_id, r.name, r.description,
                   r.workspace_id AS bot_workspace_id, r.scope, ws.name AS provider_workspace,
-                  r.multiplier, r.monthly_rp, r.archived_at,
+                  r.archived_at,
+                  CASE WHEN ${available} THEN r.multiplier ELSE 1 END AS multiplier,
                   CASE WHEN ${available} AND r.archived_at IS NULL THEN r.sandbox_image_id END
                     AS sandbox_image_id,
                   CASE WHEN ${available} AND r.archived_at IS NULL
                        THEN (SELECT bc.chain FROM bot_model_chains bc
                               WHERE bc.bot_id = r.id AND bc.name = 'default') END AS default_chain,
-                  COALESCE((SELECT o.monthly_rp FROM bot_quota_overrides o
-                             WHERE o.bot_id = r.id AND o.workspace_id = ?1), r.monthly_rp)
+                  CASE WHEN ${available}
+                       THEN COALESCE((SELECT o.monthly_rp FROM bot_quota_overrides o
+                                       WHERE o.bot_id = r.id AND o.workspace_id = ?1), r.monthly_rp) END
                     AS effective_monthly_rp
              FROM app_install_bots ib
              JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
@@ -1915,7 +1994,6 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           scope: BotScope;
           provider_workspace: string;
           multiplier: number;
-          monthly_rp: number | null;
           archived_at: string | null;
           sandbox_image_id: string | null;
           default_chain: string | null;

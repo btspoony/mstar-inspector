@@ -21,7 +21,7 @@ import { SESSION_COOKIE, createSessionValue, verifyValue } from "../../src/dashb
 import { createUser } from "../../src/dashboard/users";
 import { parseAppDetailFrom } from "../../src/spa/pages/AppDetailPage";
 import { parseSettings, type SettingsPayload } from "../../src/spa/pages/data";
-import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, seedWorkspaceMember, type TestD1 } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 import type { Env } from "../../src/worker/env";
@@ -96,6 +96,9 @@ async function orphanWorld(): Promise<TestD1> {
   });
   return db;
 }
+
+/** The `users.id` the bind write re-checks; alice owns `default` in every world here. */
+const ALICE_ID = (db: TestD1): string => seedWorkspaceMember(db, CALLER_WS, "alice", "owner");
 
 const origFetch = globalThis.fetch;
 afterEach(() => {
@@ -304,7 +307,7 @@ describe("F2-8 — an installation-only manager reads the blocked zero-target fa
   async function installerOnlyWorld(): Promise<TestD1> {
     const db = await orphanWorld();
     const apps = createReviewBotsStore(db);
-    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS)).toBe("bound");
+    expect(await apps.bindInstallation(APP_ROW, INSTALLATION, CALLER_WS, ALICE_ID(db))).toBe("bound");
     // The owner stops sharing — the mount stays, the configuration does not.
     db.raw
       .prepare("UPDATE review_bots SET scope = 'owned' WHERE id = ?")
