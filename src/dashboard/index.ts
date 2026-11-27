@@ -2316,6 +2316,7 @@ async function usableBotsRead(
       scope: bot.scope,
       multiplier: bot.multiplier,
       month_used_rp: spend.get(bot.id) ?? 0,
+      archived: bot.archived_at !== null,
     })),
   };
 }
@@ -2357,6 +2358,40 @@ const usableBotsRoute = async (c: DashboardContext) => {
       deploymentModeOf(c.env.DEPLOYMENT_MODE),
     ),
   );
+};
+
+/**
+ * Create ONE standalone bot in the calling workspace (no GitHub App behind it,
+ * which is the point: a workspace can own a bot without an App). Owner/admin
+ * only — the same manager gate the bot write faces apply. The id is a UUID, so
+ * it can never collide with a numeric GitHub App id at the route boundary.
+ */
+const botCreateRoute = async (c: DashboardContext): Promise<Response> => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  if (!canManageRole(gate.scope.role)) return c.json({ error: "forbidden" }, 403);
+  let body: { name?: unknown; description?: unknown } | null = null;
+  try {
+    const parsed = (await c.req.json()) as unknown;
+    body = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+  }
+  if (body === null) return c.json({ error: "body must be { name, description? }" }, 400);
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (name.length === 0) return c.json({ error: "name must be a non-empty string" }, 400);
+  const rawDescription = body.description;
+  if (rawDescription !== undefined && rawDescription !== null && typeof rawDescription !== "string") {
+    return c.json({ error: "description must be a string or null" }, 400);
+  }
+  const id = crypto.randomUUID();
+  const created = await createReviewBotsStore(gate.db).createBot({
+    id,
+    workspaceId: gate.scope.workspaceId,
+    name,
+    description: rawDescription === undefined || rawDescription === null ? null : rawDescription,
+  });
+  if (!created) return c.json({ error: "the workspace is no longer live" }, 409);
+  return c.json({ id }, 201);
 };
 
 async function appStatusAction(
@@ -6035,6 +6070,7 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
     access: "write",
   },
   { method: "get", path: "/api/review-bots", handler: usableBotsRoute, access: "write" },
+  { method: "post", path: "/api/review-bots", handler: botCreateRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId", handler: appDetailSettingsRoute, access: "write" },
   { method: "get", path: "/api/review-bots/:botId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/review-bots/:botId/bot", handler: appBotRoute, access: "write" },

@@ -18,6 +18,7 @@ export const SPA_PAGES = [
   "login",
   "app-detail",
   "bot-detail",
+  "bots",
 ] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
@@ -34,7 +35,8 @@ export type SpaRoute =
   | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
   | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string }
-  | { page: "bot-detail"; pathname: string; botId: string; workspaceRef: string };
+  | { page: "bot-detail"; pathname: string; botId: string; workspaceRef: string }
+  | { page: "bots"; pathname: string; workspaceRef: string };
 
 /**
  * First path segments that can never name a workspace (today's routes). ONE
@@ -99,6 +101,7 @@ const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)$/;
 const WORKSPACE_REPOS_PATH = /^\/dashboard\/([^/]+)\/repos$/;
 const WORKSPACE_REPOS_DETAIL_PATH = /^\/dashboard\/([^/]+)\/repos\/([^/]+)$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
+const WORKSPACE_BOTS_PATH = /^\/dashboard\/([^/]+)\/bots$/;
 const WORKSPACE_BOT_DETAIL_PATH = /^\/dashboard\/([^/]+)\/bots\/([^/]+)$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
 const WORKSPACE_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/settings$/;
@@ -182,6 +185,7 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
   if (workspaceRef !== null) {
     if (WORKSPACE_REPOS_PATH.test(pathname)) return { page: "repos", pathname, workspaceRef };
     if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceRef };
+    if (WORKSPACE_BOTS_PATH.test(pathname)) return { page: "bots", pathname, workspaceRef };
     if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
     if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
     const targetId = WORKSPACE_REPOS_DETAIL_PATH.exec(pathname)?.[2];

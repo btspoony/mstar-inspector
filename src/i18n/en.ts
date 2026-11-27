@@ -24,6 +24,7 @@ export const en = {
     primary: "Primary navigation",
     apps: "Apps",
     targets: "Repositories",
+    bots: "Bots",
     members: "Members",
     settings: "Settings",
     platformOperations: "Platform operations",
@@ -127,6 +128,8 @@ export const en = {
   bots: {
     list: {
       title: "Bots",
+      description:
+        "The Review Bots this workspace can use: its own, and the ones shared with it. A bot is configured on its own page.",
       ownedSection: "Bots I created",
       ownedHint: "Review bots this workspace provides and maintains; editable here.",
       sharedSection: "Bots shared with me",
@@ -138,7 +141,10 @@ export const en = {
       title: "Create bot",
       nameLabel: "Name",
       descriptionLabel: "Description (optional)",
+      hint: "The bot is created in this workspace and configured on its own page.",
       submit: "Create",
+      nameRequired: "Enter a bot name.",
+      failed: "The bot was not created — nothing changed.",
     },
     overridesTitle: "Per-workspace ceilings",
     overridesHint:

@@ -1040,6 +1040,31 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return row;
     },
 
+    /**
+     * One standalone bot row (no GitHub App behind it): an owned bot at
+     * multiplier 1 on the `omp` runtime, the same id/timestamp conventions
+     * `createApp` writes. The guarded INSERT re-checks the live workspace, so a
+     * workspace deleted between the route's gate and this write creates nothing.
+     */
+    async createBot(input: {
+      id: string;
+      workspaceId: string;
+      name: string;
+      description: string | null;
+    }): Promise<boolean> {
+      const res = await db
+        .prepare(
+          `INSERT INTO review_bots
+             (id, workspace_id, name, description, scope, sandbox_image_id,
+              multiplier, created_at, updated_at)
+           SELECT ?1, ?2, ?3, ?4, 'owned', 'omp', 1, datetime('now'), datetime('now')
+            WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?2 AND deleted_at IS NULL)`,
+        )
+        .bind(input.id, input.workspaceId, input.name, input.description)
+        .run();
+      return res.meta.changes > 0;
+    },
+
     async countLiveApps(workspaceId: string): Promise<number> {
       const row = await db
         .prepare(

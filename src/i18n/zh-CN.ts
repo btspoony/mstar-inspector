@@ -6,6 +6,7 @@ export const zhCN: Dictionary = {
     primary: "主导航",
     apps: "应用",
     targets: "仓库",
+    bots: "机器人",
     members: "成员",
     settings: "设置",
     platformOperations: "平台运营",
@@ -106,6 +107,7 @@ export const zhCN: Dictionary = {
   bots: {
     list: {
       title: "机器人",
+      description: "本工作区可用的 Review Bot：自有与共享。机器人配置只在其详情页进行。",
       ownedSection: "我创建的机器人",
       ownedHint: "本工作区提供并维护的 Review Bot，可编辑。",
       sharedSection: "共享给我的机器人",
@@ -117,7 +119,10 @@ export const zhCN: Dictionary = {
       title: "创建机器人",
       nameLabel: "名称",
       descriptionLabel: "描述（可选）",
+      hint: "机器人创建在本工作区，配置在其详情页进行。",
       submit: "创建",
+      nameRequired: "请输入机器人名称。",
+      failed: "机器人未创建——没有任何改动。",
     },
     overridesTitle: "按工作区设置上限",
     overridesHint: "留空使用默认上限。工作区挂载此机器人后出现在这里。",

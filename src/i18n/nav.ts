@@ -5,6 +5,7 @@ export type NavItem = { labelKey: DictionaryKey; href: string };
 export const NAV_ITEMS: NavItem[] = [
   { labelKey: "nav.targets", href: "/dashboard/repos" },
   { labelKey: "nav.apps", href: "/dashboard/apps" },
+  { labelKey: "nav.bots", href: "/dashboard/bots" },
   { labelKey: "nav.members", href: "/dashboard/members" },
   { labelKey: "nav.settings", href: "/dashboard/settings" },
 ];

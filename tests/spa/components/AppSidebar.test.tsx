@@ -63,7 +63,7 @@ describe("AppSidebar platform-operations entry", () => {
 });
 
 describe("product nav containment (I-000253)", () => {
-  test("the nav is the four product items, with no group label of any kind", async () => {
+  test("the nav is the five product items, with no group label of any kind", async () => {
     const { container, cleanup } = await mountSidebar(operatorModel);
     try {
       const labels = [...container.querySelectorAll('[data-slot="sidebar-content"] [data-slot="sidebar-menu-button"]')].map(
@@ -72,6 +72,7 @@ describe("product nav containment (I-000253)", () => {
       expect(labels).toEqual([
         t("en", "nav.targets"),
         t("en", "nav.apps"),
+        t("en", "nav.bots"),
         t("en", "nav.members"),
         t("en", "nav.settings"),
       ]);

@@ -1,4 +1,4 @@
-import { FolderGit2, LayoutGrid, Settings, ShieldCheck, Users } from "lucide-react";
+import { Bot, FolderGit2, LayoutGrid, Settings, ShieldCheck, Users } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -13,7 +13,7 @@ import {
 import type { SidebarModel } from "../shell";
 import { spaClick } from "../spa-click";
 
-const NAV_ICONS = { repos: FolderGit2, apps: LayoutGrid, members: Users, settings: Settings } as const;
+const NAV_ICONS = { repos: FolderGit2, apps: LayoutGrid, bots: Bot, members: Users, settings: Settings } as const;
 
 /**
  * Brand mark: the sidebar wordmark mark is the single source —
