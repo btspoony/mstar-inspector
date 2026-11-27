@@ -23,6 +23,16 @@
  * stored value, so it legitimately exceeds the single-bot bound (two 100× bots
  * give 10,000); it is bounded by the price the whole chain produces.
  *
+ * `BOT_MULTIPLIER_MIN` is the same fact at the other end: a product of legal
+ * factors must still be STRICTLY POSITIVE in floating point, or the chain it
+ * describes is served as `0` and the Apps parser refuses it. `0.01` is chosen
+ * so the floor costs no price anyone could mean — every base weight is a whole
+ * number ≥ 1, so any smaller factor already prices every level at or below what
+ * `0.01` prices (`rpFor` floors at 1 RP) — and it takes 162 such factors to
+ * underflow a double, far past any chain an operator mounts one row at a time.
+ * Readers keep the wider {@link isStoredBotMultiplier}, so a row priced before
+ * this floor still renders.
+ *
  * `RP_PER_CREDIT_MAX` is the profile's credit denominator. Every amount is
  * divided by it, so a rate past the ceiling domain would render every real
  * spend as `0.00` — and the column admits any positive integer, which is
@@ -33,6 +43,7 @@
 export const RP_CEILING_MAX = 1_000_000_000;
 export const QUOTA_BASE_MAX = 300;
 export const BOT_MULTIPLIER_MAX = 1_000;
+export const BOT_MULTIPLIER_MIN = 0.01;
 export const CHAIN_MULTIPLIER_MAX = Math.floor(RP_CEILING_MAX / QUOTA_BASE_MAX);
 export const RP_PER_CREDIT_MAX = RP_CEILING_MAX;
 
@@ -46,14 +57,40 @@ export function isRpCeiling(value: unknown): value is number {
   );
 }
 
-/** A bot's price factor: finite, > 0, and bounded so its price stays representable. */
+/**
+ * A bot's price factor as a WRITER may enter it: finite, inside
+ * [`BOT_MULTIPLIER_MIN`, `BOT_MULTIPLIER_MAX`] — bounded above so its price
+ * stays representable, floored so a chain's product of legal factors stays
+ * strictly positive.
+ */
 export function isBotMultiplier(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= BOT_MULTIPLIER_MAX;
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= BOT_MULTIPLIER_MIN &&
+    value <= BOT_MULTIPLIER_MAX
+  );
 }
 
 /** A chain's factor: the product of its bots' multipliers — finite, > 0, and priced in domain. */
 export function isChainMultiplier(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= CHAIN_MULTIPLIER_MAX;
+}
+
+/**
+ * The READ domain of a STORED multiplier: finite, > 0 and inside the price
+ * bound, with NO floor.
+ *
+ * Deliberately wider than {@link isBotMultiplier}: the column only CHECKs
+ * `multiplier > 0`, so a bot priced before the floor existed can hold a smaller
+ * factor. Refusing it would turn the Apps list and the bot page into a load
+ * error for data nobody migrated, and such a factor still prices every level at
+ * the 1-RP floor `rpFor` applies. What it must NOT do is let two of them
+ * multiply into `0` — that is why the chain write refuses a non-positive
+ * product. `0`, negatives, `Infinity`, `NaN` and non-numbers fail.
+ */
+export function isStoredBotMultiplier(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= BOT_MULTIPLIER_MAX;
 }
 
 /** A computed price: a whole number of RP inside the same domain, at least 1. */

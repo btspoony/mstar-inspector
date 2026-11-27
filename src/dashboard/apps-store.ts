@@ -1723,13 +1723,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * mountable, the guard row's CHECK fires, and the whole batch rolls back.
      *
      * The chain's PRICE rides the same batch: the Apps list serves the product
-     * of the mounted multipliers, and `isChainMultiplier` refuses a product
-     * above `CHAIN_MULTIPLIER_MAX`, so a chain that overshoots would make the
-     * whole page fail to parse. The product is computed from the ids being
-     * written against the multipliers stored at write time — never from a
-     * pre-batch read. A rewrite that only SHRINKS an already-oversize chain (a
-     * removal, a reorder) is admitted: refusing it would leave the operator
-     * unable to repair the chain, and the served product can only fall.
+     * of the mounted multipliers, and `isChainMultiplier` requires that product
+     * to be strictly positive and at most `CHAIN_MULTIPLIER_MAX`, so a chain
+     * that overshoots — or underflows to `0` — would make the whole page fail to
+     * parse. The product is computed from the ids being written against the
+     * multipliers stored at write time — never from a pre-batch read. A rewrite
+     * that only SHRINKS an already-out-of-domain chain (a removal, a reorder) is
+     * admitted: refusing it would leave the operator unable to repair the chain,
+     * and the served product can only fall.
      */
     async replaceInstallChain(
       input: { appId: string; workspaceId: string; botIds: readonly string[] },
@@ -1769,18 +1770,21 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             )
             .bind(input.appId, input.workspaceId, requested),
           // The PRICE guard, same recipe, same table: a row is inserted only
-          // when this rewrite would serve a chain product above
-          // `CHAIN_MULTIPLIER_MAX`. It deliberately omits `n`, so its refusal is
-          // the column's NOT NULL rather than the table's CHECK — that is what
-          // tells the two refusals apart below.
+          // when this rewrite would serve a chain product outside
+          // [`> 0`, `CHAIN_MULTIPLIER_MAX`] — above the bound, or multiplied
+          // down to `0` by enough small (each individually legal) factors. Both
+          // are products `isChainMultiplier` refuses, so both would turn the
+          // Apps list into a load error. It deliberately omits `n`, so its
+          // refusal is the column's NOT NULL rather than the table's CHECK —
+          // that is what tells the two refusals apart below.
           //
           // The product is taken in `json_each` key order (left to right, the
           // same order the served `month.multiplier` reduces in), so an
           // exactly-at-bound chain is admitted by the writer on the very bits
           // the reader accepts. A rewrite that mounts no id the chain does not
           // already hold can only shrink or reorder what is served, so it is
-          // admitted even when the old chain was already past the bound: that
-          // is the operator's only way to repair it.
+          // admitted even when the old chain was already outside the domain:
+          // that is the operator's only way to repair it.
           db
             .prepare(
               `WITH RECURSIVE step(i, p) AS (
@@ -1789,10 +1793,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                  SELECT j.key, step.p * COALESCE((SELECT b.multiplier FROM review_bots b
                                                    WHERE b.id = j.value AND b.deleted_at IS NULL), 1)
                    FROM step JOIN json_each(?3) j ON j.key = step.i + 1
+               ),
+               chain(product) AS (
+                 SELECT p FROM step ORDER BY i DESC LIMIT 1
                )
                INSERT INTO app_install_chain_guard (github_app_id, workspace_id)
                SELECT ?1, ?2
-                WHERE (SELECT p FROM step ORDER BY i DESC LIMIT 1) > ?4
+                 FROM chain
+                WHERE (product <= 0 OR product > ?4)
                   AND EXISTS (SELECT 1 FROM json_each(?3) j
                                WHERE j.value NOT IN (SELECT ib.bot_id FROM app_install_bots ib
                                                       WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2))`,

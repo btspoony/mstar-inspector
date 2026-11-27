@@ -355,9 +355,10 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
 
 /**
  * The chain's product is the Apps list's `month.multiplier`, which
- * `isChainMultiplier` bounds at `CHAIN_MULTIPLIER_MAX`. A write the reader would
- * refuse turns the whole Apps page into a load error, so the store refuses it
- * first — and the refusal must leave the previous chain byte-identical.
+ * `isChainMultiplier` requires to be strictly positive and at most
+ * `CHAIN_MULTIPLIER_MAX`. A write the reader would refuse turns the whole Apps
+ * page into a load error, so the store refuses it first — and the refusal must
+ * leave the previous chain byte-identical.
  */
 describe("replaceInstallChain — the chain product stays in the served domain", () => {
   function seedBotWithMultiplier(db: TestD1, id: string, multiplier: number): void {
@@ -369,7 +370,7 @@ describe("replaceInstallChain — the chain product stays in the served domain",
       .run(id, id, multiplier, TS, TS);
   }
 
-  test("three bots whose product exceeds the bound are refused, and the old chain stands", async () => {
+  test("a chain whose product exceeds the bound is refused, and the old chain stands", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "provider");
     seedApp(db, "app-1");
@@ -381,6 +382,7 @@ describe("replaceInstallChain — the chain product stays in the served domain",
     const store = createReviewBotsStore(db);
     await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-solo"] });
 
+    // Every factor is inside the single-bot write bound (1000).
     // 1000 × 1000 × 4 = 4,000,000 > CHAIN_MULTIPLIER_MAX (3,333,333).
     expect(
       await store.replaceInstallChain({
@@ -393,14 +395,15 @@ describe("replaceInstallChain — the chain product stays in the served domain",
     db.raw.close();
   });
 
-  test("a chain whose product is exactly the bound is accepted, and the served product parses", async () => {
+  test("a chain of legally-writable bots near the bound is accepted, and the served product parses", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "provider");
     seedApp(db, "app-1");
-    // 3 × 239 × 4,649 = 3,333,333 = CHAIN_MULTIPLIER_MAX exactly.
+    // 1000 × 1000 × 3 = 3,000,000 < CHAIN_MULTIPLIER_MAX, and each factor is a
+    // value `isBotMultiplier` admits, so a real operator can write this chain.
+    seedBotWithMultiplier(db, "bot-1000a", 1000);
+    seedBotWithMultiplier(db, "bot-1000b", 1000);
     seedBotWithMultiplier(db, "bot-3", 3);
-    seedBotWithMultiplier(db, "bot-239", 239);
-    seedBotWithMultiplier(db, "bot-4649", 4649);
     seedInstall(db, "app-1", "default");
     const store = createReviewBotsStore(db);
 
@@ -408,11 +411,13 @@ describe("replaceInstallChain — the chain product stays in the served domain",
       await store.replaceInstallChain({
         appId: "app-1",
         workspaceId: "default",
-        botIds: ["bot-3", "bot-239", "bot-4649"],
+        botIds: ["bot-1000a", "bot-1000b", "bot-3"],
       }),
     ).toBe("ok");
     const chain = (await store.listInstallChainBots("default")).get("app-1") ?? [];
-    expect(isChainMultiplier(chain.reduce((product, bot) => product * bot.multiplier, 1))).toBe(true);
+    const product = chain.reduce((total, bot) => total * bot.multiplier, 1);
+    expect(product).toBe(3_000_000);
+    expect(isChainMultiplier(product)).toBe(true);
     db.raw.close();
   });
 
@@ -443,6 +448,60 @@ describe("replaceInstallChain — the chain product stays in the served domain",
       await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-4"] }),
     ).toBe("ok");
     expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-4" }]);
+    db.raw.close();
+  });
+
+  /**
+   * The floor's other half: each factor was writable under the OLD predicate
+   * (`> 0`, no floor), and two of them multiply to `0` in a double. The served
+   * `month.multiplier` would be `0`, which `isChainMultiplier` refuses, so the
+   * store must refuse the mount — and, like the ceiling case, leave the old
+   * chain standing.
+   */
+  test("a chain whose product underflows to zero is refused, and the old chain stands", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    // Below today's floor, so refused at the writer now — but reachable from a
+    // row written before it existed, which is exactly the state to repair.
+    seedBotWithMultiplier(db, "bot-tiny-a", 1e-200);
+    seedBotWithMultiplier(db, "bot-tiny-b", 1e-200);
+    seedBot(db, "bot-solo", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-solo"] });
+
+    // 1e-200 × 1e-200 === 0 in IEEE-754 doubles.
+    expect(1e-200 * 1e-200).toBe(0);
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-tiny-a", "bot-tiny-b"],
+      }),
+    ).toBe("chain_too_large");
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-solo" }]);
+    db.raw.close();
+  });
+
+  /**
+   * A single below-floor row is NOT a broken chain: its product is still
+   * positive, so the list parses and `rpFor` prices it at its 1-RP floor. This
+   * is why the floor lives on the writers and not on the chain reader.
+   */
+  test("one legacy below-floor bot mounts alone, and its product is the served value", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBotWithMultiplier(db, "bot-tiny", 1e-200);
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+
+    expect(
+      await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-tiny"] }),
+    ).toBe("ok");
+    const chain = (await store.listInstallChainBots("default")).get("app-1") ?? [];
+    expect(isChainMultiplier(chain.reduce((product, bot) => product * bot.multiplier, 1))).toBe(true);
     db.raw.close();
   });
 });

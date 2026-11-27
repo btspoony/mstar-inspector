@@ -13,11 +13,13 @@ import { updateBotPricing } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import {
   BOT_MULTIPLIER_MAX,
+  BOT_MULTIPLIER_MIN,
   CHAIN_MULTIPLIER_MAX,
   RP_CEILING_MAX,
   isBotMultiplier,
   isChainMultiplier,
   isRpCeiling,
+  isStoredBotMultiplier,
 } from "../../src/contracts/rp-limits";
 import { rpFor, type QuotaProfile } from "../../src/store/quota-store";
 import { parseApps, type AppsPayload } from "../../src/spa/pages/data";
@@ -99,13 +101,30 @@ describe("the shared RP domain", () => {
     expect(isRpCeiling(1.5)).toBe(false);
   });
 
-  test("the multiplier is finite, positive and bounded so its price stays representable", () => {
-    expect(isBotMultiplier(0.001)).toBe(true);
+  test("the multiplier is finite, floored and bounded so its price stays representable", () => {
+    // The floor keeps a chain's product of legal factors strictly positive: two
+    // legacy legal values (1e-200 each) multiply to 0, which the chain parser
+    // refuses. 0.01 costs no price anyone could mean — `rpFor` floors at 1 RP.
+    expect(isBotMultiplier(BOT_MULTIPLIER_MIN)).toBe(true);
+    expect(isBotMultiplier(BOT_MULTIPLIER_MIN / 10)).toBe(false);
+    expect(isBotMultiplier(1e-200)).toBe(false);
     expect(isBotMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
     expect(isBotMultiplier(BOT_MULTIPLIER_MAX + 1)).toBe(false);
     expect(isBotMultiplier(Number.POSITIVE_INFINITY)).toBe(false);
     expect(isBotMultiplier(0)).toBe(false);
     expect(isBotMultiplier(-1)).toBe(false);
+  });
+
+  test("a STORED multiplier keeps the wider read domain, so a legacy row still renders", () => {
+    // Written before the floor existed; its product is still positive on its
+    // own and `rpFor` prices it at 1 RP, so refusing it would be a load error
+    // for data nobody migrated.
+    expect(isStoredBotMultiplier(1e-200)).toBe(true);
+    expect(isStoredBotMultiplier(0.001)).toBe(true);
+    expect(isStoredBotMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isStoredBotMultiplier(BOT_MULTIPLIER_MAX + 1)).toBe(false);
+    expect(isStoredBotMultiplier(0)).toBe(false);
+    expect(isStoredBotMultiplier(Number.NaN)).toBe(false);
   });
 
   // The Apps list serves `month.multiplier` as the PRODUCT of the mounted
@@ -119,6 +138,10 @@ describe("the shared RP domain", () => {
     expect(isChainMultiplier(CHAIN_MULTIPLIER_MAX + 1)).toBe(false);
     expect(isChainMultiplier(Number.POSITIVE_INFINITY)).toBe(false);
     expect(isChainMultiplier(0)).toBe(false);
+    // Two factors each written before the floor underflow to 0: a 0 product is
+    // outside the domain exactly like an overshoot is.
+    expect(1e-200 * 1e-200).toBe(0);
+    expect(isChainMultiplier(1e-200 * 1e-200)).toBe(false);
     // The bound is exactly "no storable ceiling could cover one review".
     expect(isRpCeiling(CHAIN_MULTIPLIER_MAX * 300)).toBe(true);
     expect(CHAIN_MULTIPLIER_MAX * 300 <= RP_CEILING_MAX).toBe(true);
@@ -154,12 +177,29 @@ describe("the pricing writer refuses what the reader cannot parse", () => {
     expect(storedPricing().multiplier).toBe(1);
   });
 
+  test("a multiplier below the floor is refused at the write, and a below-floor row still reads", async () => {
+    world();
+    db.raw.prepare("UPDATE review_bots SET multiplier = 1 WHERE id = ?").run(BOT_ROW);
+    // Below the floor: two of these would underflow the chain product to 0.
+    expect(
+      await updateBotPricing(db, { botId: BOT_ROW, multiplier: BOT_MULTIPLIER_MIN / 10, authority, now: NOW }),
+    ).toBe("invalid");
+    expect(await updateBotPricing(db, { botId: BOT_ROW, multiplier: 1e-200, authority, now: NOW })).toBe("invalid");
+    expect(storedPricing().multiplier).toBe(1);
+    // A row already holding one (written before the floor) is NOT re-validated on
+    // read: the page it feeds still parses.
+    db.raw.prepare("UPDATE review_bots SET multiplier = ? WHERE id = ?").run(1e-200, BOT_ROW);
+    expect(storedPricing().multiplier).toBe(1e-200);
+  });
+
   test("the route answers 400 for both, so the SPA sees the same refusal", async () => {
     world();
     const unsafe = await patchPricing({ monthly_rp: Number.MAX_SAFE_INTEGER + 2 });
     expect(unsafe.status).toBe(400);
     const multiplier = await patchPricing({ multiplier: BOT_MULTIPLIER_MAX + 1 });
     expect(multiplier.status).toBe(400);
+    const belowFloor = await patchPricing({ multiplier: BOT_MULTIPLIER_MIN / 10 });
+    expect(belowFloor.status).toBe(400);
     const maxValid = await patchPricing({ monthly_rp: RP_CEILING_MAX, multiplier: BOT_MULTIPLIER_MAX });
     expect(maxValid.status).toBe(200);
     expect(storedPricing()).toEqual({ multiplier: BOT_MULTIPLIER_MAX, monthly_rp: RP_CEILING_MAX });
@@ -239,6 +279,15 @@ describe("the SPA parser applies the same domain", () => {
   test("a chain row's multiplier above the single-bot bound makes the parse fail", () => {
     expect(parseApps(appsPayload(chainRow()))).not.toBeNull();
     expect(parseApps(appsPayload(chainRow({ multiplier: BOT_MULTIPLIER_MAX + 1 })))).toBeNull();
+  });
+
+  // A row priced before the writer floor existed is a STORED value, not a
+  // write: it parses (its own product is positive, and `rpFor` prices it at the
+  // 1-RP floor). Only the chain product reaching 0 is refused, and the store
+  // refuses that at the write.
+  test("a below-floor stored multiplier still parses on both faces", () => {
+    expect(isBotMultiplier(1e-200)).toBe(false);
+    expect(parseApps(appsPayload(chainRow({ multiplier: 1e-200 })))).not.toBeNull();
   });
 
   // The wire fact: `month.multiplier` is the chain's PRODUCT. Two 100× bots —

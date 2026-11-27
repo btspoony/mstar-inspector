@@ -1,10 +1,10 @@
 
 import { FREE_SLOT_REFUSAL, WORKSPACE_CREATION_CLOSED_REFUSAL } from "../../dashboard/entitlement";
 import {
-  isBotMultiplier,
   isChainMultiplier,
   isRpAmount,
   isRpCeiling,
+  isStoredBotMultiplier,
   isStoredRpPerCredit,
   RP_CEILING_MAX,
 } from "../../contracts/rp-limits";
@@ -241,7 +241,9 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     typeof value.owned === "boolean" &&
     typeof value.can_manage === "boolean" &&
     isBotScope(value.scope) &&
-    isBotMultiplier(value.multiplier) &&
+    // A STORED factor: a row priced before the writer floor existed still
+    // renders, and the chain product below is what the list bounds.
+    isStoredBotMultiplier(value.multiplier) &&
     isRpAmount(value.month_used_rp) &&
     (value.effective_ceiling === null || isRpCeiling(value.effective_ceiling)) &&
     typeof value.archived === "boolean"
@@ -666,7 +668,7 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.provider_workspace === "string" &&
     typeof value.owned === "boolean" &&
     typeof value.available === "boolean" &&
-    isBotMultiplier(value.multiplier) &&
+    isStoredBotMultiplier(value.multiplier) &&
     typeof value.month_used_rp === "number" &&
     (value.effective_monthly_rp === null || isRpCeiling(value.effective_monthly_rp)) &&
     typeof value.archived === "boolean" &&
@@ -2897,7 +2899,8 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   // payload, and inside the shared RP/multiplier domain when present. A
   // fraction or an out-of-domain ceiling would fail the mounted-chain parser on
   // the NEXT reader, so it fails here too.
-  if (app.multiplier !== undefined && app.multiplier !== null && !isBotMultiplier(app.multiplier)) return null;
+  // A STORED factor, so the read domain has no floor; the writers hold the floor.
+  if (app.multiplier !== undefined && app.multiplier !== null && !isStoredBotMultiplier(app.multiplier)) return null;
   if (app.monthly_rp !== undefined && app.monthly_rp !== null && !isRpCeiling(app.monthly_rp)) return null;
   if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (

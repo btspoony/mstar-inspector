@@ -1,6 +1,6 @@
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { isBotMultiplier, isRpCeiling, isRpPrice, QUOTA_BASE_MAX, RP_CEILING_MAX } from "../contracts/rp-limits";
+import { isRpCeiling, isRpPrice, isStoredBotMultiplier, QUOTA_BASE_MAX, RP_CEILING_MAX } from "../contracts/rp-limits";
 import type { D1Like } from "./types";
 
 /**
@@ -206,11 +206,14 @@ export async function chargeUsage(
     throw new Error(`chargeUsage: unknown review level '${input.level}'`);
   }
   // The one factor the caller supplies, so it is checked without a read: an
-  // unbounded multiplier is refused before this write can even bind a month.
+  // out-of-domain multiplier is refused before this write can even bind a month.
+  // A STORED factor, not a writer's input — a bot priced before the writer floor
+  // existed still charges at the 1-RP floor `rpFor` applies, and refusing it
+  // would fail every review through a row no operator had to repair.
   // A REPLAY is the exception — a token that already paid is benign even if its
   // bot's row has since left the domain, and reporting it as a refusal would
   // raise a failure row for a run that was charged correctly.
-  if (!isBotMultiplier(input.multiplier)) {
+  if (!isStoredBotMultiplier(input.multiplier)) {
     if (await hasUsageEventForExecutionToken(db, input.executionToken)) return { charged: false };
     return { charged: false, refused: "price-out-of-domain" };
   }
