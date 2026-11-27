@@ -23,6 +23,7 @@ import {
   rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
+  setCheckExecutorBot,
   setCheckFallbackDesired,
   type CheckAttempt,
   type CheckConclusion,
@@ -40,6 +41,7 @@ import {
   recordTerminalizeOutcome,
 } from "../store/review-checks";
 import { claimPublicationLease, releasePublicationLease } from "../store/finding-lifecycle";
+import { createReviewBotsStore } from "../dashboard/apps-store";
 import { boundedCheckDetail, redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
 import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
@@ -947,6 +949,41 @@ export async function openPublicationFence(
 export type ReviewGate = { minScore: number; passVerdicts: readonly string[] };
 
 /**
+ * Who produced a verdict, as a completed review's Check names it: the Review
+ * Bot that executed the attempt and the GitHub App whose identity published
+ * the result. Both names may be unreadable (a deleted Bot, a renamed App, a row
+ * written before the executor column existed) — the templates then print the
+ * id the caller already holds, so naming never fails a Check.
+ *
+ * A Bot name alone is not an identity: two runs of one head under different
+ * Bots mean different executing configurations (model chain, sandbox image),
+ * while the publishing App stays the same.
+ */
+export type CheckExecutor = {
+  appId: string;
+  appName: string | null;
+  botId: string | null;
+  botName: string | null;
+};
+
+/**
+ * The closing sentence of a completed review's summary. Composed INSIDE the
+ * template, before `setCheckDesired` freezes the text: a later send is compared
+ * against the frozen string verbatim, so nothing can be appended afterwards.
+ *
+ * `boundedText` supplies the fallback the gate sentence already uses for a
+ * missing verdict: a name that cannot be read reads as its id, and a row with
+ * no id either reads "unknown".
+ */
+function executorLine(executor: CheckExecutor | undefined): string {
+  if (executor === undefined) return "";
+  const bot = boundedText(executor.botName ?? "", executor.botId ?? "unknown");
+  const app = boundedText(executor.appName ?? "", executor.appId);
+  return ` Executed by review bot "${bot}"; published as GitHub App "${app}".`;
+}
+
+
+/**
  * Frozen summaries, exactly as spec §7.9's matrix spells them.
  *
  * A terminal FAILURE carries the approved wording of its category instead (see
@@ -956,10 +993,10 @@ export type ReviewGate = { minScore: number; passVerdicts: readonly string[] };
  * the point rather than an internal cause.
  */
 export const CHECK_SUMMARIES = {
-  gateMet: (sha7: string, round: number, verdict: string, score: number, gate: ReviewGate) =>
-    `Review gate met for ${sha7} (round ${round}): verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
-  gateMissed: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
-    `Review gate missed for ${sha7}: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  gateMet: (sha7: string, round: number, verdict: string, score: number, gate: ReviewGate, executor?: CheckExecutor) =>
+    `Review gate met for ${sha7} (round ${round}): verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).${executorLine(executor)}`,
+  gateMissed: (sha7: string, verdict: string, score: number, gate: ReviewGate, executor?: CheckExecutor) =>
+    `Review gate missed for ${sha7}: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).${executorLine(executor)}`,
   inProgress: (sha7: string) => `Review started for ${sha7} — this run reports the review of this commit.`,
   unconfirmed: "Review attempt could not be confirmed complete; publication status is unknown.",
   skipped: "No new changes since the last reviewed head; nothing to review for this head.",
@@ -1144,6 +1181,13 @@ export function decideConclusion(input: {
    * operator-facing clause so the Check answers where and what.
    */
   failureDetail?: string;
+  /**
+   * Who executed the proven publication, when the caller can reach it. Only
+   * the two gate templates print it; every other branch leaves it out, so an
+   * absent executor is not a gap but the honest answer of a path that produced
+   * no completed review.
+   */
+  executor?: CheckExecutor;
 }): CheckConclusion {
   const { proof, outcome, gate, review, inherited } = input;
   if (outcome === "budget-exhausted") {
@@ -1172,12 +1216,12 @@ export function decideConclusion(input: {
       ? {
           desired: "success",
           title: CHECK_NAME,
-          summary: withSeatCoverage(CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate), seatLine),
+          summary: withSeatCoverage(CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate, input.executor), seatLine),
         }
       : {
           desired: "failure",
           title: CHECK_NAME,
-          summary: withSeatCoverage(CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate), seatLine),
+          summary: withSeatCoverage(CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate, input.executor), seatLine),
         };
   }
   if (inherited !== undefined) {
@@ -1242,6 +1286,26 @@ function withSeatCoverage(summary: string, seatLine: string): string {
   return seatLine === "" ? summary : `${summary} ${seatLine}`;
 }
 
+/**
+ * The executor's two names for one attempt, read through the store that owns
+ * the `review_bots` face. Every failure — a missing App row, a deleted Bot, a
+ * database that cannot answer — collapses to `null` names: the templates then
+ * print the id the caller already holds, so resolving a name is never an error
+ * and never costs the Check.
+ *
+ * Shared by both settlement paths: the foreground holds the id on its handle,
+ * the recovery lane reads it back off the row.
+ */
+export async function readCheckExecutor(db: D1Like, scope: Scope, botId: string | null): Promise<CheckExecutor> {
+  try {
+    const names = await createReviewBotsStore(db).readExecutorNames(scope.appId, botId);
+    return { appId: scope.appId, appName: names?.appName ?? null, botId, botName: names?.botName ?? null };
+  } catch {
+    return { appId: scope.appId, appName: null, botId, botName: null };
+  }
+}
+
+
 
 /**
  * What the production lifecycle needs beyond the frozen §7.10 hook input.
@@ -1300,6 +1364,8 @@ export type CheckLifecycleHandle = {
   githubAppId: number;
   headSha: string;
   lease: Lease;
+  /** The Bot executing this attempt, as persisted by `begin`; absent or null when no payload named one. */
+  executorBotId?: string | null;
 };
 
 /** The §7.10 hook pair, as `begin`/`terminalize` (spec §7.10). */
@@ -1314,6 +1380,8 @@ export type CheckLifecycle = {
     executionDeadlineMs: number;
     expect?: { key: string; generation: number };
     latch?: CheckBeginLatch;
+    /** The Review Bot this attempt executes under; persisted once so the recovery lane can name it. */
+    botId?: string;
   }): Promise<CheckLifecycleHandle | null>;
   terminalize(input: {
     handle: CheckLifecycleHandle;
@@ -1593,6 +1661,27 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     );
   };
 
+  /**
+   * Stamp the executing Bot on the row this invocation holds. `begin` is the
+   * ONLY writer (migration 0126): the store's guard makes it a first-write-wins
+   * record, so an adoption of a row another invocation already stamped keeps
+   * THAT Bot's name in the summary. A lost write costs one name, never the
+   * Check — the caller still gets the id it holds.
+   */
+  const recordExecutor = async (
+    attemptId: string,
+    lease: Lease,
+    botId: string | undefined,
+  ): Promise<string | null> => {
+    if (botId === undefined || botId === "") return null;
+    const fence = fenceFor(lease);
+    try {
+      return await setCheckExecutorBot(deps.db, attemptId, fence.lease, botId, fence.nowMs);
+    } catch {
+      return null;
+    }
+  };
+
   const adoptLateCreatedRun = async (identity: CheckIdentity, lease: Lease, remoteId: number): Promise<void> => {
     const fence = fenceFor(lease);
     if (!(await attachCheckRunId(deps.db, identity.attemptId, fence.lease, remoteId, fence.nowMs))) return;
@@ -1638,6 +1727,10 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
           adopted = await adopt();
         }
         if (adopted === null) return null;
+        // Stamped as soon as the lease is held, before any remote call: an
+        // abandoned invocation's row must still name the Bot that was about to
+        // run, because the recovery lane is the one that will conclude it.
+        const executorBotId = await recordExecutor(claim.attempt.identity.attemptId, adopted, input.botId);
         if (input.latch?.isAbandoned() === true) {
           await recordTerminalizeOutcome(deps.db, claim.attempt.identity.attemptId, "no-handle", null).catch(() => {});
           await abandonUnterminalized(
@@ -1654,10 +1747,12 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
           githubAppId: claim.attempt.identity.githubAppId,
           headSha: claim.attempt.identity.headSha,
           lease: adopted,
+          executorBotId,
         };
       }
       if (claim.kind !== "claimed") return null;
       const { identity } = claim.attempt;
+      const executorBotId = await recordExecutor(identity.attemptId, claim.lease, input.botId);
       const begun = await adapter.beginCheck({ identity, lease: claim.lease });
       if (begun.kind !== "ready") {
         await releaseForRecovery(identity.attemptId, claim.lease, begun.reason, begun.requests > 0);
@@ -1699,6 +1794,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         githubAppId: identity.githubAppId,
         headSha: identity.headSha,
         lease: claim.lease,
+        executorBotId,
       };
     },
 
@@ -1888,6 +1984,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         input.inheritedHeadSha === undefined
           ? undefined
           : { headSha: handle.headSha, reviewedHeadSha: input.inheritedHeadSha };
+      // Resolved only for a proven publication: that is the one branch whose
+      // summary names who executed the review. The names join the text INSIDE
+      // the template, before `setCheckDesired` freezes it.
+      const executor =
+        proof === null ? undefined : await readCheckExecutor(deps.db, handle.scope, handle.executorBotId ?? null);
       const conclusion = decideConclusion({
         proof,
         outcome: input.outcome,
@@ -1895,6 +1996,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         review,
         inherited,
         headSha: handle.headSha,
+        ...(executor === undefined ? {} : { executor }),
         ...(input.budgetExhaustion === undefined ? {} : { budgetExhaustion: input.budgetExhaustion }),
         ...(input.failureDetail === undefined ? {} : { failureDetail: input.failureDetail }),
       });

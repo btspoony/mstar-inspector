@@ -41,6 +41,8 @@ import {
   CheckRequestNotDispatched,
   decideConclusion,
   isRequestNotDispatched,
+  readCheckExecutor,
+  type CheckExecutor,
   type ChecksAdapter,
   type ReviewGate,
 } from "../pipeline/checks";
@@ -661,7 +663,11 @@ async function reconcileCheckAttempt(
   }
   const gate = gateRead.kind === "read" ? gateRead.value : null;
   const review = reviewRead.kind === "read" ? reviewRead.value : null;
-  const conclusion = terminalConclusion(owned, proof, gate, review);
+  // The recovery lane holds no job payload: the executing Bot's id comes off
+  // the row `begin` stamped, so its first freeze and proof correction compose
+  // the SAME line the foreground would have.
+  const executor = proof === null ? undefined : await readCheckExecutor(db, scope, owned.executorBotId);
+  const conclusion = terminalConclusion(owned, proof, gate, review, executor);
   let authorizedReplacement = false;
   if (!correction && owedDesired !== null && conclusion.desired !== owedDesired) {
     if (current.correctionDispatchedMs !== null) {
@@ -1205,8 +1211,9 @@ function terminalConclusion(
   proof: PublicationProof | null,
   gate: ReviewGate | null,
   review: PublishedReview | null,
+  executor: CheckExecutor | undefined,
 ): CheckConclusion {
-  if (proof !== null) return decideConclusion({ proof, outcome: "expired", gate, review });
+  if (proof !== null) return decideConclusion({ proof, outcome: "expired", gate, review, ...(executor === undefined ? {} : { executor }) });
   if (owned.desired === "in_progress") {
     return decideConclusion({ proof: null, outcome: "expired", gate, review });
   }

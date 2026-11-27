@@ -17,6 +17,7 @@ import {
   releaseCheckClaim,
   setCheckCreateState,
   setCheckDesired,
+  setCheckExecutorBot,
   type CheckAttempt,
   type CheckConclusion,
   type CheckIdentity,
@@ -3952,5 +3953,202 @@ describe("boundedCheckDetail honours its cap", () => {
     expect(legitOut.length).toBeLessThanOrEqual(240);
     expect(legitOut).toContain("(attempt attempt-4b-0001)");
     expect(legitOut).toContain("…");
+  });
+});
+
+describe("the completed review's Check names its executor (migration 0126)", () => {
+  const gate: ReviewGate = { minScore: 80, passVerdicts: ["ship it"] };
+  const review = { verdict: "ship it", scorePct: 93 };
+  const proof: PublicationProof = {
+    publicationId: crypto.randomUUID(),
+    scope: SCOPE,
+    headSha: SHA,
+    kind: "review",
+    round: 1,
+    commentId: 9001,
+    bodySha256: "c".repeat(64),
+    confirmedMs: T0,
+  };
+  const sha7 = SHA.slice(0, 7);
+
+  test("two Bots on one head produce different summaries, each naming its own Bot and the publishing App", () => {
+    const first = decideConclusion({
+      proof,
+      outcome: "expired",
+      gate,
+      review,
+      executor: { appId: APP_ID, appName: "acme-bot", botId: "bot-a", botName: "infra-review" },
+    });
+    const second = decideConclusion({
+      proof,
+      outcome: "expired",
+      gate,
+      review,
+      executor: { appId: APP_ID, appName: "acme-bot", botId: "bot-b", botName: "nightly-review" },
+    });
+
+    expect(first.summary).toBe(
+      `${CHECK_SUMMARIES.gateMet(sha7, proof.round, "ship it", 93, gate)} Executed by review bot "infra-review"; published as GitHub App "acme-bot".`,
+    );
+    expect(first.summary).not.toBe(second.summary);
+    expect(second.summary).toContain('Executed by review bot "nightly-review"');
+    // The same head, the same publishing identity: only the executing Bot moved.
+    expect(first.summary).toContain('published as GitHub App "acme-bot"');
+    expect(second.summary).toContain('published as GitHub App "acme-bot"');
+    expect(first.summary).toContain(`Review gate met for ${sha7}`);
+    expect(second.summary).toContain(`Review gate met for ${sha7}`);
+  });
+
+  test("a red Check names its Bot exactly as a green one does", () => {
+    const missed = decideConclusion({
+      proof,
+      outcome: "expired",
+      gate,
+      review: { verdict: "needs fixes", scorePct: 40 },
+      executor: { appId: APP_ID, appName: "acme-bot", botId: "bot-a", botName: "infra-review" },
+    });
+    expect(missed.desired).toBe("failure");
+    expect(missed.summary).toBe(
+      `${CHECK_SUMMARIES.gateMissed(sha7, "needs fixes", 40, gate)} Executed by review bot "infra-review"; published as GitHub App "acme-bot".`,
+    );
+  });
+
+  test("an unreadable name renders as its id, and a row with no id as \"unknown\"", () => {
+    const unreadable = decideConclusion({
+      proof,
+      outcome: "expired",
+      gate,
+      review,
+      executor: { appId: APP_ID, appName: null, botId: "bot-7f3a", botName: null },
+    });
+    expect(unreadable.summary).toContain('Executed by review bot "bot-7f3a"');
+    expect(unreadable.summary).toContain(`published as GitHub App "${APP_ID}"`);
+
+    const noIds = decideConclusion({
+      proof,
+      outcome: "expired",
+      gate,
+      review,
+      executor: { appId: APP_ID, appName: null, botId: null, botName: null },
+    });
+    expect(noIds.summary).toContain('Executed by review bot "unknown"');
+  });
+
+  test("a caller that cannot reach the proven branch passes no executor and every summary stays byte-identical", () => {
+    const bare = decideConclusion({ proof, outcome: "expired", gate, review });
+    expect(bare.summary).toBe(CHECK_SUMMARIES.gateMet(sha7, proof.round, "ship it", 93, gate));
+    expect(bare.summary).not.toContain("Executed by");
+
+    // The failure and inheritance branches never print the line either: that
+    // attempt produced no completed review of its own.
+    for (const decided of [
+      decideConclusion({ proof: null, outcome: "expired", gate, review: null, executor: { appId: APP_ID, appName: "acme-bot", botId: "bot-a", botName: "infra-review" } }),
+      decideConclusion({ proof: null, outcome: "skipped", gate, review: null, executor: { appId: APP_ID, appName: "acme-bot", botId: "bot-a", botName: "infra-review" } }),
+    ]) {
+      expect(decided.summary).not.toContain("Executed by");
+    }
+  });
+
+  test("the line is composed INTO the frozen text, so the send and the row agree verbatim", async () => {
+    const db = await seededDb();
+    const publicationId = crypto.randomUUID();
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
+            confirmed_ms, applied_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'applied', ?, ?, 1, 'done', ?, ?, ?, ?)`,
+      )
+      .run(
+        publicationId, APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA,
+        JSON.stringify({ version: 1, artifact: { payload: { verdict: "ship it", tally: { scorePct: 93 } } } }),
+        JSON.stringify({ ...proof, publicationId } satisfies PublicationProof),
+        T0 - 20_000, T0 - 10_000, T0 - 10_000, T0 - 5_000,
+      );
+    db.raw.prepare(`UPDATE review_bots SET name = 'infra-review' WHERE id = ?`).run(APP_ID);
+    db.raw.prepare(`UPDATE github_apps SET github_name = 'acme-bot' WHERE id = ?`).run(APP_ID);
+
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await setCheckExecutorBot(db, attempt.identity.attemptId, lease, APP_ID, T0)).toBe(APP_ID);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => gate,
+    });
+
+    await lifecycle.terminalize({
+      handle: {
+        attemptId: attempt.identity.attemptId,
+        scope: SCOPE,
+        githubAppId: GITHUB_APP_ID,
+        headSha: SHA,
+        lease,
+        executorBotId: APP_ID,
+      },
+      publicationId,
+      outcome: "expired",
+    });
+
+    const expected =
+      `${CHECK_SUMMARIES.gateMet(sha7, 1, "ship it", 93, gate)} ` +
+      `Executed by review bot "infra-review"; published as GitHub App "acme-bot".`;
+    const row = await rowOf(db, attempt);
+    expect(row.desired).toBe("success");
+    expect(row.desired_summary).toBe(expected);
+    expect(fake.updates).toHaveLength(1);
+    expect((fake.updates[0]!.params as ChecksUpdateParams).output.summary).toBe(expected);
+  });
+});
+
+describe("begin stamps the executing Bot (migration 0126)", () => {
+  test("a claimed row carries the payload's Bot, on the row and on the handle", async () => {
+    const db = await seededDb();
+    const fake = fakeChecks({ create: echoCreate });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const handle = await lifecycle.begin({
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: "a".repeat(40),
+      triggeredBy: "octocat",
+      action: "review",
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+      botId: APP_ID,
+    });
+    expect(handle?.executorBotId).toBe(APP_ID);
+    const row = db.raw.query(`SELECT executor_bot_id FROM review_checks WHERE id = ?`).get(handle!.attemptId) as {
+      executor_bot_id: string | null;
+    };
+    expect(row.executor_bot_id).toBe(APP_ID);
+  });
+
+  test("a begin that names no Bot leaves the column null — the summary then says \"unknown\"", async () => {
+    const db = await seededDb();
+    const fake = fakeChecks({ create: echoCreate });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const handle = await lifecycle.begin({
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: "b".repeat(40),
+      triggeredBy: "octocat",
+      action: "review",
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+    });
+    expect(handle?.executorBotId).toBeNull();
   });
 });
