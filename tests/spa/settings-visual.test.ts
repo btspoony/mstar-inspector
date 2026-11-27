@@ -479,20 +479,9 @@ describe("the bot page carries the moved sections", () => {
     expect(markup).toContain("omp");
   });
 
-  test("a shared bot's page renders the same sections read-only", () => {
-    const markup = renderToStaticMarkup(
-      createElement(BotSettingsView, {
-        locale: "en",
-        payload: { ...botPayload(), can_manage: false, app: { ...botPayload().app, scope: "shared" } },
-        groups: [],
-        notice: null,
-        onReload: async () => true,
-      }),
-    );
-    expect(markup).toContain(t("en", "botSettings.readOnly"));
-    expect(markup).toContain(t("en", "botSettings.scopeShared"));
-    expect(markup).toContain(t("en", "settings.runtimeHarnessValue", { id: "omp" }));
-    expect(markup).toContain("wxyz");
-    expect(markup).not.toContain(t("en", "settings.saveRuntimeHarness"));
-  });
+  // The retired "shared bot's page renders the same sections read-only" case:
+  // the consumer FACE (read-only notice and none of the owner's machinery) is
+  // proven in bot-detail-faces.test.tsx, and this view's non-manager sandbox
+  // branch in runtime-harness-card.test.tsx. BotSettingsView carries no
+  // read-only or scope copy of its own, so the case had no observable left.
 });

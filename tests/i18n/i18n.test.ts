@@ -274,6 +274,19 @@ describe("App detail IA copy", () => {
     }
   });
 
+  test("the bot settings view's retired scope and read-only keys are removed, not aliased", () => {
+    // The consumer face renders botDetail.consumer.readOnlyNotice at page level
+    // (BotDetailPage), and the bot header carries bots.stateShared/stateOwn;
+    // BotSettingsView itself has no non-manager copy of its own.
+    for (const key of [
+      "botSettings.readOnly",
+      "botSettings.scopeShared",
+      "botSettings.scopeOwned",
+    ] as const) {
+      expect(isDictionaryKey(key), key).toBe(false);
+    }
+  });
+
   test("the installations section keys exist atomically; the retired eyebrow and sentence keys are removed, not aliased", () => {
     for (const key of [
       "settings.installations",

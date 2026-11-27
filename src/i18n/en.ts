@@ -177,7 +177,7 @@ export const en = {
     quotaErrorTitle: "Could not read the plan ceiling",
     quotaErrorBody: "The plan ceiling could not be resolved, so usage cannot be compared against it. Retry to read it again.",
     writeForbidden: "Only an owner or admin of the workspace that provides this bot can change its configuration.",
-    monthHint: "RP this workspace spent through this bot this month (UTC).",
+    monthHint: "Credits this workspace spent through this bot this month (UTC).",
     monthLimit: "{used} / {limit} RP",
     monthNoCeiling: "{used} RP \u00b7 no ceiling",
     monthOwn: "{used} RP \u00b7 unlimited (own bot)",
@@ -381,9 +381,6 @@ export const en = {
     appsReadFailed: "Could not read this workspace's applications — adding a repository is unavailable for now.",
   },
   botSettings: {
-    scopeOwned: "Owned",
-    scopeShared: "Shared",
-    readOnly: "Configuration here is read-only. A shared bot is configured by its owning workspace only.",
     health: "Credentials health",
     healthCopy: "Deliveries GitHub sent to this bot's webhook, and the ones it refused.",
     sandboxCopy: "The runtime harness every review of this bot runs under.",

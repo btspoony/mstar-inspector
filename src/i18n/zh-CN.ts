@@ -154,7 +154,7 @@ export const zhCN: Dictionary = {
     quotaErrorTitle: "无法读取套餐上限",
     quotaErrorBody: "套餐上限解析失败，无法与用量比较。请重试读取。",
     writeForbidden: "只有提供此机器人的工作区的所有者或管理员才能修改其配置\u3002",
-    monthHint: "本工作区本月经此机器人消耗的 RP（UTC）。",
+    monthHint: "本工作区本月经此机器人消耗的 Credits（UTC）。",
     monthLimit: "{used} / {limit} RP",
     monthNoCeiling: "{used} RP \u00b7 无上限",
     monthOwn: "{used} RP \u00b7 不限（自有机器人）",
@@ -349,9 +349,6 @@ export const zhCN: Dictionary = {
     appsReadFailed: "无法读取本工作区的应用 — 暂时无法添加仓库。",
   },
   botSettings: {
-    scopeOwned: "自有",
-    scopeShared: "共享",
-    readOnly: "此页配置为只读。共享机器人只由其所属工作区配置。",
     health: "凭据健康",
     healthCopy: "GitHub 发到该机器人 webhook 的投递，以及被拒绝的投递。",
     sandboxCopy: "该机器人的每次评审所用的运行时沙箱。",
