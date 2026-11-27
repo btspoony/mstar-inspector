@@ -316,6 +316,9 @@ describe("a confirmed archive whose re-read fails", () => {
     for (const locale of ["en", "zh_CN"] as const) {
       const hint = t(locale, "botDetail.archive.dangerHint");
       expect(hint).toMatch(locale === "en" ? /selected/i : /选中/);
+      // The confirmation must also name what archiving costs other workspaces:
+      // the bot becomes unselectable for new chains.
+      expect(hint).toMatch(locale === "en" ? /can no longer add it to a bot chain/i : /无法再把它加入机器人链/);
       // The other consequences stay named: the archived badge and restore.
       expect(hint).toMatch(locale === "en" ? /archived/i : /已归档/);
       expect(hint).toMatch(locale === "en" ? /restore/i : /恢复/);

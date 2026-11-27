@@ -168,6 +168,10 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   const isOwner = owned && payload.can_manage;
   // A confirmed write wins over the stale payload it could not re-read.
   const archived = staleArchiveState ?? payload.archived === true;
+  // The lock tracks the re-read, not the direction of the write: a failed
+  // re-read after EITHER archive or restore leaves archived-era values on
+  // screen, so the config stays locked until a reload succeeds.
+  const configLocked = archived || staleArchiveState !== null;
   const shared = app.scope === "shared";
   // Served by the route only when the operator profile is readable; absent ⇒
   // formatCredits' ADR fallback.
@@ -270,10 +274,10 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
           </FlowSection>
         </TabsContent>
         <TabsContent value="config" forceMount className="flex flex-col gap-6 pt-4">
-          {archived ? <PageNotice kind="warn" message={t(locale, "botDetail.archive.lockedNotice")} /> : null}
-          {/* Archived locks the WHOLE config face: a disabled fieldset turns
+          {configLocked ? <PageNotice kind="warn" message={t(locale, "botDetail.archive.lockedNotice")} /> : null}
+          {/* The lock disables the WHOLE config face: a disabled fieldset turns
               every control read-only while the sections stay visible. */}
-          <fieldset disabled={archived} className="m-0 flex min-w-0 flex-col gap-6 border-0 p-0">
+          <fieldset disabled={configLocked} className="m-0 flex min-w-0 flex-col gap-6 border-0 p-0">
             <BotProfileEditor locale={locale} payload={payload} onReload={reloadSection} />
             <BotPricingSection locale={locale} payload={payload} onReload={reloadSection} />
             {/* F14: a models failure surfaces WITH its retry; the stored chain

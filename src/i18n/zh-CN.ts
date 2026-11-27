@@ -194,7 +194,7 @@ export const zhCN: Dictionary = {
     },
     archive: {
       dangerTitle: "危险区",
-      dangerHint: "归档后，任何评审都不会再选中此机器人；使用它的工作区会看到「已归档」。随时可以恢复。",
+      dangerHint: "归档后，任何评审都不会再选中此机器人，其他工作区也无法再把它加入机器人链；使用它的工作区会看到「已归档」。随时可以恢复。",
       staleAfterArchive: "更改已保存，但本页无法重新读取此机器人 —— 请在编辑配置前刷新。",
       open: "归档此机器人",
       dialogTitle: "归档此机器人",

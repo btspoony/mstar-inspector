@@ -219,7 +219,7 @@ export const en = {
     archive: {
       dangerTitle: "Danger zone",
       dangerHint:
-        "Once archived, this bot stops being selected by any review; workspaces using it see \u201cArchived\u201d. You can restore it at any time.",
+        "Once archived, this bot stops being selected by any review, and other workspaces can no longer add it to a bot chain; workspaces using it see \u201cArchived\u201d. You can restore it at any time.",
       staleAfterArchive:
         "The change was saved, but this page could not re-read the bot — reload before editing the configuration.",
       open: "Archive this bot",
