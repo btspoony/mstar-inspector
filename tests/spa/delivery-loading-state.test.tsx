@@ -27,7 +27,7 @@ describe("I-000649: the delivery tab has a real loading face", () => {
         createElement(AppDeliveryTab, {
           locale: "en",
           appId: "1",
-          summary: { last_webhook_at: null, rejected24h: 0 },
+          summary: { last_webhook_at: null },
         }),
       ),
     );

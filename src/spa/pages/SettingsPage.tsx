@@ -347,10 +347,10 @@ export function githubAppSettingsUrl(githubHtmlUrl: string): string | null {
  * description, and the numeric App id, fed by the cached GitHub profile the
  * settings route serves (migration 0019 columns). Rendered outside the
  * can_manage conditional, so managers and members alike see it (AC3).
- * (AD-623): `canManage` switches the name link's destination —
+ * (AD-623): `canManage` switches the GitHub action link's destination —
  * managers reach the App's GitHub settings page (githubAppSettingsUrl over
- * the cached html_url), members keep the public page; the label names the
- * destination it actually carries.
+ * the cached html_url), members keep the public page. The synced name itself
+ * is not repeated: the identity lives in the page header, once.
  * Degradation is strictly per-field (global constraint): a null field
  * simply does not render — a never-synced App shows the placeholder mark and
  * its local App id with no link, no error state, no layout collapse
@@ -408,25 +408,19 @@ export function AppInfoSection({
           className="h-12 w-12 shrink-0 rounded-full border border-(--border-default) object-cover"
         />
         <div className="flex min-w-0 flex-col gap-1">
-          {app.github_name ? (
-            app.github_html_url ? (
-              <a
-                href={settingsHref ?? app.github_html_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
-                aria-label={t(
-                  locale,
-                  settingsHref ? "settings.appInfoManageOnGithub" : "settings.appInfoViewOnGithub",
-                  { name: app.github_name },
-                )}
-              >
-                {app.github_name}
-                <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              </a>
-            ) : (
-              <span className="font-semibold">{app.github_name}</span>
-            )
+          {/* The name already rides the page header — the identity is stated
+              once. The block's GitHub entry is an ACTION link, labelled by
+              where it goes (manage for a manager, view otherwise). */}
+          {app.github_html_url ? (
+            <a
+              href={settingsHref ?? app.github_html_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+            >
+              {t(locale, settingsHref ? "settings.appInfoManageOnGithub" : "settings.appInfoViewOnGithub")}
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            </a>
           ) : null}
           {app.github_description ? <p className="text-sm">{app.github_description}</p> : null}
           {app.github_app_id === null ? null : (

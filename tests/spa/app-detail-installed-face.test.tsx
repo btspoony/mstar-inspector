@@ -549,6 +549,38 @@ describe("installed face — a Blocked App stays a mount, never the creator face
  * editor's behaviour (whole-order PATCH, re-read, add/remove, refusal) now
  * lives only in the installed face's {@link InstalledChainSection}.
  */
+describe("the chain rows' effective multiplier (item 13)", () => {
+  test("own and unshared bots read ×1; a shared consumer row shows its stored multiplier", () => {
+    const html = renderToStaticMarkup(
+      createElement(InstalledChainSection, {
+        locale: "en" as const,
+        appId: "app-1",
+        chain: [
+          // Own bot with a stored price: the owner never pays it.
+          chainRow({ position: 1, bot_id: "bot-own", name: "Own", owned: true, multiplier: 3 }),
+          // A shared bot consumed here: the stored multiplier is effective.
+          chainRow({ position: 2, bot_id: "bot-shared", name: "Shared", owned: false, multiplier: 4 }),
+          // An unshared foreign remnant: mounted but skipped — never a price.
+          chainRow({ position: 3, bot_id: "bot-gone", name: "Gone", owned: false, available: false, multiplier: 9 }),
+        ],
+        canManage: false,
+        mountableBots: [],
+        onReordered: async () => {},
+      }),
+    );
+    const rows = html.split("<tr").filter((part) => part.includes("×"));
+    const ownRow = html.split("<tr").find((part) => part.includes("Own")) ?? "";
+    const sharedRow = html.split("<tr").find((part) => part.includes(">Shared<")) ?? "";
+    const goneRow = html.split("<tr").find((part) => part.includes("Gone")) ?? "";
+    expect(rows.length).toBeGreaterThan(0);
+    expect(ownRow).toContain("×1");
+    expect(ownRow).not.toContain("×3");
+    expect(sharedRow).toContain("×4");
+    expect(goneRow).toContain("×1");
+    expect(goneRow).not.toContain("×9");
+  });
+});
+
 describe("the installed chain's write path", () => {
   const realFetch = globalThis.fetch;
   const EDITOR_CHAIN: AppChainEntry[] = [

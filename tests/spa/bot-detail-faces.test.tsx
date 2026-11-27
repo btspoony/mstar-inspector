@@ -168,6 +168,29 @@ describe("the owner face", () => {
     }
   });
 
+  test("an unshared bot with a stored multiplier is effectively ×1 everywhere it is presented", async () => {
+    // The stored 3 stays in the owner's pricing input; the metric band and the
+    // capability line — effective presentations — read ×1.
+    const priced = botPayload({
+      app: { ...(botPayload().app as Record<string, unknown>), scope: "owned", multiplier: 3 },
+    });
+    const face = await mountBot(priced);
+    try {
+      const text = face.text();
+      const capability = text.split(t("en", "bots.fieldMultiplier"));
+      // Header metric + capability line both read ×1, never ×3.
+      expect(text).not.toContain("×3");
+      expect(text).toContain("×1");
+      expect(capability.length).toBeGreaterThan(1);
+      const input = face.container.querySelector(
+        `input[aria-label="${t("en", "botDetail.share.multiplier")}"]`,
+      ) as HTMLInputElement | null;
+      expect(input?.value).toBe("3");
+    } finally {
+      await face.close();
+    }
+  });
+
   test("a shared owner keeps the multiplier editable", async () => {
     const shared = botPayload({
       app: { ...(botPayload().app as Record<string, unknown>), scope: "shared", multiplier: 2 },
@@ -249,6 +272,9 @@ describe("the consumer face", () => {
       expect(text).toContain("3.00 Credits");
       expect(text).toContain("2.91 Credits");
       expect(text).not.toContain("5.00 Credits");
+      // Item 13: the metric states the limit as `已用 / 上限`, and a shared
+      // bot's stored multiplier shows through.
+      expect(text).toContain("0.09 Credits / 3.00 Credits");
       expect(text).toContain("×4");
       // The billing source names the providing workspace.
       expect(text).toContain(t("en", "botDetail.usage.source"));

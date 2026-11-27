@@ -59,8 +59,10 @@ import {
   type SharedBotRow,
   type UsableBotsPayload,
 } from "./data";
+import { usageCeilingCell } from "./credits";
 import { GitHubMark } from "./LoginPage";
 import { postInstallationBind } from "./SettingsPage";
+import { legacyBotsTabRedirect } from "../routes";
 import { apiBase } from "../workspace-base";
 
 /**
@@ -157,16 +159,10 @@ export type AppsReadState =
   | { kind: "ok"; payload: AppsPayload }
   | { kind: "error"; message: string };
 
-export type BotsReadState =
-  | { kind: "loading" }
-  | { kind: "ok"; payload: UsableBotsPayload }
-  | { kind: "error"; message: string };
 
 export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [apps, setApps] = useState<AppsReadState>({ kind: "loading" });
-  // F3: a failed bot read is its OWN state — never an empty list.
-  const [bots, setBots] = useState<BotsReadState>({ kind: "loading" });
   const [tab, setTab] = useState<AppsTab>(() => appsTabOf(window.location.search, false));
   const base = apiBase();
   const canCreate = canCreateAppFor(boot, base === "/dashboard" ? null : base.slice("/dashboard/".length));
@@ -177,9 +173,6 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
 
   const load = useCallback(async (): Promise<void> => {
     setApps({ kind: "loading" });
-    setBots({ kind: "loading" });
-    // The two reads fail independently: an Apps failure must not hide the bot
-    // list, and a bot failure must never read as "no bot is available".
     try {
       const parsed = await loadApps(base);
       setApps(
@@ -192,11 +185,6 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
         kind: "error",
         message: err instanceof Error && err.message !== "" ? err.message : t(locale, "common.loadFailed"),
       });
-    }
-    try {
-      setBots({ kind: "ok", payload: await loadUsableBots(base) });
-    } catch {
-      setBots({ kind: "error", message: t(locale, "common.loadFailed") });
     }
   }, [base, locale]);
 
@@ -259,7 +247,15 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     return () => window.removeEventListener("popstate", onPop);
   }, [defaultTab]);
 
-  if (apps.kind === "loading") {
+  // A legacy `?tab=bots` bookmark is the bot directory now: replace the entry
+  // and never render the list under it. The effect is unconditional — the
+  // hook order never depends on the URL.
+  const legacyBots = legacyBotsTabRedirect(window.location.pathname, window.location.search);
+  useEffect(() => {
+    if (legacyBots !== null) window.location.replace(legacyBots);
+  }, [legacyBots]);
+
+  if (legacyBots !== null || apps.kind === "loading") {
     return <PageSkeleton locale={locale} kind="table" />;
   }
 
@@ -280,7 +276,6 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     <AppsView
       locale={locale}
       apps={apps}
-      bots={bots}
       canCreate={canCreate}
       unavailableReason={unavailableReason}
       tab={tab}
@@ -305,7 +300,6 @@ export function AppsView({
   state,
   payload,
   apps,
-  bots,
   canCreate,
   unavailableReason,
   tab,
@@ -320,7 +314,6 @@ export function AppsView({
   /** Mounted form: the page's own read states, which distinguish loading from
    * a failed read from an empty result (F3). */
   apps?: AppsReadState;
-  bots?: BotsReadState;
   canCreate: boolean;
   unavailableReason: string;
   tab?: AppsTab;
@@ -331,7 +324,6 @@ export function AppsView({
 }) {
   const appsState: AppsReadState =
     apps ?? (state === "error" ? { kind: "error", message: t(locale, "common.loadFailed") } : state === "ok" && payload ? { kind: "ok", payload } : { kind: "error", message: t(locale, "common.loadFailed") });
-  const botsState: BotsReadState = bots ?? { kind: "loading" };
   const loaded = appsState.kind === "ok" ? appsState.payload : null;
   const installed = loaded ? installedAppsOf(loaded) : [];
   const ownedApps = loaded?.apps.filter((app) => app.owned !== false) ?? [];
@@ -391,7 +383,6 @@ export function AppsView({
           >
             <TabsTrigger value="installed">{t(locale, "apps.tabInstalled")}</TabsTrigger>
             <TabsTrigger value="created">{t(locale, "apps.tabCreated")}</TabsTrigger>
-            <TabsTrigger value="bots">{t(locale, "apps.tabBots")}</TabsTrigger>
           </TabsList>
           <TabsContent value="installed">
             <InstalledTab
@@ -415,14 +406,6 @@ export function AppsView({
                 description={canCreate ? t(locale, "apps.emptyDescription") : t(locale, "apps.installed.emptyTitle")}
               />
             )}
-          </TabsContent>
-          <TabsContent value="bots">
-            <UsableBotsList
-              locale={locale}
-              bots={botsState}
-              onOpenInstalled={() => onTabChange?.("installed")}
-              onRetry={onRetry}
-            />
           </TabsContent>
         </Tabs>
       ) : null}
@@ -667,167 +650,6 @@ function PendingInstallationLine({
         </Button>
       ) : null}
     </span>
-  );
-}
-
-/**
- * "Bots I can use" (D6/D18): ONE server-ordered list — own before shared, name
- * case-insensitively, id as tie-break; a filter only HIDES rows and never
- * reorders them. Membership is exclusive, the filter is in-memory only (a
- * reload or tab switch returns to All), and F5 keys the access word on this
- * viewer's MANAGE permission, not the bot's publication scope.
- */
-export type BotsFilter = "all" | "mine" | "shared";
-
-export function UsableBotsList({
-  locale,
-  bots,
-  onOpenInstalled,
-  onRetry,
-}: {
-  locale: SpaBoot["locale"];
-  bots: BotsReadState;
-  onOpenInstalled?: () => void;
-  onRetry?: () => void;
-}) {
-  const [filter, setFilter] = useState<BotsFilter>("all");
-  if (bots.kind === "loading") {
-    return <PageSkeleton locale={locale} kind="table" />;
-  }
-  // F3: a failed read is an error with a retry — never "no bot available".
-  if (bots.kind === "error") {
-    return <ErrorState locale={locale} message={bots.message} onRetry={onRetry} />;
-  }
-  const payload = bots.payload;
-  if (payload.bots.length === 0) {
-    return (
-      <EmptyState
-        icon={<GitHubMark />}
-        title={t(locale, "apps.bots.emptyTitle")}
-        description={t(locale, "apps.bots.emptyDescription")}
-        action={
-          onOpenInstalled ? (
-            <Button variant="secondary" onClick={onOpenInstalled}>
-              {t(locale, "apps.bots.goInstalled")}
-            </Button>
-          ) : undefined
-        }
-      />
-    );
-  }
-  const rows = payload.bots.filter((bot) => {
-    if (filter === "mine") return bot.owned;
-    if (filter === "shared") return !bot.owned;
-    return true;
-  });
-  const hrefOf = (botId: string): string => `${apiBase()}/bots/${encodeURIComponent(botId)}`;
-  const columns: DataTableColumn<(typeof payload.bots)[number]>[] = [
-    {
-      header: t(locale, "apps.bots.columnName"),
-      cell: (bot) => (
-        <span className="flex items-center gap-2">
-          <a
-            className="text-sm font-semibold text-foreground no-underline hover:underline"
-            href={hrefOf(bot.id)}
-            onClick={(event) => spaClick(hrefOf(bot.id), event)}
-          >
-            {bot.name}
-          </a>
-          <span className="text-xs text-muted-foreground">
-            {t(locale, bot.owned ? "apps.bots.tagMine" : "apps.bots.tagShared")}
-          </span>
-        </span>
-      ),
-    },
-    {
-      header: t(locale, "apps.bots.columnOwner"),
-      cell: (bot) => <span className="text-muted-foreground">{bot.workspace_name}</span>,
-    },
-    {
-      header: t(locale, "apps.bots.columnMultiplier"),
-      cell: (bot) => <span className="tabular-nums">×{bot.multiplier}</span>,
-    },
-    {
-      header: t(locale, "credits.usedThisMonth"),
-      cell: (bot) => (
-        <span className="text-muted-foreground tabular-nums">
-          {/* F10: an unknown ceiling is an error, never "no ceiling". */}
-          {monthSpendCell(
-            locale,
-            { used_rp: bot.month_used_rp, owned: bot.owned },
-            payload.quota_error === true,
-            payload.plan_monthly_rp,
-            payload.rp_per_credit,
-          )}
-        </span>
-      ),
-    },
-    {
-      header: t(locale, "apps.bots.columnAccess"),
-      cell: (bot) => (
-        <span className="text-muted-foreground">
-          {t(locale, bot.can_manage ? "apps.bots.editable" : "apps.bots.readOnly")}
-        </span>
-      ),
-    },
-  ];
-  const filters: Array<{
-    id: BotsFilter;
-    key: "apps.bots.filterAll" | "apps.bots.filterMine" | "apps.bots.filterShared";
-  }> = [
-    { id: "all", key: "apps.bots.filterAll" },
-    { id: "mine", key: "apps.bots.filterMine" },
-    { id: "shared", key: "apps.bots.filterShared" },
-  ];
-  const empty =
-    filter !== "all" && rows.length === 0
-      ? filter === "mine"
-        ? {
-            title: t(locale, "apps.bots.emptyMineTitle"),
-            description: t(locale, "apps.bots.emptyMineDescription"),
-          }
-        : {
-            title: t(locale, "apps.bots.emptySharedTitle"),
-            description: t(locale, "apps.bots.emptySharedDescription"),
-          }
-      : null;
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-2" data-slot="bots-filter">
-        {filters.map((entry) => (
-          <Button
-            key={entry.id}
-            variant={filter === entry.id ? "secondary" : "ghost"}
-            size="sm"
-            onClick={() => setFilter(entry.id)}
-          >
-            {t(locale, entry.key)}
-          </Button>
-        ))}
-      </div>
-      {empty ? (
-        <EmptyState
-          icon={<GitHubMark />}
-          title={empty.title}
-          description={empty.description}
-          action={
-            <Button variant="secondary" onClick={() => setFilter("all")}>
-              {t(locale, "apps.bots.clearFilter")}
-            </Button>
-          }
-        />
-      ) : (
-        <DataTable
-          columns={columns}
-          rows={rows}
-          rowKey={(bot) => bot.id}
-          rowProps={(bot) => ({
-            className: "cursor-pointer",
-            onClick: (event) => spaClick(hrefOf(bot.id), event),
-          })}
-        />
-      )}
-    </div>
   );
 }
 

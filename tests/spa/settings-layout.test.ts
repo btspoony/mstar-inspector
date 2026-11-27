@@ -1268,14 +1268,15 @@ describe("GitHub App identity card", () => {
     github_metadata_synced_at: "2026-09-08 00:00:00",
   };
 
-  test("synced profile renders avatar img, hyperlinked name (new tab, noopener), description, AppID", () => {
+  test("synced profile renders avatar, the GitHub ACTION link (new tab, noopener), description, AppID — never the name a second time", () => {
     const out = html(meta(synced));
     expect(out).toContain('<img src="https://avatars.githubusercontent.com/in/1234?v=4"');
     expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
     expect(out).toContain('target="_blank"');
     expect(out).toContain('rel="noopener noreferrer"');
-    expect(out).toContain("Acme Reviewer");
-    expect(out).toContain('aria-label="View Acme Reviewer on GitHub"');
+    // The synced name is the page header's identity; the block does not repeat it.
+    expect(out).not.toContain("Acme Reviewer");
+    expect(out).toContain("View on GitHub");
     expect(out).toContain("Reviews pull requests for Acme.");
     expect(out).toContain("App ID: 123456");
     expect(out).toContain("Synced ");
@@ -1297,17 +1298,18 @@ describe("GitHub App identity card", () => {
       }),
     );
     expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
-    expect(out).toContain("Acme Reviewer");
+    expect(out).not.toContain("Acme Reviewer");
     expect(out).toContain(appAvatarUrl(123456).replaceAll("&", "&amp;"));
     expect(out).not.toContain("Reviews pull requests");
     expect(out).not.toContain("Synced ");
     expect(out).toContain("App ID: 123456");
     const urlless = html(meta({ github_name: synced.github_name }));
     expect(urlless).not.toContain("<a ");
-    expect(urlless).toContain("Acme Reviewer");
+    expect(urlless).not.toContain("Acme Reviewer");
+    // The action link needs only the URL — it labels its action, not the name.
     const nameless = html(meta({ github_html_url: synced.github_html_url }));
-    expect(nameless).not.toContain("<a ");
-    expect(nameless).not.toContain(synced.github_html_url);
+    expect(nameless).toContain('href="https://github.com/settings/apps/acme-reviewer"');
+    expect(nameless).toContain("View on GitHub");
   });
 
   test("manager face targets the GitHub App settings page derived from the html_url slug (AD-623)", () => {
@@ -1325,7 +1327,7 @@ describe("GitHub App identity card", () => {
       true,
     );
     expect(mismatched).toContain('href="https://github.com/settings/apps/url-slug-app"');
-    expect(manager).toContain('aria-label="Manage Acme Reviewer on GitHub"');
+    expect(manager).toContain("Manage on GitHub");
     expect(manager).toContain('target="_blank"');
     expect(manager).toContain('rel="noopener noreferrer"');
   });
@@ -1333,21 +1335,20 @@ describe("GitHub App identity card", () => {
   test("member face keeps the public page; an unusable url degrades to the public link (AD-623)", () => {
     const member = html(meta({ ...synced, github_html_url: "https://github.com/apps/acme-reviewer" }));
     expect(member).toContain('href="https://github.com/apps/acme-reviewer"');
-    expect(member).toContain('aria-label="View Acme Reviewer on GitHub"');
+    expect(member).toContain("View on GitHub");
     const degraded = html(meta({ ...synced, github_html_url: "https://github.com" }), true);
     expect(degraded).toContain('href="https://github.com"');
-    expect(degraded).toContain('aria-label="View Acme Reviewer on GitHub"');
+    expect(degraded).toContain("View on GitHub");
     const deepPath = html(
       meta({ ...synced, github_html_url: "https://github.com/apps/url-slug-app/settings" }),
       true,
     );
     expect(deepPath).toContain('href="https://github.com/apps/url-slug-app/settings"');
     expect(deepPath).not.toContain('href="https://github.com/settings/apps/settings"');
-    expect(deepPath).toContain('aria-label="View Acme Reviewer on GitHub"');
     for (const canManage of [false, true]) {
       const out = html(meta({ github_name: synced.github_name }), canManage);
       expect(out).not.toContain("<a ");
-      expect(out).toContain("Acme Reviewer");
+      expect(out).not.toContain("Acme Reviewer");
     }
   });
 
@@ -1372,10 +1373,10 @@ describe("GitHub App identity card", () => {
     expect(t("zh_CN", "settings.appInfoCopy")).toContain("GitHub");
     expect(t("en", "settings.appInfoAppId", { id: 123456 })).toBe("App ID: 123456");
     expect(t("zh_CN", "settings.appInfoAppId", { id: 123456 })).toBe("App ID：123456");
-    expect(t("en", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("View Acme on GitHub");
-    expect(t("zh_CN", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("在 GitHub 上查看 Acme");
-    expect(t("en", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("Manage Acme on GitHub");
-    expect(t("zh_CN", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("在 GitHub 上管理 Acme");
+    expect(t("en", "settings.appInfoViewOnGithub")).toBe("View on GitHub");
+    expect(t("zh_CN", "settings.appInfoViewOnGithub")).toBe("在 GitHub 上查看");
+    expect(t("en", "settings.appInfoManageOnGithub")).toBe("Manage on GitHub");
+    expect(t("zh_CN", "settings.appInfoManageOnGithub")).toBe("在 GitHub 上管理");
     expect(t("en", "settings.appInfoSynced", { time: "5 minutes ago" })).toBe("Synced 5 minutes ago");
     expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
     expect(t("en", "settings.appInfoRefresh")).toBe("Refresh from GitHub");

@@ -417,7 +417,7 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(manage).toContain(t("en", "settings.installCopy"));
   });
 
-  test("the install block renders the App's avatar image", () => {
+  test("the install block carries no second identity — no avatar, no name (item 12)", () => {
     const manage = renderDetail(
       {
         ...managePayload,
@@ -426,8 +426,13 @@ describe("installed tab configuration surface (static SSR)", () => {
       "installations",
     );
     expect(manage).toContain(t("en", "settings.installCopy"));
-    const avatar = manage.slice(manage.indexOf(t("en", "settings.installCopy")));
-    expect(avatar).toContain('<img src="https://avatars.example/demo.png"');
+    const block = manage.slice(manage.indexOf(t("en", "settings.installCopy")));
+    expect(block).not.toContain('<img src="https://avatars.example/demo.png"');
+    // The one avatar render left is the GitHub App block on the settings tab —
+    // hidden but forceMounted — which uses the avatar URL.
+    expect(manage.indexOf('<img src="https://avatars.example/demo.png"')).toBeLessThan(
+      manage.indexOf(t("en", "settings.installCopy")),
+    );
   });
 
   test("a null slug keeps the block with explanations and offers no dead link", () => {
@@ -714,7 +719,7 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     }
   });
 
-  test("a null cached avatar renders AppAvatar's bg-muted fallback in the install block once the derived icon misses", async () => {
+  test("a null cached avatar renders AppAvatar's bg-muted fallback in the GitHub App block once the derived icon misses", async () => {
     const payload = {
       ...managePayload,
       app: { ...managePayload.app, github_avatar_url: null },
@@ -738,15 +743,17 @@ describe("tab shell mounted behaviour (forceMount)", () => {
           }),
         ),
       );
-      const img = container.querySelector('img[class*="h-10 w-10"]');
+      // The identity row left the install block; the GitHub App block's avatar
+      // is the h-12 one.
+      const img = container.querySelector('img[class*="h-12 w-12"]');
       expect(img?.getAttribute("src")).toBe("https://avatars.githubusercontent.com/in/1?s=120&v=4");
 
       await act(async () => {
         img!.dispatchEvent(new win.Event("error"));
       });
       const fallback = container.querySelector(".bg-muted.rounded-full");
-      expect(fallback?.getAttribute("class")).toContain("h-10 w-10");
-      expect(container.querySelector('img[class*="h-10 w-10"]')).toBeNull();
+      expect(fallback?.getAttribute("class")).toContain("h-12 w-12");
+      expect(container.querySelector('img[class*="h-12 w-12"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       cleanup();

@@ -75,7 +75,7 @@ describe("two sections, not a filter", () => {
     expect(ownedRow).toBeLessThan(sharedAt);
     expect(sharedRow).toBeGreaterThan(sharedAt);
     // No filter control: the split IS the two sections.
-    expect(html).not.toContain(t("en", "apps.bots.filterAll"));
+    expect(html).not.toContain('data-slot="bots-filter"');
   });
 
   test("the description rides the row and the name links to the detail page", () => {

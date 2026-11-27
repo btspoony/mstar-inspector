@@ -34,6 +34,7 @@ import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
 import { loadUsableBots } from "./AppsPage";
+import { usageCeilingCell } from "./credits";
 import { apiBase } from "../workspace-base";
 import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
@@ -491,29 +492,26 @@ export function InstalledChainSection({
     },
     {
       header: t(locale, "apps.chain.columnMultiplier"),
-      cell: (row) => <span className="tabular-nums">×{row.multiplier}</span>,
+      cell: (row) => <span className="tabular-nums">×{row.owned || !row.available ? 1 : row.multiplier}</span>,
     },
     {
       header: t(locale, "credits.usedThisMonth"),
       align: "right",
-      cell: (row) => {
-        // The ceiling strings carry their own unit, so they take the bare figure.
-        const used = formatCredits(row.month_used_rp, rpPerCredit).slice(0, -" Credits".length);
-        return (
-          <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
-            {/* The ceiling rides the figure (ADR § Units): an own bot is unbounded,
-                a shared bot states the cap the RELAY enforces for this workspace
-                (its override, else the bot's default), and says so when there is
-                none at all. The bot's raw default is never served to a viewer —
-                `effective_monthly_rp` is the only ceiling this face has. */}
-            {row.owned
-              ? t(locale, "credits.unlimitedOwn", { used })
-              : row.effective_monthly_rp === null
-                ? t(locale, "credits.noCeiling", { used })
-                : `${formatCredits(row.month_used_rp, rpPerCredit)} / ${formatCredits(row.effective_monthly_rp, rpPerCredit)}`}
-          </span>
-        );
-      },
+      cell: (row) => (
+        <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
+          {/* The ceiling rides the figure (ADR § Units): an own bot is unbounded,
+              a shared bot states the cap the RELAY enforces for this workspace
+              (its override, else the bot's default), and says so when there is
+              none at all. The bot's raw default is never served to a viewer —
+              `effective_monthly_rp` is the only ceiling this face has. */}
+          {usageCeilingCell(locale, { used_rp: row.month_used_rp }, {
+            owned: row.owned,
+            quotaError: false,
+            ceilingRp: row.effective_monthly_rp,
+            rpPerCredit,
+          })}
+        </span>
+      ),
     },
   ];
   if (canManage) {
@@ -981,7 +979,6 @@ export function AppDetailView({
                 appId={appId}
                 summary={{
                   last_webhook_at: bot.app.last_webhook_at,
-                  rejected24h: bot.delivery_summary?.rejected24h ?? 0,
                 }}
               />
             )}
@@ -996,6 +993,9 @@ export function AppDetailView({
               installation={payload.installation}
               pendingInstallations={payload.blocked ? [] : payload.pending_installations}
               blocked={payload.blocked}
+              /* The page header already stated the App's identity — the block
+                 carries the bind state only (ADR: identity once). */
+              showIdentity={false}
               onReload={onReload}
             />
             {bot === null ? null : (

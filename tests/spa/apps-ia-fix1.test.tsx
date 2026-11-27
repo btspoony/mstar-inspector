@@ -10,14 +10,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import {
   AppsView,
-  UsableBotsList,
   appsTabOf,
   appsTabQuery,
   installedAppsOf,
-  type BotsReadState,
 } from "../../src/spa/pages/AppsPage";
-import type { AppsPayload, UsableBotsPayload } from "../../src/spa/pages/data";
-import { formatCredits } from "../../src/spa/pages/data";
+import type { AppsPayload } from "../../src/spa/pages/data";
 import { withLocation } from "./browser-stub";
 
 const app = (overrides: Partial<AppsPayload["apps"][number]> = {}): AppsPayload["apps"][number] => ({
@@ -42,7 +39,7 @@ const payload = (apps: AppsPayload["apps"], extra: Partial<AppsPayload> = {}): A
   ...extra,
 });
 
-const render = (apps: AppsPayload, tab: "installed" | "created" | "bots" = "installed"): string =>
+const render = (apps: AppsPayload, tab: "installed" | "created" = "installed"): string =>
   withLocation("/dashboard/acme/apps", () =>
     renderToStaticMarkup(
       createElement(AppsView, {
@@ -87,94 +84,10 @@ describe("F2 — URL truth", () => {
   test("an unknown nonempty tab resolves to the real default, and the default is omitted", () => {
     expect(appsTabOf("?tab=bogus", false)).toBe("created");
     expect(appsTabOf("?tab=bogus", true)).toBe("installed");
-    expect(appsTabOf("?tab=bots", false)).toBe("bots");
+    // The retired bots tab is a redirect, not a tab: it resolves to the default here.
+    expect(appsTabOf("?tab=bots", true)).toBe("installed");
     expect(appsTabQuery("created", "created")).toBe("");
-    expect(appsTabQuery("bots", "created")).toBe("?tab=bots");
-  });
-});
-
-describe("F3 — a failed read is not an empty list", () => {
-  const botsPayload: UsableBotsPayload = {
-    workspace_id: "ws",
-    plan_monthly_rp: 1000,
-    bots: [
-      {
-        id: "bot-1",
-        name: "Team bot",
-        description: null,
-        workspace_id: "ws",
-        workspace_name: "Acme",
-        owned: true,
-        can_manage: true,
-        scope: "owned",
-        multiplier: 1,
-        month_used_rp: 10,
-        archived: false,
-      },
-    ],
-  };
-
-  // The real call site always passes the page's retry; the component's own
-  // contract is that an error face carries it.
-  const renderBots = (state: BotsReadState, onRetry?: () => void): string =>
-    renderToStaticMarkup(createElement(UsableBotsList, { locale: "en", bots: state, onRetry }));
-
-  test("the error face never prints the empty-list copy", () => {
-    const failed = renderBots({ kind: "error", message: t("en", "common.loadFailed") }, () => {});
-    expect(failed).toContain(t("en", "common.loadFailed"));
-    expect(failed).toContain(t("en", "common.retry"));
-    expect(failed).not.toContain(t("en", "apps.bots.emptyTitle"));
-  });
-
-  test("an empty OK read does print the empty-list copy", () => {
-    const empty = renderBots({ kind: "ok", payload: { ...botsPayload, bots: [] } });
-    expect(empty).toContain(t("en", "apps.bots.emptyTitle"));
-  });
-});
-
-describe("F5 — ownership and manage permission are separate from publication scope", () => {
-  const bot = (overrides: Partial<UsableBotsPayload["bots"][number]> = {}) => ({
-    id: "bot-1",
-    name: "Team bot",
-    description: null,
-    workspace_id: "ws",
-    workspace_name: "Acme",
-    owned: true,
-    can_manage: true,
-    scope: "owned" as const,
-    multiplier: 1,
-    month_used_rp: 7,
-    archived: false,
-    ...overrides,
-  });
-  const face = (rows: UsableBotsPayload["bots"]): string =>
-    renderToStaticMarkup(
-      createElement(UsableBotsList, {
-        locale: "en",
-        bots: { kind: "ok", payload: { workspace_id: "ws", plan_monthly_rp: 1000, bots: rows } },
-      }),
-    );
-
-  test("an owned bot PUBLISHED as shared still reads own-bot unlimited (no plan ceiling)", () => {
-    const html = face([bot({ scope: "shared", owned: true })]);
-    expect(html).toContain(t("en", "credits.unlimitedOwn", { used: "0.01" }));
-    // The plan is unlimited here, so `noCeiling` would ALSO pass if the cell
-    // rendered a finite ceiling — assert on the finite presentation itself.
-    expect(html).not.toContain(t("en", "credits.noCeiling", { used: "0.01" }));
-    expect(html).not.toContain(`${formatCredits(7)} / ${formatCredits(1000)}`);
-    expect(html).not.toContain("0.01 Credits / 1.00 Credits");
-  });
-
-  test("a member of the owning workspace reads the bot as read-only, not editable", () => {
-    const html = face([bot({ can_manage: false })]);
-    expect(html).toContain(t("en", "apps.bots.readOnly"));
-    expect(html).not.toContain(t("en", "apps.bots.editable"));
-  });
-
-  test("a shared bot from another workspace reads a ceiling, and membership is exclusive", () => {
-    const html = face([bot({ id: "bot-2", owned: false, can_manage: false, workspace_name: "Other" })]);
-    expect(html).toContain(`${formatCredits(7)} / ${formatCredits(1000)}`);
-    expect(html).toContain(t("en", "apps.bots.tagShared"));
+    expect(appsTabQuery("installed", "created")).toBe("?tab=installed");
   });
 });
 

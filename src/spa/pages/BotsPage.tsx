@@ -33,7 +33,8 @@ import { PageSkeleton } from "../components/state/PageSkeleton";
 import { spaClick } from "../spa-click";
 import { apiBase } from "../workspace-base";
 import { canCreateAppFor, loadUsableBots } from "./AppsPage";
-import { formatCredits, type UsableBotRow, type UsableBotsPayload } from "./data";
+import { effectiveMultiplier, usageCeilingCell } from "./credits";
+import type { UsableBotRow, UsableBotsPayload } from "./data";
 import { PageNotice } from "./PageNotice";
 
 export type BotsReadState =
@@ -222,14 +223,22 @@ function botColumns(
     },
     {
       header: t(locale, "bots.fieldMultiplier"),
-      cell: (bot) => <span className="tabular-nums">×{bot.multiplier}</span>,
+      cell: (bot) => (
+        <span className="tabular-nums">×{effectiveMultiplier(bot.owned, bot.scope, bot.multiplier)}</span>
+      ),
     },
     {
       header: t(locale, "credits.usedThisMonth"),
       align: "right",
       cell: (bot) => (
         <span className="text-muted-foreground tabular-nums">
-          {formatCredits(bot.month_used_rp, payload.rp_per_credit)}
+          {/* F10: an unknown ceiling is an error, never "no ceiling". */}
+          {usageCeilingCell(locale, { used_rp: bot.month_used_rp }, {
+            owned: bot.owned,
+            quotaError: payload.quota_error === true,
+            ceilingRp: payload.plan_monthly_rp,
+            rpPerCredit: payload.rp_per_credit,
+          })}
         </span>
       ),
     },

@@ -149,6 +149,20 @@ export function targetsFamilyRedirect(pathname: string): string | null {
 }
 
 /**
+ * The bot-directory address the legacy Apps `?tab=bots` spelling resolves to,
+ * or null for any other path or tab. The bots tab retired into `/bots` when
+ * the directory split; a bookmark from before the split answers ONE 302 to
+ * the same workspace's `/bots` rather than falling back to the Apps default.
+ */
+export function legacyBotsTabRedirect(pathname: string, search: string): string | null {
+  if (new URLSearchParams(search).get("tab") !== "bots") return null;
+  const match = /^\/dashboard\/([^/]+)\/apps$/.exec(pathname);
+  if (match === null || match[1] === undefined) return null;
+  if (RESERVED_WORKSPACE_SLUGS.has(match[1])) return null;
+  return `/dashboard/${match[1]}/bots`;
+}
+
+/**
  * The app-detail address a retired path spelling resolves to, or null for any
  * other path. Both spellings of the settings face — `…/apps/:appId/settings`
  * and the bot page's `…/apps/:appId/bot` — answer ONE redirect to the tab's own

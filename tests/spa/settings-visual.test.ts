@@ -382,11 +382,11 @@ describe("section description wording (A8)", () => {
 });
 
 describe("delivery-status summary line (I-000251)", () => {
-  const render = (rejected24h: number): string =>
+  const render = (): string =>
     renderToStaticMarkup(
       createElement(DeliveryStatusView, {
         locale: "en",
-        summary: { last_webhook_at: null, rejected24h },
+        summary: { last_webhook_at: null },
         page: null,
         filters: { repo: "", since: "", type: "" },
         offset: 0,
@@ -397,13 +397,11 @@ describe("delivery-status summary line (I-000251)", () => {
       }),
     );
 
-  test("the refusal count wears the alert colour, and only when it is non-zero", () => {
-    const [segment = ""] = alertSegments(render(3), "light");
-    expect(segment).toContain(t("en", "apps.health.rejected24h", { count: 3 }));
+  test("the summary line is the webhook stamp alone — the 24h figure is banned everywhere", () => {
     const lastWebhook = t("en", "settings.lastWebhook", { time: t("en", "common.time.never") });
-    expect(render(3)).toContain(lastWebhook);
-    expect(alertSegments(render(0), "light")).toEqual([]);
-    expect(render(0)).toContain(lastWebhook);
+    expect(render()).toContain(lastWebhook);
+    expect(render()).not.toContain("24h");
+    expect(alertSegments(render(), "light")).toEqual([]);
   });
 });
 

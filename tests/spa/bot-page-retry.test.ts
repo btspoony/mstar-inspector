@@ -78,14 +78,18 @@ async function click(win: FixtureWindow, node: DomElement | null): Promise<void>
 }
 
 describe("F14 — BotDetailPage keeps a models failure visible and retries it", () => {
-  test("failure renders the editor error while the page still renders; retry re-reads and succeeds", async () => {
+  test("the retry re-reads ONLY the options: unsaved drafts and chain rows survive, no second bot GET", async () => {
     const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
     const realFetch = globalThis.fetch;
     let modelsCalls = 0;
+    let botGets = 0;
     let modelsShouldFail = true;
     globalThis.fetch = (async (input: unknown) => {
       const url = String(input);
-      if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(BOT_PAYLOAD);
+      if (url.includes("/api/review-bots/bot-1/bot")) {
+        botGets += 1;
+        return Response.json(BOT_PAYLOAD);
+      }
       if (url.endsWith("/api/models")) {
         modelsCalls += 1;
         return modelsShouldFail
@@ -118,7 +122,22 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
       expect(retry).toBeDefined();
       const callsBeforeRetry = modelsCalls;
 
-      // 3. RETRY RE-READS and, this time, succeeds: the error clears.
+      // 2b. TYPE A DRAFT into the identity editor — the retry must not discard it.
+      const nameInput = container.querySelector('input[aria-label]');
+      expect(nameInput).not.toBeNull();
+      const inputEl = nameInput as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+      const proto = Object.getPrototypeOf(nameInput) as object;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      setter?.call(nameInput, "Renamed in progress");
+      inputEl.dispatchEvent(new win.Event("input", { bubbles: true }));
+      await act(async () => {});
+      expect((container.querySelector('input[aria-label]') as unknown as { value: string }).value).toBe(
+        "Renamed in progress",
+      );
+      const botGetsBefore = botGets;
+
+      // 3. RETRY RE-READS THE OPTIONS ONLY and, this time, succeeds: the error
+      //    clears, the DRAFT SURVIVES, and the bot payload is not re-read.
       modelsShouldFail = false;
       if (retry !== undefined) {
         // happy-dom's element type differs nominally from the DOM's; the node
@@ -130,6 +149,11 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
       expect(modelsCalls).toBeGreaterThan(callsBeforeRetry);
       expect(container.textContent).not.toContain(t("en", "bots.modelsFailed"));
       expect(container.textContent).toContain("Team bot");
+      // THE CONTRACT: no second bot GET, and the typed draft survived the retry.
+      expect(botGets).toBe(botGetsBefore);
+      expect((container.querySelector('input[aria-label]') as unknown as { value: string }).value).toBe(
+        "Renamed in progress",
+      );
     } finally {
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;

@@ -18,8 +18,8 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
-import { UsableBotsList, type BotsReadState } from "../../src/spa/pages/AppsPage";
 import { BotDetailPage } from "../../src/spa/pages/BotDetailPage";
+import { BotsView, type BotsReadState } from "../../src/spa/pages/BotsPage";
 import type { UsableBotsPayload } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
 
@@ -49,9 +49,12 @@ const botsPayload = (quota: { plan_monthly_rp: number | null; quota_error?: bool
 
 const renderBots = (payload: UsableBotsPayload): string =>
   renderToStaticMarkup(
-    createElement(UsableBotsList, {
+    createElement(BotsView, {
       locale: "en",
-      bots: { kind: "ok", payload } as BotsReadState,
+      base: "/dashboard/acme",
+      state: { kind: "ok", payload } as BotsReadState,
+      canCreate: false,
+      onCreated: () => {},
     }),
   );
 

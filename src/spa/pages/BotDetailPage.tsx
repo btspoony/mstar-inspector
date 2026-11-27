@@ -48,13 +48,9 @@ import {
   type BotSettingsPayload,
   type ModelOptionGroup,
 } from "./data";
+import { creditAmount, effectiveMultiplier, usageCeilingCell } from "./credits";
 import { BotPricingSection, BotSettingsView } from "./BotSettingsPage";
 import { NoticeRegion, PageNotice, type OpNotice } from "./PageNotice";
-
-/** formatCredits without the unit — for templates that carry their own. */
-function creditAmount(rp: number, rpPerCredit?: number): string {
-  return formatCredits(rp, rpPerCredit).slice(0, -" Credits".length);
-}
 
 function botApiPath(botId: string): string {
   return `${apiBase()}/api/review-bots/${encodeURIComponent(botId)}`;
@@ -68,7 +64,6 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   // F14: a models failure is its OWN state. The page still renders; the owner
   // config tab shows the error and a retry, and retry re-reads both sources.
   const [modelsError, setModelsError] = useState(false);
-  const [modelsRetry, setModelsRetry] = useState(0);
   // A confirmed archive/restore whose follow-up read failed: the write stands,
   // so the face locks to the state it established instead of offering the
   // stale configuration the payload still describes.
@@ -113,6 +108,30 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   };
 
   /**
+   * The options retry: `/api/models` ONLY. It must never re-enter the page
+   * load — that would discard unsaved identity/pricing drafts, re-render the
+   * chain rows and reset the editor, and delay a consumer overview behind a
+   * read it does not need. A failed retry keeps the error face; a successful
+   * one swaps the groups in place.
+   */
+  const retryModels = async (): Promise<void> => {
+    try {
+      const models = parseModels(await fetchJson(`${base}/api/models`));
+      // A body that does not parse is a failure too — never an empty catalog.
+      if (models === null) {
+        setModelsError(true);
+        setGroups([]);
+        return;
+      }
+      setModelsError(false);
+      setGroups(models.groups);
+    } catch {
+      setModelsError(true);
+      setGroups([]);
+    }
+  };
+
+  /**
    * The editor's own re-read. It fetches ONLY the bot payload (the section the
    * editor mutates) and NEVER bumps `sequenceRef`, never flips `state` to
    * "loading", and never re-reads the models — so a write that succeeded cannot
@@ -150,7 +169,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
     setState("loading");
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, botId, modelsRetry]);
+  }, [base, botId]);
 
   if (state === "loading") {
     return <PageSkeleton locale={locale} kind="forms" />;
@@ -191,17 +210,24 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
         .map((entry) => ({ name: entry.name, chain: splitModelChain(entry.chain) }))
     : [];
 
-  const monthValue = !overview
-    ? t(locale, "bots.monthNone")
-    : payload.quota_error === true
-      ? t(locale, "bots.monthUnknown")
-      : isOwner
-        ? t(locale, "credits.unlimitedOwn", { used: creditAmount(overview.month_used_rp, rpPerCredit) })
-        : overview.effective_ceiling === null
-          ? t(locale, "credits.noCeiling", { used: creditAmount(overview.month_used_rp, rpPerCredit) })
-          : formatCredits(overview.month_used_rp, rpPerCredit);
+  // One ceiling semantics everywhere (F3/13): a consumer's metric states the
+  // enforced ceiling as `已用 / 上限`; the owner is never metered against one.
+  const monthValue = usageCeilingCell(
+    locale,
+    overview ? { used_rp: overview.month_used_rp } : null,
+    {
+      owned: isOwner,
+      quotaError: payload.quota_error === true,
+      ceilingRp: overview?.effective_ceiling ?? null,
+      rpPerCredit,
+    },
+  );
+  // The multiplier is a consumer price: an unshared bot — and the owner of any
+  // bot — is effectively ×1 everywhere it is presented as effective. The
+  // stored value stays in the owner's pricing editor.
+  const multiplierEffective = effectiveMultiplier(owned, app.scope, app.multiplier ?? 1);
   const metrics: Metric[] = [
-    { key: t(locale, "bots.fieldMultiplier"), value: `×${app.multiplier ?? 1}` },
+    { key: t(locale, "bots.fieldMultiplier"), value: `×${multiplierEffective}` },
     { key: t(locale, "credits.usedThisMonth"), value: monthValue },
     { key: t(locale, "bots.fieldMounted"), value: String(overview?.mounted_apps.length ?? 0) },
   ];
@@ -291,7 +317,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
               <ErrorState
                 locale={locale}
                 message={t(locale, "bots.modelsFailed")}
-                onRetry={() => setModelsRetry((value) => value + 1)}
+                onRetry={() => void retryModels()}
               />
             ) : null}
             <BotSettingsView
@@ -385,7 +411,8 @@ function BotCapabilitySection({
         <li>{capabilityDefault}</li>
         <li>{t(locale, "bots.capabilitySandbox", { id: payload.app.sandbox_image_id || "—" })}</li>
         <li>
-          {t(locale, "bots.fieldMultiplier")}: ×{payload.app.multiplier ?? 1}
+          {t(locale, "bots.fieldMultiplier")}: ×
+          {effectiveMultiplier(payload.owned === true, payload.app.scope, payload.app.multiplier ?? 1)}
         </li>
         {namedChains.map((row) => (
           <li key={row.name} className="text-muted-foreground">
