@@ -50,6 +50,7 @@ import {
   type Scope,
   setCheckCreateState,
   setCheckDesired,
+  setCheckExecutorBot,
   setCheckFallbackDesired,
   suspendCheckRecovery,
   suspensionCredentialOf,
@@ -2053,5 +2054,39 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     }
     const stale: Lease = { holder: lease.holder, epoch: lease.epoch + 1, untilMs: lease.untilMs };
     expect(await suspendCheckForPause(db, id, stale, "paused", T0)).toBe(false);
+  });
+});
+
+describe("executor_bot_id — the Bot a Check ran under (migration 0126)", () => {
+  test("the first write wins: a later invocation cannot reassign the attempt's Bot", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+
+    expect(await setCheckExecutorBot(db, id, lease, APP_ID, T0)).toBe(APP_ID);
+    expect((await getCheckOwnership(db, id, lease, T0))?.executorBotId).toBe(APP_ID);
+
+    // An ADOPTED row keeps the Bot that was recorded first, and the second
+    // caller is told which one it is rather than silently overwriting it.
+    expect(await setCheckExecutorBot(db, id, lease, OTHER_APP_ID, T0)).toBe(APP_ID);
+    expect((await getCheckOwnership(db, id, lease, T0))?.executorBotId).toBe(APP_ID);
+  });
+
+  test("the fence refuses a foreign or stale lease, and the column stays null", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const stale: Lease = { ...lease, epoch: lease.epoch + 1 };
+
+    expect(await setCheckExecutorBot(db, id, stale, APP_ID, T0)).toBeNull();
+    expect(await getCheckOwnership(db, id, lease, T0)).toMatchObject({ executorBotId: null });
+  });
+
+  test("a row claimed by a pre-0126-shaped insert reads null, so a summary can fall back", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    db.raw.prepare(`UPDATE review_checks SET executor_bot_id = NULL WHERE id = ?`).run(id);
+    expect((await getCheckOwnership(db, id, lease, T0))?.executorBotId).toBeNull();
   });
 });

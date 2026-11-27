@@ -529,7 +529,9 @@ export async function boundedBestEffort<T>(step: Promise<T>, budgetMs: number): 
   }
 }
 
-export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number; headSha: string; lease: Lease };
+export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number; headSha: string; lease: Lease;
+  /** The Bot `begin` recorded for this attempt; absent when the hook does not name one. */
+  executorBotId?: string | null };
 
 /**
  * The invocation's lifetime hook: the queue handler passes
@@ -549,6 +551,8 @@ export type CheckLifecycleHooks = {
     rerunCheckRunId?: number;
     executionDeadlineMs: number;
     latch?: CheckBeginLatch;
+    /** The executing Bot the payload named, so the Check can later say which one ran. */
+    botId?: string;
   }): Promise<CheckHandle | null>;
   markInProgress?(input: {
     handle: CheckHandle;
@@ -2332,6 +2336,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
           rerunCheckRunId: payload.rerun_check_run_id,
           executionDeadlineMs: claimDeadlineMs,
           latch: beginLatch,
+          botId: payload.botRef.botId,
           ...(expect === undefined ? {} : { expect }),
         }),
         null,

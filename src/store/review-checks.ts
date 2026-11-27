@@ -454,6 +454,8 @@ export type CheckOwnership = {
   desiredSummary: string | null;
   terminalFailureStatus: CheckFailureStatus | null;
   publicationId: string | null;
+  /** The Bot that executed this attempt, recorded once by `begin`; null before it, and on pre-0126 rows. */
+  executorBotId: string | null;
   correctionDesired: Exclude<CheckDesired, "in_progress"> | null;
   correctionGeneration: number | null;
 };
@@ -485,6 +487,7 @@ export async function getCheckOwnership(
     desiredSummary: row.desired_summary,
     terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
     publicationId: row.publication_id,
+    executorBotId: row.executor_bot_id,
     correctionDesired: attempt.correctionDesired,
     correctionGeneration: attempt.correctionGeneration,
   };
@@ -1142,6 +1145,36 @@ export async function linkCheckPublication(
   nowMs: CheckClock,
 ): Promise<boolean> {
   return runFenced(db, id, lease, `publication_id = COALESCE(?, publication_id)`, [publicationId], nowMs);
+}
+
+/**
+ * Record the Review Bot that executes this attempt (migration 0126) and answer
+ * the id the row now names. Written by `begin` alone, once: the guard
+ * `executor_bot_id IS NULL` means a later invocation can never reassign an
+ * attempt that already named its Bot, so the name a summary prints is the one
+ * that ran — an invocation adopting a row an earlier one already stamped gets
+ * THAT id back, not its own.
+ *
+ * The column exists because the recovery lane's own first freeze and proof
+ * correction hold no job payload — they read the id back off the row. A lost
+ * write costs only a name: the summary falls back to the id.
+ */
+export async function setCheckExecutorBot(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  botId: string,
+  nowMs: CheckClock,
+): Promise<string | null> {
+  if (await runFenced(db, id, lease, `executor_bot_id = ?`, [botId], nowMs, "executor_bot_id IS NULL")) {
+    return botId;
+  }
+  // The row already names a Bot (a stale invocation's write, or an adoption).
+  const row = await db
+    .prepare(`SELECT executor_bot_id FROM review_checks WHERE id = ?`)
+    .bind(id)
+    .first<{ executor_bot_id: string | null }>();
+  return row?.executor_bot_id ?? null;
 }
 
 /**
