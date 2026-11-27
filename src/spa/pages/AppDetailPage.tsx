@@ -42,6 +42,7 @@ import {
   appDetailSearchQuery,
   appDisplayName,
   appStatusPill,
+  formatCredits,
   hasTargetFacts,
   parseAppDetailSearch,
   parseModels,
@@ -52,6 +53,7 @@ import {
   type ModelOptionGroup,
   type SettingsPayload,
   type TargetSettingsPayload,
+  type ViewerRelation,
 } from "./data";
 import type { PendingAction } from "./SettingsPage";
 
@@ -115,6 +117,32 @@ async function loadModelGroups(base: string, appId: string): Promise<ModelOption
 }
 
 /**
+ * The `from` wayfinding param: the list the App was opened from picks the
+ * face. It rides beside the shared `AppDetailSearch` state because
+ * `parseAppDetailSearch` owns only the tab grammar.
+ */
+export type AppDetailFrom = "installed" | "created";
+
+/** The two App detail faces: a mount this workspace installed, or the owner's creation. */
+export type AppDetailFace = "installed" | "creator";
+
+/** Only the two valid `from` values win; anything else reads as absent. */
+export function parseAppDetailFrom(search: string): AppDetailFrom | null {
+  const from = new URLSearchParams(search).get("from");
+  return from === "installed" || from === "created" ? from : null;
+}
+
+/**
+ * Face selection: a valid `from` wins; otherwise the served relation decides —
+ * an installed-only App opens as a mount, while a created or both-relation App
+ * opens as the owner's creation (the creator face is the owner's default).
+ */
+export function appDetailFace(relation: ViewerRelation, from: AppDetailFrom | null): AppDetailFace {
+  if (from !== null) return from === "installed" ? "installed" : "creator";
+  return relation === "installed" ? "installed" : "creator";
+}
+
+/**
  * The App detail page: `/dashboard/apps/:appId` and its workspace twin, with
  * exactly two faces — 应用设置 (the App's own configuration, the default) and
  * 已安装. The data faces (洞察, Pull requests) and the target-owned review
@@ -152,6 +180,9 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   const cancelledRef = useRef(false);
   const [search, setSearch] = useState<AppDetailSearch>(() =>
     parseAppDetailSearch(window.location.search),
+  );
+  const [from, setFrom] = useState<AppDetailFrom | null>(() =>
+    parseAppDetailFrom(window.location.search),
   );
 
   const load = useCallback(
@@ -220,6 +251,7 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     cancelledRef.current = false;
     void load();
     setSearch(parseAppDetailSearch(window.location.search));
+    setFrom(parseAppDetailFrom(window.location.search));
     return () => {
       cancelledRef.current = true;
     };
@@ -228,21 +260,30 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   useEffect(() => {
     if (refreshedRef.current) return;
     if (payload === null || payload.can_manage !== true || payload.blocked) return;
+    // The installed face is a mount, not a creation: no metadata refresh there.
+    if (appDetailFace(payload.viewer_relation, from) === "installed") return;
     const meta = payload.app as { github_metadata_synced_at?: string | null };
     if (meta.github_metadata_synced_at !== null && meta.github_metadata_synced_at !== undefined) return;
     if (payload.app.github_app_id === null) return;
     refreshedRef.current = true;
     void refreshAppMetadata(apiBase(), payload.app.github_app_id);
-  }, [payload]);
+  }, [payload, from]);
 
   useEffect(() => {
-    const onPop = () => setSearch(parseAppDetailSearch(window.location.search));
+    const onPop = () => {
+      setSearch(parseAppDetailSearch(window.location.search));
+      setFrom(parseAppDetailFrom(window.location.search));
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
   function commitSearch(next: AppDetailSearch): void {
-    window.history.replaceState(null, "", `${window.location.pathname}${appDetailSearchQuery(next)}`);
+    const query = appDetailSearchQuery(next);
+    // Keep `from`: the shared query builder owns the tab grammar only, and a
+    // tab switch must not silently flip the face back to the served relation.
+    const suffix = from === null ? query : `${query === "" ? "?" : `${query}&`}from=${from}`;
+    window.history.replaceState(null, "", `${window.location.pathname}${suffix}`);
     setSearch(next);
   }
 
@@ -266,58 +307,13 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           modelsLoading={modelsLoading}
           notice={notice}
           search={search}
+          from={from}
           mountable={mountable}
           onReload={load}
           onSearch={commitSearch}
         />
       ) : null}
     </AppDetailShell>
-  );
-}
-
-/**
- * F7: the way from App detail to the bot configuration. There is NO App→bot
- * relation to infer (the split keeps them independent), so this links the bots
- * the App's chain actually mounts in this workspace — and, when the chain is
- * still empty, the workspace's usable-bot list. It never derives a bot id from
- * the App id.
- */
-export function BotSettingsLink({
-  locale,
-  mountedBotIds,
-}: {
-  locale: SpaBoot["locale"];
-  mountedBotIds: readonly string[];
-}) {
-  const bots = [...mountedBotIds];
-  if (bots.length === 0) {
-    const listHref = `${apiBase()}/apps?tab=bots`;
-    return (
-      <a
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-        href={listHref}
-        onClick={(event) => spaClick(listHref, event)}
-      >
-        {t(locale, "appDetail.botSettingsLink")}
-      </a>
-    );
-  }
-  return (
-    <span className="flex flex-wrap items-center gap-3">
-      {bots.map((botId) => {
-        const href = `${apiBase()}/bots/${encodeURIComponent(botId)}`;
-        return (
-          <a
-            key={botId}
-            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-            href={href}
-            onClick={(event) => spaClick(href, event)}
-          >
-            {t(locale, "appDetail.botSettingsLink")}
-          </a>
-        );
-      })}
-    </span>
   );
 }
 
@@ -344,36 +340,25 @@ function mountedBotCount(chain: readonly AppChainEntry[]): number {
 }
 
 /**
- * F7 (D29/D35): the App's ordered chain, read-only. Position, bot name, the
- * shared/mine tag, the multiplier and this month's spend through that bot —
- * no add, remove or reorder control: the editable order ships with the relay
- * that reads it. An empty chain names the next step instead of rendering a
- * blank table.
- */
-/**
- * The chain editor: order only, because order is all the relay reads. Every
- * move rewrites the WHOLE order in one `PATCH /api/apps/:appId/chain`, whose
- * store clears and re-inserts positions contiguously in one batch. The response
- * carries the re-read chain, so the table the operator sees is the list the
- * next delivery will walk.
+ * The chain editor's write path: order only, because order is all the relay
+ * reads. Every move rewrites the WHOLE order in one `PATCH
+ * /api/apps/:appId/chain`, whose store clears and re-inserts positions
+ * contiguously in one batch. The response carries the re-read chain, so the
+ * table the operator sees is the list the next delivery will walk.
  *
  * It is unreachable unless the store also admits this workspace as the
  * installer; `can_manage` gates the UI, the store gates the write.
+ *
+ * One hook, two control surfaces: the creator face's chip row
+ * ({@link ChainReorderControls}) and the installed face's in-table row
+ * controls + section-header add ({@link InstalledChainSection}).
  */
-function ChainReorderControls({
-  locale,
-  appId,
-  chain,
-  mountableBots,
-  onReordered,
-}: {
-  locale: SpaBoot["locale"];
-  appId: string;
-  chain: readonly AppChainEntry[];
-  /** Every bot this workspace may mount; the section subtracts the mounted ones. */
-  mountableBots: readonly { id: string; name: string }[];
-  onReordered: () => Promise<unknown>;
-}) {
+function useChainOrderEditor(
+  locale: SpaBoot["locale"],
+  appId: string,
+  chain: readonly AppChainEntry[],
+  onReordered: () => Promise<unknown>,
+) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
 
@@ -415,6 +400,25 @@ function ChainReorderControls({
   function add(botId: string): void {
     void save([...chain.map((row) => row.bot_id), botId]);
   }
+
+  return { busy, notice, move, remove, add };
+}
+
+function ChainReorderControls({
+  locale,
+  appId,
+  chain,
+  mountableBots,
+  onReordered,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  chain: readonly AppChainEntry[];
+  /** Every bot this workspace may mount; the section subtracts the mounted ones. */
+  mountableBots: readonly { id: string; name: string }[];
+  onReordered: () => Promise<unknown>;
+}) {
+  const { busy, notice, move, remove, add } = useChainOrderEditor(locale, appId, chain, onReordered);
 
   return (
     <div className="flex flex-col gap-2">
@@ -581,15 +585,279 @@ export function AppChainSection({
   );
 }
 
+/**
+ * The installed face's chain section — ONE control surface: the row ↑↓✕
+ * controls live in the table's actions column and 添加机器人 sits in the
+ * section header. A member (canManage false) gets the same rows with the
+ * controls ABSENT, not disabled. The creator face keeps its own chip-row
+ * editor ({@link AppChainSection}) until Task 7 settles that face.
+ */
+export function InstalledChainSection({
+  locale,
+  appId,
+  chain,
+  canManage,
+  mountableBots,
+  rpPerCredit,
+  onReordered,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  chain: readonly AppChainEntry[];
+  canManage: boolean;
+  /** Bots this workspace may mount, already minus the mounted ones. */
+  mountableBots: readonly { id: string; name: string }[];
+  /** The payload's credit rate; absent ⇒ the documented 1,000 RP fallback. */
+  rpPerCredit?: number;
+  onReordered: () => Promise<unknown>;
+}) {
+  const { busy, notice, move, remove, add } = useChainOrderEditor(locale, appId, chain, onReordered);
+  const columns: DataTableColumn<AppChainEntry>[] = [
+    {
+      header: t(locale, "apps.chain.columnPosition"),
+      cell: (row) => <span className="tabular-nums text-muted-foreground">{row.position}</span>,
+    },
+    {
+      header: t(locale, "apps.chain.columnBot"),
+      cell: (row) => {
+        const href = `${apiBase()}/bots/${encodeURIComponent(row.bot_id)}`;
+        return (
+          <span className="flex flex-wrap items-center gap-2">
+            <a
+              className="font-semibold text-foreground no-underline hover:underline"
+              href={href}
+              onClick={(event) => spaClick(href, event)}
+            >
+              {row.name}
+            </a>
+            <span className="text-muted-foreground">
+              {t(locale, row.owned ? "apps.chain.tagMine" : "apps.chain.tagShared")}
+            </span>
+            {/* An archived bot stays mounted and listed; the relay never selects
+                it, so the row says so instead of offering a bot that will not run. */}
+            {row.archived ? (
+              <span className="text-(--tone-warn-fg)">{t(locale, "appDetail.installed.archivedSkipped")}</span>
+            ) : row.available ? null : (
+              <span className="text-(--tone-warn-fg)">{t(locale, "apps.chain.rowUnavailable")}</span>
+            )}
+          </span>
+        );
+      },
+      meta: (row) => (row.description === null || row.description === "" ? null : <span>{row.description}</span>),
+    },
+    {
+      header: t(locale, "apps.chain.columnProvider"),
+      cell: (row) => <span className="text-muted-foreground">{row.provider_workspace}</span>,
+    },
+    {
+      header: t(locale, "apps.chain.columnMultiplier"),
+      cell: (row) => <span className="tabular-nums">×{row.multiplier}</span>,
+    },
+    {
+      header: t(locale, "credits.usedThisMonth"),
+      align: "right",
+      cell: (row) => (
+        <span className="tabular-nums text-muted-foreground">
+          {formatCredits(row.month_used_rp, rpPerCredit)}
+        </span>
+      ),
+    },
+  ];
+  if (canManage) {
+    columns.push({
+      // No header copy: the buttons carry their own aria-labels.
+      header: "",
+      cell: (row) => {
+        const index = chain.indexOf(row);
+        return (
+          <span className="flex items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || index === 0}
+              aria-label={t(locale, "apps.chain.moveUp", { bot: row.name })}
+              onClick={() => move(index, index - 1)}
+            >
+              ↑
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || index === chain.length - 1}
+              aria-label={t(locale, "apps.chain.moveDown", { bot: row.name })}
+              onClick={() => move(index, index + 1)}
+            >
+              ↓
+            </Button>
+            {/* D27: the LAST bot's row stays visible and cannot be removed — the
+                UI never offers an empty chain, though the store would refuse one. */}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || chain.length === 1}
+              aria-label={t(locale, "apps.chain.removeBot", { bot: row.name })}
+              onClick={() => remove(row.bot_id)}
+            >
+              ✕
+            </Button>
+          </span>
+        );
+      },
+    });
+  }
+  return (
+    <section
+      data-slot="installed-chain"
+      className="flex flex-col gap-3 border-b border-(--border-subtle) pt-4 pb-4 first:pt-1 last:border-b-0 last:pb-0"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-x-3.5 gap-y-1">
+        <h2 className="text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) font-(weight:--typo-heading-16-weight) text-(--text-primary)">
+          {t(locale, "appDetail.installed.chainTitle")}
+        </h2>
+        {canManage && mountableBots.length > 0 ? (
+          <details data-slot="app-chain-add">
+            <summary className="cursor-pointer text-sm text-muted-foreground">
+              {t(locale, "appDetail.installed.addBot")}
+            </summary>
+            <div className="mt-2 flex flex-wrap justify-end gap-2">
+              {mountableBots.map((bot) => (
+                <Button
+                  key={bot.id}
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy}
+                  aria-label={t(locale, "apps.chain.addNamed", { bot: bot.name })}
+                  onClick={() => add(bot.id)}
+                >
+                  + {bot.name}
+                </Button>
+              ))}
+            </div>
+          </details>
+        ) : null}
+      </div>
+      <p className="text-sm text-muted-foreground">{t(locale, "apps.chain.copy")}</p>
+      <NoticeRegion notice={notice} />
+      <DataTable
+        columns={columns}
+        rows={chain}
+        rowKey={(row) => `${row.position}:${row.bot_id}`}
+        empty={<p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>}
+      />
+    </section>
+  );
+}
+
+/**
+ * The installed face: an App opened from 已安装的应用 is a mount, not a
+ * creation. Read-only identity header (name, creator, GitHub App ID — each
+ * once), the mount metric band, the install/bind block and the workspace's
+ * chain with ONE control surface. No credentials, no share, no delete, no
+ * metadata refresh, no delivery, no tab bar. A member gets the same rows with
+ * every control absent.
+ */
+export function InstalledAppFace({
+  locale,
+  appId,
+  payload,
+  notice,
+  mountable = [],
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  payload: SettingsPayload;
+  notice: { kind: NoticeKind; message: string } | null;
+  /** Bots this workspace may mount, unfiltered — the face subtracts the chain. */
+  mountable?: Array<{ id: string; name: string }>;
+  onReload: (options?: { background?: boolean }) => Promise<boolean>;
+}) {
+  const pill = appStatusPill(locale, payload.app);
+  const chain = payload.chain ?? [];
+  // The band counts what the LIVE chain spent: an archived row stays listed
+  // with its own figure, but the relay never selects it, so the band's total
+  // skips it (prototype screen 3: 1.24 + 0.09 = 1.33, the archived 0.01 out).
+  const monthSpendRp = chain.reduce((sum, row) => (row.archived ? sum : sum + row.month_used_rp), 0);
+  const metrics: Metric[] = [
+    { key: t(locale, "appDetail.installed.metricMounted"), value: chain.length },
+    { key: t(locale, "appDetail.installed.metricInstallations"), value: (payload.installations ?? []).length },
+    {
+      key: t(locale, "appDetail.installed.metricSpend"),
+      value: formatCredits(monthSpendRp, payload.rp_per_credit),
+    },
+  ];
+  return (
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title={appDisplayName(payload.app)}
+        description={
+          <>
+            {t(locale, "apps.by", { login: payload.app.created_by ?? "—" })}
+            {payload.app.github_app_id === null ? null : (
+              <>
+                {" · "}
+                {t(locale, "appDetail.credentialsAppId")}{" "}
+                <span className="font-mono tabular-nums">{payload.app.github_app_id}</span>
+              </>
+            )}
+          </>
+        }
+        actions={
+          <>
+            <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
+            <StatusBadge tone="accent">{t(locale, "apps.origin.installed")}</StatusBadge>
+          </>
+        }
+        metrics={<MetricBand metrics={metrics} />}
+      />
+      {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
+      {/* The install/bind block reuses the settings sections: a manager gets the
+          bound row plus every pending installation with its bind action; the
+          read-only payload serves no pending rows, so a member gets the roster. */}
+      {payload.can_manage ? (
+        <AppInstallSection
+          locale={locale}
+          appId={appId}
+          app={payload.app}
+          installation={payload.installation}
+          pendingInstallations={payload.pending_installations ?? []}
+          blocked={payload.blocked}
+          onReload={onReload}
+        />
+      ) : null}
+      <AppInstallationsSection locale={locale} installations={payload.installations ?? []} />
+      {/* F4/D47: the copy follows the REAL bind state — an empty chain with
+          pending installations means "the chain appears once bound". */}
+      {chain.length === 0 && (payload.pending_installations ?? []).length > 0 ? (
+        <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.pendingBind")}</p>
+      ) : (
+        <InstalledChainSection
+          locale={locale}
+          appId={appId}
+          chain={chain}
+          canManage={payload.can_manage}
+          mountableBots={mountable.filter((bot) => !chain.some((row) => row.bot_id === bot.id))}
+          rpPerCredit={payload.rp_per_credit}
+          onReordered={onReload}
+        />
+      )}
+    </div>
+  );
+}
+
 const BLOCKED_REASON_KEYS = {
   bot_not_shared: "appDetail.blockedBotNotShared",
 } as const satisfies Record<BlockedReason, string>;
 
 /**
  * The identity header both detail pages render: the GitHub display name (D6
- * fallback chain), the creator, the bot-configuration link, the status pill
- * and the four figures the manager payload proves. The route `appId` stays the
- * address, never the visible identity.
+ * fallback chain), the creator, the status pill and the four figures the
+ * manager payload proves. The route `appId` stays the address, never the
+ * visible identity.
  */
 export function TargetHeader({
   locale,
@@ -628,14 +896,7 @@ export function TargetHeader({
       <PageHeader
         title={appDisplayName(payload.app)}
         description={t(locale, "apps.by", { login: payload.app.created_by ?? "—" })}
-        actions={
-          <>
-            {blockedMessage ? null : (
-              <BotSettingsLink locale={locale} mountedBotIds={(payload.chain ?? []).map((row) => row.bot_id)} />
-            )}
-            <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
-          </>
-        }
+        actions={<StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>}
         metrics={<MetricBand metrics={metrics} />}
       />
       {blockedMessage ? <PageNotice kind="warn" message={blockedMessage} /> : null}
@@ -776,8 +1037,12 @@ export function AppCredentialsSection({
 
 /**
  * The App detail face — pure `t()` + data rendering, no window/router access,
- * so tests can static-render it. A non-manager gets the D4 identity card; a
- * manager gets 应用设置 (identity header, ops, the bot's sections) and 已安装.
+ * so tests can static-render it. A valid `from` param wins over the served
+ * `viewer_relation`; the installed face (a mount: read-only identity, metric
+ * band, install/bind, one chain control surface, no tab bar) renders for every
+ * role, with controls absent for members. Otherwise a non-manager gets the D4
+ * identity card and a manager gets 应用设置 (identity header, ops, the bot's
+ * sections) and 已安装 — the creator face Task 7 settles.
  */
 export function AppDetailView({
   locale,
@@ -787,6 +1052,7 @@ export function AppDetailView({
   modelsLoading = false,
   notice,
   search,
+  from = null,
   mountable = [],
   onReload,
   onSearch,
@@ -798,11 +1064,28 @@ export function AppDetailView({
   modelsLoading?: boolean;
   notice: { kind: NoticeKind; message: string } | null;
   search: AppDetailSearch;
+  /** The wayfinding param the page parsed off the URL; null when absent/invalid. */
+  from?: AppDetailFrom | null;
   /** Bots this workspace may mount, unfiltered — the view subtracts the chain. */
   mountable?: Array<{ id: string; name: string }>;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
   onSearch: (next: AppDetailSearch) => void;
 }) {
+  // A Blocked App keeps its current face: the blocked payload carries no
+  // install/bind or App-side facts for the installed face to render.
+  if (appDetailFace(payload.viewer_relation, from) === "installed" && !payload.blocked) {
+    return (
+      <InstalledAppFace
+        locale={locale}
+        appId={appId}
+        payload={payload}
+        notice={notice}
+        mountable={mountable}
+        onReload={onReload}
+      />
+    );
+  }
+
   if (!payload.can_manage) {
     return (
       <div className="flex flex-col gap-6">
