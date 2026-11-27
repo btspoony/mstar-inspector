@@ -5090,3 +5090,49 @@ describe("reconciler settings diagnostics", () => {
     expect(JSON.parse(diagnostic[0]!.detail)).toEqual({ kind: "read_failed" });
   });
 });
+
+describe("the Check names the executing Bot from the row (migration 0126)", () => {
+  test("the recovery lane's own first freeze composes the same line, with no job payload", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    linkPublication(db, id, proof.publicationId);
+    // What `begin` stamps from the job payload in production; the reconciler
+    // holds no payload at all and reads it back from this column.
+    db.raw.prepare(`UPDATE review_checks SET executor_bot_id = ? WHERE id = ?`).run(APP, id);
+    db.raw.prepare(`UPDATE review_bots SET name = 'infra-review' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET github_name = 'acme-bot' WHERE id = ?`).run(APP);
+
+    const stub = stubFetch();
+    const sent: { summary?: string } = {};
+    try {
+      const summary = await run(db, { now: () => T0 + 120_000, credentials: scriptedCredentials(db, publishingScript(sent)) });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    expect(sent.summary).toContain('Executed by review bot "infra-review"');
+    expect(sent.summary).toContain('published as GitHub App "acme-bot"');
+    expect((await rawRow(db, id)).desired_summary).toBe(sent.summary);
+  });
+
+  test("a row with no executor id still settles, naming the Bot as \"unknown\"", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    linkPublication(db, id, proof.publicationId);
+
+    const stub = stubFetch();
+    const sent: { summary?: string } = {};
+    try {
+      const summary = await run(db, { now: () => T0 + 120_000, credentials: scriptedCredentials(db, publishingScript(sent)) });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+    expect(sent.summary).toContain('Executed by review bot "unknown"');
+  });
+});

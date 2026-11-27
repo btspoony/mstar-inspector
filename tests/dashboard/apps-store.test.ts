@@ -819,3 +819,37 @@ describe("failure attribution follows the ledger head", () => {
     ).toBe(3);
   });
 });
+
+describe("the two names a completed Check prints (migration 0126)", () => {
+  test("the App name follows appDisplayName's resolution, and the Bot name comes from review_bots", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-names", { githubAppId: 6010, name: "row-name" });
+    db.raw.prepare(`UPDATE review_bots SET name = 'infra-review' WHERE id = ?`).run("app-names");
+    db.raw.prepare(`UPDATE github_apps SET github_name = 'acme-bot' WHERE id = ?`).run("app-names");
+
+    expect(await createReviewBotsStore(db).readExecutorNames("app-names", "app-names")).toEqual({
+      appName: "acme-bot",
+      botName: "infra-review",
+    });
+
+    // GitHub's own name wins; without it the slug, then the row's name.
+    db.raw.prepare(`UPDATE github_apps SET github_name = NULL, github_slug = 'acme-slug' WHERE id = ?`).run("app-names");
+    expect((await createReviewBotsStore(db).readExecutorNames("app-names", "app-names"))?.appName).toBe("acme-slug");
+    db.raw.prepare(`UPDATE github_apps SET github_slug = NULL WHERE id = ?`).run("app-names");
+    expect((await createReviewBotsStore(db).readExecutorNames("app-names", "app-names"))?.appName).toBe("row-name");
+  });
+
+  test("a deleted or unknown Bot leaves botName null, and a missing App leaves no row at all", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-gone-bot", { githubAppId: 6011, deleted: true });
+
+    expect(await createReviewBotsStore(db).readExecutorNames("app-gone-bot", "app-gone-bot")).toEqual({
+      appName: "app-gone-bot",
+      botName: null,
+    });
+    expect(await createReviewBotsStore(db).readExecutorNames("app-gone-bot", "no-such-bot")).toMatchObject({
+      botName: null,
+    });
+    expect(await createReviewBotsStore(db).readExecutorNames("no-such-app", null)).toBeNull();
+  });
+});

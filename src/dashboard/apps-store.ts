@@ -1129,6 +1129,34 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return row?.scope ?? null;
     },
 
+    /**
+     * The two display names a completed review's Check carries: the executing
+     * Review Bot's, and the display name of the GitHub App that published —
+     * resolved exactly as the dashboard's `appDisplayName` does (GitHub's own
+     * name, then its slug, then the App row's name, then the bare numeric id).
+     *
+     * `null` when the App row is gone; a deleted or unknown Bot leaves
+     * `botName` null. The caller turns either into the id it already holds, so
+     * an unreadable name is a fallback, never an error.
+     */
+    async readExecutorNames(
+      appId: string,
+      botId: string | null,
+    ): Promise<{ appName: string; botName: string | null } | null> {
+      const row = await db
+        .prepare(
+          `SELECT COALESCE(g.github_name, g.github_slug, g.name,
+                           CAST(g.github_app_id AS TEXT)) AS app_name,
+                  b.name AS bot_name
+             FROM github_apps g
+             LEFT JOIN review_bots b ON b.id = ?2 AND b.deleted_at IS NULL
+            WHERE g.id = ?1`,
+        )
+        .bind(appId, botId)
+        .first<{ app_name: string; bot_name: string | null }>();
+      return row === null ? null : { appName: row.app_name, botName: row.bot_name };
+    },
+
     async getGithubVisibility(appId: string): Promise<GithubVisibility | null> {
       const row = await db
         .prepare(`SELECT github_visibility FROM github_apps WHERE id = ?`)

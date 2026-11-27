@@ -3518,3 +3518,36 @@ describe("migrations/0073_maintenance_replay_rotation_index.sql", () => {
     expect(details).not.toContain("TEMP B-TREE");
   });
 });
+
+describe("migrations/0126_review_checks_executor_bot.sql", () => {
+  test("adds a nullable, unindexed FK column to review_checks and applies on the full chain", () => {
+    const db = createMigratedTestD1();
+    const columns = db.raw.query("PRAGMA table_info(review_checks)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: unknown;
+    }>;
+    const added = columns.find((column) => column.name === "executor_bot_id");
+    expect(added).toBeDefined();
+    expect(added!.notnull).toBe(0);
+    expect(added!.dflt_value).toBeNull();
+
+    const indexes = db.raw
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'review_checks'")
+      .all() as Array<{ name: string }>;
+    for (const index of indexes) {
+      const cols = db.raw.query(`PRAGMA index_info(${index.name})`).all() as Array<{ name: string }>;
+      expect([index.name, cols.some((c) => c.name === "executor_bot_id")]).toEqual([index.name, false]);
+    }
+
+    const foreignKeys = db.raw.query("PRAGMA foreign_key_list(review_checks)").all() as Array<{
+      table: string;
+      from: string;
+      to: string;
+    }>;
+    expect(foreignKeys.find((fk) => fk.from === "executor_bot_id")).toMatchObject({
+      table: "review_bots",
+      to: "id",
+    });
+  });
+});
