@@ -291,7 +291,7 @@ describe("Q10 — the large base preserves every existing price", () => {
           Math.max(1, Math.ceil(newProfile.base[level] * multiplier)),
         );
         if (Number.isInteger(oldProfile.base[level] * multiplier)) {
-          expect(rpFor(level, multiplier, newProfile)).toBe(rpFor(level, multiplier, oldProfile) * RATIO);
+          expect(rpFor(level, multiplier, newProfile)).toBe(rpFor(level, multiplier, oldProfile)! * RATIO);
         }
       }
     }

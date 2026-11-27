@@ -13,6 +13,7 @@ import {
   Input,
 } from "@design-system";
 import { LoadingNotice, NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
+import { isBotMultiplier, isRpCeiling } from "../../contracts/rp-limits";
 import { patchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
@@ -54,7 +55,9 @@ function parseCreditsInput(value: string, rate: number): number | null | "invali
   const credits = Number(trimmed);
   if (!Number.isFinite(credits) || credits <= 0) return "invalid";
   const rp = Math.round(credits * rate);
-  return rp > 0 ? rp : "invalid";
+  // Over the shared ceiling domain the server would refuse it; refusing here
+  // saves the round trip and states the same bound.
+  return isRpCeiling(rp) ? rp : "invalid";
 }
 
 /**
@@ -87,10 +90,7 @@ export function BotPricingSection({
   const rpPerCredit =
     typeof rawRate === "number" && Number.isFinite(rawRate) && rawRate > 0 ? rawRate : undefined;
   const rate = rpPerCredit ?? 1000;
-  const monthlyRp =
-    typeof app.monthly_rp === "number" && Number.isSafeInteger(app.monthly_rp) && app.monthly_rp > 0
-      ? app.monthly_rp
-      : null;
+  const monthlyRp = isRpCeiling(app.monthly_rp) ? app.monthly_rp : null;
 
   const [multiplier, setMultiplier] = useState(String(app.multiplier ?? 1));
   const [cap, setCap] = useState(monthlyRp === null ? "" : String(monthlyRp / rate));
@@ -138,7 +138,7 @@ export function BotPricingSection({
     let nextMultiplier: number | undefined;
     if (shared) {
       nextMultiplier = Number(multiplier);
-      if (!Number.isFinite(nextMultiplier) || nextMultiplier <= 0) {
+      if (!isBotMultiplier(nextMultiplier)) {
         setNotice({ kind: "error", message: t(locale, "botDetail.share.multiplierInvalid") });
         return;
       }

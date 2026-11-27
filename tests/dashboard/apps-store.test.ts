@@ -911,7 +911,7 @@ describe("pending installations of a bot", () => {
     seedInstallation(db, "bot-pending", 100);
     seedInstallation(db, "bot-pending", 200, true);
 
-    const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", WS);
+    const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", WS, true);
     expect(rows.map((row) => row.installation_id)).toEqual([100]);
   });
 
@@ -924,9 +924,9 @@ describe("pending installations of a bot", () => {
     seedInstallation(db, "bot-shared", 502);
 
     const store = createReviewBotsStore(db);
-    expect(await store.listPendingInstallations("bot-foreign", WS)).toEqual([]);
+    expect(await store.listPendingInstallations("bot-foreign", WS, true)).toEqual([]);
     expect(
-      (await store.listPendingInstallations("bot-shared", WS)).map((row) => row.installation_id),
+      (await store.listPendingInstallations("bot-shared", WS, true)).map((row) => row.installation_id),
     ).toEqual([502]);
   });
 });

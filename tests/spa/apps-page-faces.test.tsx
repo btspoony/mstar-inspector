@@ -197,6 +197,7 @@ describe("pending installations attach to their App's row", () => {
     app_id: "app-local-1",
     app_github_app_id: 101,
     app_name: "Demo App",
+    can_bind: true,
   };
 
   /** Mount the page on the installed tab with a stubbed list read. */

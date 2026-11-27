@@ -1,6 +1,7 @@
 import { ATTRIBUTION_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
+import { isBotMultiplier, isRpCeiling, RP_CEILING_MAX } from "../contracts/rp-limits";
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
 import type { WorkspaceRole } from "./workspace-store";
@@ -1097,6 +1098,27 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .first<GithubAppTenantRow>();
     },
 
+    /**
+     * A live shared App by its internal id, IGNORING the caller's relation —
+     * the resolver a bind uses. `getScopedAppByGithubId` answers "may this
+     * workspace see it", which a first bind cannot: the installation being
+     * bound is what CREATES the relation. The bind routes therefore resolve by
+     * identity and then prove the three facts that authorize it (live, shared,
+     * installation pending for this workspace).
+     */
+    async getLiveSharedAppById(appId: string): Promise<GithubAppTenantRow | null> {
+      return db
+        .prepare(
+          `SELECT g.*, w.workspace_id FROM github_apps g
+             INNER JOIN app_workspaces w ON w.app_id = g.id
+             INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
+            WHERE g.id = ?1 AND g.deleted_at IS NULL AND g.scope = 'shared'
+            LIMIT 1`,
+        )
+        .bind(appId)
+        .first<GithubAppTenantRow>();
+    },
+
     async getScopedAppByGithubId(
       githubAppId: number,
       workspaceId: string,
@@ -1480,7 +1502,19 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return row !== null && row.removed_at === null ? "bound_elsewhere" : "unknown";
     },
 
-    async listPendingInstallations(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
+    /**
+     * One App's unbound live installations this workspace may bind.
+     *
+     * `canBind` is the manager fact the bind route checks first; it is stamped
+     * on every row so the App detail's install block renders the action only
+     * where the server says it may bind. A caller that has ALREADY proven the
+     * manager role (the bind admission itself) passes `true`.
+     */
+    async listPendingInstallations(
+      appId: string,
+      workspaceId: string,
+      canBind: boolean,
+    ): Promise<Array<AppInstallationRow & { can_bind: boolean }>> {
       const res = await db
         .prepare(
           `SELECT i.installation_id, i.account_login, i.seen_at FROM github_app_installations i
@@ -1495,7 +1529,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         )
         .bind(appId, workspaceId)
         .all<AppInstallationRow>();
-      return res.results;
+      return res.results.map((row) => ({ ...row, can_bind: canBind }));
     },
 
     /**
@@ -1571,7 +1605,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       // the row, so a caller that bypasses the route cannot write.
       if (owner === null || owner.workspace_id !== input.ownerWorkspaceId) return "not_owner";
       if (owner.archived_at !== null) return "archived";
-      if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
+      if (input.monthlyRp !== null && !isRpCeiling(input.monthlyRp)) {
         return "invalid";
       }
       // The archive predicate rides the MUTATION, not the read above: an archive
@@ -1885,13 +1919,22 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * F16: the same pending rows, each carrying the App's DISPLAY name and
-     * numeric GitHub id — an uninstalled shared App is absent from
-     * `/api/apps`, so the UI must not resolve the name from that list.
+     * F16/F10: the installed tab's pending rows — one per unbound live
+     * installation of a SHARED App, each carrying the App's display name, its
+     * numeric GitHub id, and whether THIS caller may bind it.
+     *
+     * Only shared Apps qualify. An owned App never binds (D47), so its own
+     * unbound installation is a webhook artifact, not an action: listing it
+     * offered a button the bind route answers 404 for. `can_bind` is the
+     * manager fact the bind route checks first, so a member's row states the
+     * installation without offering the action.
      */
-    async listWorkspacePendingInstallationsNamed(workspaceId: string): Promise<
+    async listWorkspacePendingInstallationsNamed(
+      workspaceId: string,
+      canBind: boolean,
+    ): Promise<
       Array<
-        AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string }
+        AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string; can_bind: boolean }
       >
     > {
       const res = await db
@@ -1902,16 +1945,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
              FROM github_app_installations i
              JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
             WHERE i.removed_at IS NULL
+              AND g.scope = 'shared'
               AND NOT EXISTS (SELECT 1 FROM workspaces bw
                                WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
-              AND (g.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM app_workspaces w
-                               WHERE w.app_id = g.id AND w.workspace_id = ?1))
             ORDER BY i.seen_at DESC, i.installation_id`,
         )
         .bind(workspaceId)
         .all<AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string }>();
-      return res.results;
+      return res.results.map((row) => ({ ...row, can_bind: canBind }));
     },
 
     /**
@@ -2926,6 +2967,11 @@ export async function updateBotProfile(
  * The bot's price face: `multiplier` (> 0) and `monthly_rp` (NULL = no bot-level
  * ceiling). Each is written only when carried, so a multiplier-only edit never
  * restores or clears a ceiling another manager set at the same time.
+ *
+ * Both bounds come from `contracts/rp-limits` — the SAME domain the SPA parser
+ * and the mounted-chain reader apply. A ceiling outside it would persist and
+ * then make the whole App read fail to parse, and an unbounded multiplier would
+ * price a review into a number no ceiling can be compared against.
  */
 export async function updateBotPricing(
   db: AppsStoreD1,
@@ -2942,12 +2988,12 @@ export async function updateBotPricing(
   const sets: string[] = [];
   const values: unknown[] = [];
   if (input.multiplier !== undefined) {
-    if (!Number.isFinite(input.multiplier) || input.multiplier <= 0) return "invalid";
+    if (!isBotMultiplier(input.multiplier)) return "invalid";
     sets.push("multiplier = ?");
     values.push(input.multiplier);
   }
   if (input.monthlyRp !== undefined) {
-    if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
+    if (input.monthlyRp !== null && !isRpCeiling(input.monthlyRp)) {
       return "invalid";
     }
     sets.push("monthly_rp = ?");

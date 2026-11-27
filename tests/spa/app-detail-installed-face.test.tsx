@@ -107,7 +107,7 @@ function managerPayload(): SettingsManagePayload {
     can_configure_bot: true,
     installation: { id: 88123456, account_login: "btspoony", removed: false },
     pending_installations: [
-      { installation_id: 99231774, account_login: null, seen_at: "2026-11-27 09:00" },
+      { installation_id: 99231774, account_login: null, seen_at: "2026-11-27 09:00", can_bind: true },
     ],
     blocked: false,
     blocked_reason: null,

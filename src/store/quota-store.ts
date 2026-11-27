@@ -1,5 +1,6 @@
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
+import { isRpPrice } from "../contracts/rp-limits";
 import type { D1Like } from "./types";
 
 /** One resolved profile, in the vocabulary the faces and the form use. */
@@ -181,9 +182,17 @@ export async function resolveWorkspaceMonthlyQuota(
  * The multiplier belongs to the executing bot, not the profile (D37): a bot's
  * own key source no longer scales its price, and the profile keeps only the
  * level weights and the credit denominator.
+ *
+ * FAIL CLOSED (`null`): a product outside {@link isRpPrice}'s domain is not a
+ * price — `Infinity` from a runaway multiplier, or a value past the shared
+ * ceiling domain that no reader could compare against a stored ceiling. The
+ * writers refuse those inputs ({@link isBotMultiplier}), so reaching this means
+ * the row was written by something else; the caller refuses the delivery rather
+ * than metering an unrepresentable amount.
  */
-export function rpFor(level: ReviewLevel, multiplier: number, profile: QuotaProfile): number {
-  return Math.max(1, Math.ceil(profile.base[level] * multiplier));
+export function rpFor(level: ReviewLevel, multiplier: number, profile: QuotaProfile): number | null {
+  const rp = Math.max(1, Math.ceil(profile.base[level] * multiplier));
+  return isRpPrice(rp) ? rp : null;
 }
 
 /**

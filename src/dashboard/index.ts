@@ -176,6 +176,7 @@ import {
 import { LEGACY_PROVIDER_IDS } from "../contracts/provider-catalog.generated";
 import { isFindingSeverity } from "../contracts/finding-severity";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
+import { isBotMultiplier, isRpCeiling } from "../contracts/rp-limits";
 import { enabledSandboxImages, getSandboxImage } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
@@ -2246,10 +2247,14 @@ const appListRoute = async (c: DashboardContext) => {
     shared_apps: await apps.listSharedApps(gate.scope.workspaceId),
     shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
     // The installed tab's pending-bind rows: every unbound physical
-    // installation of an App this workspace may install through — its own, or a
-    // shared one. Pending is the ABSENCE of a bind, which is a different fact
-    // from install-state membership (D43).
-    pending_installations: await apps.listWorkspacePendingInstallationsNamed(gate.scope.workspaceId),
+    // installation of a SHARED App this workspace may install through. Pending
+    // is the ABSENCE of a bind, which is a different fact from install-state
+    // membership (D43); `can_bind` is the manager fact the bind route checks,
+    // stated by the server so the row never offers an action it cannot perform.
+    pending_installations: await apps.listWorkspacePendingInstallationsNamed(
+      gate.scope.workspaceId,
+      canManageApp(gate.scope),
+    ),
   });
 };
 
@@ -2715,10 +2720,16 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
       installation: binding,
       // F4/D47: the pending-bind hint is a SHARED-App fact. The bind route and
       // its OAuth callback both refuse an owned App, so a hint for one would
-      // offer an action that always 404s.
+      // offer an action that always 404s. A non-manager still sees the rows —
+      // they name what GitHub reported — but `can_bind: false` withholds the
+      // action the route would refuse.
       pending_installations:
         appRow.scope === "shared"
-          ? await store.listPendingInstallations(appRow.id, member.scope.workspaceId)
+          ? await store.listPendingInstallations(
+              appRow.id,
+              member.scope.workspaceId,
+              canManageApp(member.scope),
+            )
           : [],
       // F7: the bots this App's chain actually mounts in THIS workspace — the
       // only App-to-bot relation that exists — in position order, each with its
@@ -3614,7 +3625,7 @@ const botQuotaOverrideRoute = async (c: DashboardContext): Promise<Response> => 
       : typeof body.monthlyRp === "number"
         ? body.monthlyRp
         : Number.NaN;
-  if (monthlyRp !== null && !Number.isInteger(monthlyRp)) {
+  if (monthlyRp !== null && !isRpCeiling(monthlyRp)) {
     return c.json({ error: "monthlyRp must be a whole number of RP greater than 0, or null" }, 400);
   }
   const outcome = await createReviewBotsStore(gate.db).setBotQuotaOverride({
@@ -3707,18 +3718,9 @@ function botFaceWriteRoute(kind: BotFaceWriteKind) {
       // The page omits `multiplier` while unshared, so a ceiling-only save
       // must pass the shape gate and leave the stored multiplier alone.
       const rawMultiplier = body.multiplier;
-      if (
-        rawMultiplier !== undefined &&
-        !(typeof rawMultiplier === "number" && Number.isFinite(rawMultiplier) && rawMultiplier > 0)
-      ) {
-        return invalid();
-      }
+      if (rawMultiplier !== undefined && !isBotMultiplier(rawMultiplier)) return invalid();
       const rawMonthly = body.monthly_rp;
-      if (
-        rawMonthly !== undefined &&
-        rawMonthly !== null &&
-        !(typeof rawMonthly === "number" && Number.isInteger(rawMonthly) && rawMonthly > 0)
-      ) {
+      if (rawMonthly !== undefined && rawMonthly !== null && !isRpCeiling(rawMonthly)) {
         return invalid();
       }
       if (rawMultiplier === undefined && rawMonthly === undefined) return invalid();
@@ -5127,6 +5129,13 @@ type BindStatePayload = {
   login: string;
   workspaceId: string;
   botId: string;
+  /**
+   * The numeric GitHub App id the App row carried when the state was signed.
+   * The callback compares it against the row it resolves, so a state minted for
+   * one App can never bind an installation of another whose local id was
+   * reused.
+   */
+  githubAppId: number;
   installationId: number;
   returnTo: string;
   exp: number;
@@ -5154,6 +5163,9 @@ async function readBindState(
     typeof payload.login !== "string" ||
     typeof payload.workspaceId !== "string" ||
     typeof payload.botId !== "string" ||
+    typeof payload.githubAppId !== "number" ||
+    !Number.isSafeInteger(payload.githubAppId) ||
+    payload.githubAppId <= 0 ||
     typeof payload.installationId !== "number" ||
     typeof payload.returnTo !== "string" ||
     !payload.returnTo.startsWith("/dashboard/")
@@ -5212,6 +5224,36 @@ const appChainRoute = async (c: DashboardContext): Promise<Response> => {
   return c.json({ chain: await appChainRead(member.db, app.id, member.scope.workspaceId) });
 };
 
+/**
+ * THE bind admission, shared by the OAuth start and its callback. Both must
+ * answer it from the SAME facts, because the callback runs after a third-party
+ * round trip: anything the start route admitted may have changed, and anything
+ * it checked must be checked again rather than assumed.
+ *
+ * The caller has already resolved a LIVE SHARED App by identity — the
+ * relation-free resolver, since the installation being bound is what creates
+ * the caller's relation. Here: the installation must still be live, unbound or
+ * bound to THIS workspace (the first-binder guard), and in this workspace's
+ * pending list (which is itself "shared App, unbound, this workspace").
+ */
+async function bindAdmission(
+  apps: ReturnType<typeof createReviewBotsStore>,
+  app: Pick<GithubAppTenantRow, "id">,
+  installationId: number,
+  workspaceId: string,
+): Promise<
+  { kind: "bound" } | { kind: "bound_elsewhere" } | { kind: "unknown_installation" } | { kind: "pending" }
+> {
+  const binding = await apps.getInstallationBinding(app.id, installationId);
+  if (binding === null || binding.removed_at !== null) return { kind: "unknown_installation" };
+  if (binding.bound_workspace_id === workspaceId) return { kind: "bound" };
+  if (binding.bound_workspace_id !== null) return { kind: "bound_elsewhere" };
+  const pending = await apps.listPendingInstallations(app.id, workspaceId, true);
+  return pending.some((row) => row.installation_id === installationId)
+    ? { kind: "pending" }
+    : { kind: "unknown_installation" };
+}
+
 const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -5223,31 +5265,20 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
     return c.json({ error: "installationId required" }, 400);
   }
   const githubAppId = parseGithubAppId(c.req.param("appId") ?? "");
-  let app =
-    githubAppId === null ? null : await apps.getScopedAppByGithubId(githubAppId, member.scope.workspaceId);
-  if (app === null && githubAppId !== null) {
-    // F16 orphan pending: a SHARED App installed on GitHub but never bound has
-    // neither install state nor a target here, so the scoped read above finds
-    // no relation — yet the list just offered this very installation as
-    // bindable. The pending record is the admission: shared App, and this
-    // installation sits in this workspace's pending list. Nothing else widens.
-    const pendingApp = await apps.getAppByGithubId(githubAppId);
-    if (pendingApp !== null && pendingApp.scope === "shared" && pendingApp.deleted_at === null) {
-      const pending = await apps.listPendingInstallations(pendingApp.id, member.scope.workspaceId);
-      if (pending.some((row) => row.installation_id === installationId)) app = pendingApp;
-    }
-  }
-  if (!app) return c.json({ error: "unknown app" }, 404);
+  const named = githubAppId === null ? null : await apps.getAppByGithubId(githubAppId);
+  if (named === null) return c.json({ error: "unknown app" }, 404);
   if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
-  if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
-  const binding = await apps.getInstallationBinding(app.id, installationId);
-  if (binding?.removed_at === null && binding.bound_workspace_id === member.scope.workspaceId) {
+  if (named.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
+  const app = named.deleted_at === null ? await apps.getLiveSharedAppById(named.id) : null;
+  if (app === null) return c.json({ error: "unknown app" }, 404);
+  const admission = await bindAdmission(apps, app, installationId, member.scope.workspaceId);
+  if (admission.kind === "bound") {
     return c.json({ botId: app.id, installationId, bound: true });
   }
-  const pending = await apps.listPendingInstallations(app.id, member.scope.workspaceId);
-  if (!pending.some((row) => row.installation_id === installationId)) {
-    return c.json({ error: "unknown installation" }, 404);
-  }
+  // One answer for "not bindable by you" — bound elsewhere, removed, or never
+  // pending. Distinguishing them would let a member probe which installations of
+  // a shared App exist.
+  if (admission.kind !== "pending") return c.json({ error: "unknown app" }, 404);
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const workspaceRef = c.req.param("workspaceRef") ?? member.scope.workspaceId;
@@ -5257,6 +5288,7 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
     login: member.session.login,
     workspaceId: member.scope.workspaceId,
     botId: app.id,
+    githubAppId: app.github_app_id,
     installationId,
     // F4: a successful bind lands where its new chain is shown.
     returnTo: `/dashboard/${encodeURIComponent(workspaceRef)}/apps/${app.github_app_id}?tab=bots`,
@@ -5316,18 +5348,18 @@ async function completeInstallationBind(
   };
   if (!(await stillManager())) return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
   const apps = createReviewBotsStore(db);
-  const named = await apps.getAppById(state.botId);
-  const app =
-    named === null || named.deleted_at !== null
-      ? null
-      : await apps.getScopedAppByGithubId(named.github_app_id, state.workspaceId);
-  if (app === null || app.scope !== "shared") return fail("common.oauth.bindUnavailable", 404, "unknown_app");
-  const binding = await apps.getInstallationBinding(app.id, state.installationId);
-  if (binding === null || binding.removed_at !== null) {
-    return fail("common.oauth.bindUnavailable", 404, "unknown_installation");
+  // The signed state names the App and the installation the start route
+  // admitted. The relation-free resolver is the ONLY correct one here: a first
+  // bind is what creates the caller's relation, so a scoped lookup answered
+  // `unknown_app` for exactly the case the start route had just admitted.
+  const app = await apps.getLiveSharedAppById(state.botId);
+  if (app === null || app.github_app_id !== state.githubAppId) {
+    return fail("common.oauth.bindUnavailable", 404, "unknown_app");
   }
-  if (binding.bound_workspace_id !== null && binding.bound_workspace_id !== state.workspaceId) {
-    return fail("common.oauth.bindConflict", 409, "bound_elsewhere");
+  const admission = await bindAdmission(apps, app, state.installationId, state.workspaceId);
+  if (admission.kind === "bound_elsewhere") return fail("common.oauth.bindConflict", 409, "bound_elsewhere");
+  if (admission.kind !== "pending") {
+    return fail("common.oauth.bindUnavailable", 404, "unknown_installation");
   }
   if (!c.env.DASHBOARD_ENCRYPTION_KEY) return c.text("dashboard encryption is not configured", 500);
   let account: Awaited<ReturnType<typeof fetchInstallationAccount>>;

@@ -35,7 +35,7 @@ import {
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { MetricBand, type Metric } from "@/components/MetricBand";
 import { PageHeader } from "@/components/PageHeader";
-import { fetchJson, postForm } from "../api";
+import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { AppAvatar } from "../components/AppAvatar";
 import { appInstallHref } from "../components/AppInstallIdentity";
@@ -59,6 +59,7 @@ import {
   type UsableBotsPayload,
 } from "./data";
 import { GitHubMark } from "./LoginPage";
+import { postInstallationBind } from "./SettingsPage";
 import { apiBase } from "../workspace-base";
 
 /**
@@ -204,9 +205,9 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     void load();
   }, [load]);
 
-  // The pending row's bind action — the same flow the App settings install
-  // block runs: POST the bind, follow the authorize redirect when GitHub must
-  // verify the installer, else reload the list.
+  // The pending row's bind action — the SAME flow the App detail's install
+  // block runs ({@link postInstallationBind}): POST the bind, follow the
+  // authorize redirect when GitHub must verify the installer, else reload.
   const [binding, setBinding] = useState<number | null>(null);
   const [bindFailed, setBindFailed] = useState(false);
   const bindPendingInstallation = useCallback(
@@ -214,21 +215,12 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       setBinding(row.installation_id);
       setBindFailed(false);
       try {
-        const res = await postForm(`${base}/api/apps/${row.app_github_app_id}/bind-installation`, {
-          installationId: String(row.installation_id),
-        });
-        if (res.status !== 200) {
+        const outcome = await postInstallationBind(base, row.app_github_app_id, row.installation_id);
+        if (outcome === "failed") {
           setBindFailed(true);
           return;
         }
-        const body = JSON.parse(res.body) as { authorize_url?: unknown };
-        if (typeof body.authorize_url === "string") {
-          window.location.assign(body.authorize_url);
-          return;
-        }
-        await load();
-      } catch {
-        setBindFailed(true);
+        if (outcome === "bound") await load();
       } finally {
         setBinding(null);
       }
@@ -464,7 +456,6 @@ function InstalledTab({
   pendingBind?: PendingBindFlow;
 }) {
   const pending = payload.pending_installations ?? [];
-  const planRp = payload.month_plan_rp ?? null;
   if (installed.length === 0 && pending.length === 0) {
     return (
       <EmptyState
@@ -487,8 +478,61 @@ function InstalledTab({
       />
     );
   }
-  // The origin rides every detail link: the App detail reads `from` to pick
-  // the installed face (ADR: two origins, two faces).
+  return (
+    <InstalledTable
+      locale={locale}
+      payload={payload}
+      installed={installed}
+      quotaError={quotaError}
+      pending={pending}
+      pendingBind={pendingBind}
+    />
+  );
+}
+
+/**
+ * One table row of the installed tab: an installed App, or ONE App's group of
+ * pending installations that has no installed row yet.
+ */
+type InstalledRow =
+  | { kind: "app"; app: AppsPayload["apps"][number]; pending: PendingBindRow[] }
+  | { kind: "pending"; appName: string; appGithubAppId: number; pending: PendingBindRow[] };
+
+/** Group pending rows by App, preserving the server's own row order. */
+function groupPendingByApp(pending: readonly PendingBindRow[]): InstalledRow[] {
+  const groups = new Map<number, InstalledRow & { kind: "pending" }>();
+  for (const row of pending) {
+    const existing = groups.get(row.app_github_app_id);
+    if (existing === undefined) {
+      groups.set(row.app_github_app_id, {
+        kind: "pending",
+        appName: row.app_name,
+        appGithubAppId: row.app_github_app_id,
+        pending: [row],
+      });
+    } else {
+      existing.pending.push(row);
+    }
+  }
+  return [...groups.values()];
+}
+
+function InstalledTable({
+  locale,
+  payload,
+  installed,
+  quotaError,
+  pending,
+  pendingBind,
+}: {
+  locale: SpaBoot["locale"];
+  payload: AppsPayload;
+  installed: AppsPayload["apps"];
+  quotaError: boolean;
+  pending: PendingBindRow[];
+  pendingBind?: PendingBindFlow;
+}) {
+  const planRp = payload.month_plan_rp ?? null;
   const hrefOf = (appId: number): string => `${apiBase()}/apps/${appId}?from=installed`;
   const installedIds = new Set(installed.map((app) => app.github_app_id));
   const rows: InstalledRow[] = [
@@ -497,9 +541,9 @@ function InstalledTab({
       app,
       pending: pending.filter((row) => row.app_github_app_id === app.github_app_id),
     })),
-    ...pending
-      .filter((row) => !installedIds.has(row.app_github_app_id))
-      .map((row) => ({ kind: "pending" as const, pending: row })),
+    // An orphan pending App is ONE row however many installations it has: the
+    // row is the App, and the installations are what it carries.
+    ...groupPendingByApp(pending.filter((row) => !installedIds.has(row.app_github_app_id))),
   ];
   const dash = <span className="text-muted-foreground">{t(locale, "bots.monthNone")}</span>;
   const columns: DataTableColumn<InstalledRow>[] = [
@@ -523,9 +567,9 @@ function InstalledTab({
               </a>
             </span>
           ) : (
-            <span className="text-sm font-semibold">{row.pending.app_name}</span>
+            <span className="text-sm font-semibold">{row.appName}</span>
           )}
-          {(row.kind === "app" ? row.pending : [row.pending]).map((entry) => (
+          {row.pending.map((entry) => (
             <PendingInstallationLine key={entry.installation_id} locale={locale} pending={entry} pendingBind={pendingBind} />
           ))}
         </div>
@@ -562,7 +606,7 @@ function InstalledTab({
       <DataTable
         columns={columns}
         rows={rows}
-        rowKey={(row) => (row.kind === "app" ? `app-${row.app.github_app_id}` : `pending-${row.pending.installation_id}`)}
+        rowKey={(row) => (row.kind === "app" ? `app-${row.app.github_app_id}` : `pending-${row.appGithubAppId}`)}
         rowProps={(row) =>
           row.kind === "app"
             ? {
@@ -581,15 +625,11 @@ function InstalledTab({
   );
 }
 
-/** One table row of the installed tab: an installed App, or a pending installation whose App has no row yet. */
-type InstalledRow =
-  | { kind: "app"; app: AppsPayload["apps"][number]; pending: PendingBindRow[] }
-  | { kind: "pending"; pending: PendingBindRow };
-
 /**
  * One pending installation attached to its App's row: the account GitHub
- * reported (or the unknown-account stand-in), the 等待绑定 state, and the bind
- * action that starts the authorize flow.
+ * reported (or the unknown-account stand-in), the 等待绑定 state, and — only
+ * where the server says this caller may bind — the action that starts the
+ * authorize flow.
  */
 function PendingInstallationLine({
   locale,
@@ -611,20 +651,22 @@ function PendingInstallationLine({
       </span>
       <StatusBadge tone="warn">{t(locale, "settings.installPending")}</StatusBadge>
       <span>{t(locale, "apps.installReturnHint")}</span>
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        disabled={pendingBind?.binding === true}
-        onClick={(event) => {
-          // The row around this control opens the App detail; a bind click must
-          // start the authorize flow, not navigate away while it is in flight.
-          event.stopPropagation();
-          pendingBind?.onBind(pending);
-        }}
-      >
-        {t(locale, "settings.installPendingBind")}
-      </Button>
+      {pending.can_bind ? (
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={pendingBind?.binding === true}
+          onClick={(event) => {
+            // The row around this control opens the App detail; a bind click must
+            // start the authorize flow, not navigate away while it is in flight.
+            event.stopPropagation();
+            pendingBind?.onBind(pending);
+          }}
+        >
+          {t(locale, "settings.installPendingBind")}
+        </Button>
+      ) : null}
     </span>
   );
 }

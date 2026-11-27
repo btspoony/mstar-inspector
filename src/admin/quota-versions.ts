@@ -1,5 +1,6 @@
 import { FREE_PLAN_ID } from "../dashboard/entitlement";
 import type { DashboardD1 } from "../dashboard/users";
+import { isRpCeiling, QUOTA_BASE_MAX } from "../contracts/rp-limits";
 import {
   decodeQuotaProfiles,
   pickQuotaProfile,
@@ -265,6 +266,11 @@ function positiveInt(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
 
+/** A positive whole number no larger than `max` — the shared domain's own test. */
+function positiveIntWithin(value: unknown, max: number): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= max ? value : null;
+}
+
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -308,9 +314,9 @@ export function parseQuotaCandidate(body: unknown, planIds: readonly string[]): 
       ceilings[planId] = null;
       continue;
     }
-    const rp = positiveInt(value);
+    const rp = isRpCeiling(value) ? value : null;
     if (rp === null) {
-      return { ok: false, error: `monthlyRp.${planId} must be a positive whole number of RP, or null for no limit` };
+      return { ok: false, error: `monthlyRp.${planId} must be a positive whole number of RP within the supported domain, or null for no limit` };
     }
     ceilings[planId] = rp;
   }
@@ -335,11 +341,14 @@ export function parseQuotaNumbers(
   if (base === null) {
     return { ok: false, error: "base must be an object of positive whole numbers" };
   }
-  const quick = positiveInt(base.quick);
-  const standard = positiveInt(base.default);
-  const deep = positiveInt(base.deep);
+  const quick = positiveIntWithin(base.quick, QUOTA_BASE_MAX);
+  const standard = positiveIntWithin(base.default, QUOTA_BASE_MAX);
+  const deep = positiveIntWithin(base.deep, QUOTA_BASE_MAX);
   if (quick === null || standard === null || deep === null) {
-    return { ok: false, error: "base.quick, base.default and base.deep must each be a positive whole number of RP" };
+    return {
+      ok: false,
+      error: `base.quick, base.default and base.deep must each be a positive whole number of RP no larger than ${QUOTA_BASE_MAX}`,
+    };
   }
   const rpPerCredit = positiveInt(fields.rpPerCredit);
   if (rpPerCredit === null) {

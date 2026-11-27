@@ -965,8 +965,8 @@ describe("Blocked and pending installations (static SSR)", () => {
     const pending: SettingsManagePayload = {
       ...sharedPayload(),
       pending_installations: [
-        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-        { installation_id: 501, account_login: null, seen_at: "2026-01-01 00:00:00" },
+        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00", can_bind: true },
+        { installation_id: 501, account_login: null, seen_at: "2026-01-01 00:00:00", can_bind: true },
       ],
     };
     const markup = renderDetail(pending, "installations");
@@ -986,7 +986,7 @@ describe("Blocked and pending installations (static SSR)", () => {
       ...sharedPayload(),
       app: { ...sharedPayload().app, scope: "owned" },
       pending_installations: [
-        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00", can_bind: true },
       ],
     };
     const markup = renderDetail(ownedPending, "installations");
@@ -1030,11 +1030,18 @@ describe("Blocked and pending installations (static SSR)", () => {
     expect(parseSettings(blockedMany)).not.toBeNull();
     expect(parseSettings(blockedMany)?.target_id).toBeNull();
     expect(parseSettings(blockedMany)?.targets_many).toBe(true);
+    // Zero targets is the OTHER fact the same null target can mean: an
+    // installation-only manager whose bot stopped being shared. It parses as
+    // its own face, and it is not the several-targets one.
+    const blockedInstall = { ...blockedMany, targets_many: false };
+    expect(parseSettings(blockedInstall)).not.toBeNull();
+    expect(parseSettings(blockedInstall)?.targets_many).toBe(false);
     for (const broken of [
-      { ...blockedMany, targets_many: false },
+      // A blocked null target must SAY which fact it is — neither flag is refused.
       { ...blockedMany, targets_many: undefined },
       { ...blockedMany, app: { ...blockedMany.app, review_enabled: true } },
       { ...managePayload, target_id: null, targets_many: true },
+      { ...managePayload, target_id: null, targets_many: false },
     ]) {
       expect(parseSettings(broken)).toBeNull();
     }

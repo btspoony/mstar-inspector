@@ -470,6 +470,45 @@ export function AppInfoSection({
 }
 
 /**
+ * THE pending-installation bind flow, shared by the Apps list and the App
+ * detail's install block: POST the bind, follow GitHub's authorize redirect
+ * when the route asks for the account proof, else report that the bind landed
+ * and let the caller reload what it shows.
+ *
+ * `appGithubAppId` is the numeric GitHub App id the route parses — never the
+ * local App row id — and the path carries `/api`, which is where the route is
+ * registered.
+ */
+export async function postInstallationBind(
+  base: string,
+  appGithubAppId: number,
+  installationId: number,
+): Promise<"authorize" | "bound" | "failed"> {
+  let status: number;
+  let body: string;
+  try {
+    ({ status, body } = await postForm(`${base}/api/apps/${appGithubAppId}/bind-installation`, {
+      installationId: String(installationId),
+    }));
+  } catch {
+    return "failed";
+  }
+  if (status !== 200) return "failed";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return "failed";
+  }
+  const authorizeUrl = (parsed as { authorize_url?: unknown } | null)?.authorize_url;
+  if (typeof authorizeUrl === "string") {
+    window.location.assign(authorizeUrl);
+    return "authorize";
+  }
+  return "bound";
+}
+
+/**
  * The Installed tab's first block: the GitHub installation entry point.
  *
  * Both scopes keep the same plain share link (derived from the cached GitHub
@@ -514,21 +553,13 @@ export function AppInstallSection({
     setBinding(installationId);
     setBindFailed(false);
     try {
-      const res = await postForm(`${apiBase()}/apps/${encodeURIComponent(appId)}/bind-installation`, {
-        installationId: String(installationId),
-      });
-      if (res.status !== 200) {
+      const outcome = await postInstallationBind(apiBase(), app.github_app_id ?? Number.NaN, installationId);
+      if (outcome === "failed") {
         setBindFailed(true);
         return;
       }
-      const body = JSON.parse(res.body) as { authorize_url?: unknown };
-      if (typeof body.authorize_url === "string") {
-        window.location.assign(body.authorize_url);
-        return;
-      }
+      if (outcome === "authorize") return;
       await onReload({ background: true });
-    } catch {
-      setBindFailed(true);
     } finally {
       setBinding(null);
     }
@@ -575,15 +606,17 @@ export function AppInstallSection({
                           })
                         : row.account_login}
                     </span>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      className="w-fit"
-                      disabled={binding !== null}
-                      onClick={() => void bindInstallation(row.installation_id)}
-                    >
-                      {t(locale, "settings.installPendingBind")}
-                    </Button>
+                    {row.can_bind ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="w-fit"
+                        disabled={binding !== null}
+                        onClick={() => void bindInstallation(row.installation_id)}
+                      >
+                        {t(locale, "settings.installPendingBind")}
+                      </Button>
+                    ) : null}
                   </li>
                 ))}
               </ul>

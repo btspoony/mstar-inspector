@@ -190,6 +190,7 @@ describe("F16 — pending rows name the App from the payload", () => {
             app_id: "app-local-1",
             app_github_app_id: 4242,
             app_name: "Acme Inspector",
+            can_bind: true,
           },
         ],
       }),

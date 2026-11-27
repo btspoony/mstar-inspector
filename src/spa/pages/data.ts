@@ -1,5 +1,6 @@
 
 import { FREE_SLOT_REFUSAL, WORKSPACE_CREATION_CLOSED_REFUSAL } from "../../dashboard/entitlement";
+import { isBotMultiplier, isRpCeiling, RP_CEILING_MAX } from "../../contracts/rp-limits";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 
 export type Role = "admin" | "member";
@@ -138,6 +139,12 @@ export type PendingBindRow = {
   app_id: string;
   app_github_app_id: number;
   app_name: string;
+  /**
+   * The server's own answer to "may THIS caller bind it" — the manager gate the
+   * bind route applies first. A member reads `false` and the row states the
+   * installation without offering an action the route would 403.
+   */
+  can_bind: boolean;
 };
 
 function isPendingBindRow(value: unknown): value is PendingBindRow {
@@ -149,7 +156,8 @@ function isPendingBindRow(value: unknown): value is PendingBindRow {
     typeof value.app_github_app_id === "number" &&
     typeof value.app_name === "string" &&
     isNullableString(value.account_login) &&
-    typeof value.seen_at === "string"
+    typeof value.seen_at === "string" &&
+    typeof value.can_bind === "boolean"
   );
 }
 
@@ -193,7 +201,7 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     typeof value.owned === "boolean" &&
     typeof value.can_manage === "boolean" &&
     isBotScope(value.scope) &&
-    typeof value.multiplier === "number" &&
+    isBotMultiplier(value.multiplier) &&
     typeof value.month_used_rp === "number" &&
     typeof value.archived === "boolean"
   );
@@ -612,12 +620,9 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.provider_workspace === "string" &&
     typeof value.owned === "boolean" &&
     typeof value.available === "boolean" &&
-    typeof value.multiplier === "number" &&
+    isBotMultiplier(value.multiplier) &&
     typeof value.month_used_rp === "number" &&
-    (value.effective_monthly_rp === null ||
-      (typeof value.effective_monthly_rp === "number" &&
-        Number.isSafeInteger(value.effective_monthly_rp) &&
-        value.effective_monthly_rp > 0)) &&
+    (value.effective_monthly_rp === null || isRpCeiling(value.effective_monthly_rp)) &&
     typeof value.archived === "boolean" &&
     (value.default_chain === null || typeof value.default_chain === "string") &&
     (value.runtime === null || (typeof value.runtime === "string" && value.runtime.length > 0))
@@ -716,6 +721,13 @@ export type PendingInstallation = {
 };
 
 /**
+ * A pending installation plus the server's own answer to "may THIS caller bind
+ * it" — the manager gate the bind route applies first. A member sees the row
+ * (it names what GitHub reported) and never the action.
+ */
+export type PendingBindInstallation = PendingInstallation & { can_bind: boolean };
+
+/**
  * Why a target's bot no longer serves it, as the server derives it on every
  * read (no stored status): the bot is `owned` and the target belongs to
  * another workspace. Closed vocabulary — a re-share clears it.
@@ -791,6 +803,13 @@ function isPendingInstallationList(value: unknown): value is PendingInstallation
         isNullableString(row.account_login) &&
         typeof row.seen_at === "string",
     )
+  );
+}
+
+function isPendingBindInstallationList(value: unknown): value is PendingBindInstallation[] {
+  return (
+    isPendingInstallationList(value) &&
+    (value as readonly Record<string, unknown>[]).every((row) => typeof row.can_bind === "boolean")
   );
 }
 
@@ -941,11 +960,7 @@ function parseBotOverview(value: unknown): BotOverview | null {
   if (typeof value.provider_workspace !== "string") return null;
   if (typeof value.month_used_rp !== "number") return null;
   if (value.plan_monthly_rp !== null && typeof value.plan_monthly_rp !== "number") return null;
-  if (
-    value.effective_ceiling !== undefined &&
-    value.effective_ceiling !== null &&
-    typeof value.effective_ceiling !== "number"
-  ) {
+  if (value.effective_ceiling !== undefined && value.effective_ceiling !== null && !isRpCeiling(value.effective_ceiling)) {
     return null;
   }
   if (value.default_chain !== null && typeof value.default_chain !== "string") return null;
@@ -1061,7 +1076,7 @@ type SettingsManageBase = AppDetailViewerFacts & {
   can_manage: true;
   workspace_id: string;
   installation: BoundInstallation | null;
-  pending_installations: PendingInstallation[];
+  pending_installations: PendingBindInstallation[];
   blocked: false;
   blocked_reason: null;
   targets_many?: boolean;
@@ -1134,12 +1149,35 @@ export type SettingsBlockedManyPayload = AppDetailViewerFacts & AppChain & {
   installation: BoundInstallation | null;
 };
 
+/**
+ * The Blocked manager face of an INSTALLATION-ONLY manager: the workspace holds
+ * a bound installation of a bot whose owner stopped sharing, and has no target
+ * of its own (or lost the last one). Zero targets is a DIFFERENT fact from
+ * several, and the payload states it differently — `targets_many: false` with an
+ * explicit `target_id: null`. Nothing else distinguishes the two: both carry
+ * no target-owned slice, so the two flags together are the discriminant.
+ *
+ * The installed face renders for it: the blocked warning, the installation
+ * roster and the chain the workspace still mounts.
+ */
+export type SettingsBlockedInstallPayload = AppDetailViewerFacts & AppChain & {
+  can_manage: true;
+  blocked: true;
+  blocked_reason: BlockedReason;
+  workspace_id: string;
+  target_id: null;
+  targets_many: false;
+  app: BlockedAppIdentityBase;
+  installation: BoundInstallation | null;
+};
+
 export type SettingsPayload =
   | SettingsReadOnlyPayload
   | SettingsManagePayload
   | SettingsUntargetedPayload
   | SettingsBlockedPayload
-  | SettingsBlockedManyPayload;
+  | SettingsBlockedManyPayload
+  | SettingsBlockedInstallPayload;
 
 /**
  * The faces that carry the target-owned review policy — the ones whose
@@ -2693,9 +2731,18 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     }
   }
   const hasTarget = data.target_id !== undefined;
-  const blockedMany = data.blocked && data.target_id === null;
-  if (hasTarget && !blockedMany && (typeof data.target_id !== "string" || data.target_id.length === 0)) return null;
-  if (!blockedMany && (data.app.review_enabled !== undefined) !== hasTarget) return null;
+  // A blocked manager with an explicit `null` target has NO single target of its
+  // own. `targets_many` then says which fact that is: true = several repositories,
+  // false = NONE (an installation-only manager whose bot stopped being shared).
+  // The two flags travel together; neither implies the other.
+  const blockedNullTarget = data.blocked && data.target_id === null;
+  const blockedMany = blockedNullTarget && data.targets_many === true;
+  const blockedInstall = blockedNullTarget && data.targets_many === false;
+  if (blockedNullTarget && !blockedMany && !blockedInstall) return null;
+  if (hasTarget && !blockedNullTarget && (typeof data.target_id !== "string" || data.target_id.length === 0)) {
+    return null;
+  }
+  if (!blockedNullTarget && (data.app.review_enabled !== undefined) !== hasTarget) return null;
   if (!data.can_manage) {
     if (typeof data.app.created_at !== "string") return null;
     if (hasTarget && typeof data.app.review_enabled !== "boolean") return null;
@@ -2722,8 +2769,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
       return null;
     }
     if (!isBotScope(data.app.scope)) return null;
-    if (blockedMany !== (data.targets_many === true)) return null;
-    if (blockedMany) {
+    if (blockedNullTarget) {
       if (data.app.review_enabled !== undefined) return null;
       if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
       return data as SettingsPayload;
@@ -2741,7 +2787,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (data.app.sandbox_image_id !== undefined && typeof data.app.sandbox_image_id !== "string") return null;
   if (!isBotScope(data.app.scope)) return null;
   if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
-  if (!isPendingInstallationList(data.pending_installations)) return null;
+  if (!isPendingBindInstallationList(data.pending_installations)) return null;
   if (!Array.isArray(data.installations)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
@@ -2781,7 +2827,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
     if (!Array.isArray(data.quota_overrides)) return null;
     quotaOverrides = [];
     for (const row of data.quota_overrides) {
-      if (!isRecord(row) || typeof row.workspaceId !== "string" || typeof row.monthlyRp !== "number") return null;
+      if (!isRecord(row) || typeof row.workspaceId !== "string" || !isRpCeiling(row.monthlyRp)) return null;
       quotaOverrides.push({ workspaceId: row.workspaceId, monthlyRp: row.monthlyRp });
     }
   }

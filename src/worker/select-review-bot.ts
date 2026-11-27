@@ -158,6 +158,9 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
     const multiplier = await readBotMultiplier(db, bot.botId);
     if (multiplier === null) return { kind: "refused", refusal: { kind: "entitlement-unreadable" } };
     const cost = rpFor(level, multiplier, profile);
+    // An unrepresentable price is refused, never metered: the writers bound both
+    // factors, so only a row from elsewhere reaches this.
+    if (cost === null) return { kind: "refused", refusal: { kind: "entitlement-unreadable" } };
 
     // Plan month: SHARED RP ONLY — an own bot's spend never counts here.
     const sharedUsed = await sharedMonthlyRp(db, target.workspace_id, month);
