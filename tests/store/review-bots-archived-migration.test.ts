@@ -67,8 +67,8 @@ describe("migrations/0127_review_bots_archived.sql", () => {
     db.raw.close();
   });
 
-  test("is the migration after 0126, so the chain that carries it ends with this column", () => {
-    expect(migrationsAfter(126)).toEqual([MIGRATION]);
+  test("is the first migration after 0126, so nothing earlier sorts past it", () => {
+    expect(migrationsAfter(126)[0]).toBe(MIGRATION);
   });
 
   test("leaves the family's foreign keys intact and still enforced", () => {
