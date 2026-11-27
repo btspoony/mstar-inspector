@@ -3,6 +3,7 @@ import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 
 const SESSION_SECRET = ["test", "bot", "write", "scope", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -263,10 +264,92 @@ describe("the bot editor's reads require the owning workspace", () => {
     expect(models.status).toBe(200);
     const body = (await models.json()) as { groups: unknown };
     expect(Array.isArray(body.groups)).toBe(true);
+  });
 
-    // The preview answers a shape only once it reached the provider; with no
-    // stored key it refuses a declaration it cannot read — never a 403.
-    const preview = await read(OFFICIAL, "dana", READS[1]!);
-    expect(preview.status).not.toBe(403);
+  test("the owner preview answers 200 with the vocabulary it fetched for a declared provider", async () => {
+    world();
+    // A declaration with one stored key: the preview's own precondition.
+    const store = createAppConfigStore(db, TEST_ENCRYPTION_KEY);
+    await store.upsertCustomProvider(
+      { botId: HOME_BOT_ROW, workspaceId: OFFICIAL, role: "owner" },
+      HOME_BOT_ROW,
+      {
+        provider_id: "acme-proxy",
+        base_url: "https://api.acme.test/v1",
+        api: "openai-completions",
+        model_ids: ["model-one"],
+      },
+      "sk-acme-owner-preview",
+    );
+    // The probe data is the route's ONE outbound read: the declared endpoint's
+    // own model list, which keeps model-one and adds model-two.
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ data: [{ id: "model-one" }, { id: "model-two" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof fetch,
+    );
+    try {
+      const preview = await worker.fetch(
+        new Request(
+          `https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${HOME_BOT_ROW}/provider-models/preview?provider=acme-proxy`,
+          { headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("dana", null, SESSION_SECRET)}` } },
+        ),
+        envFor(),
+      );
+      expect(preview.status).toBe(200);
+      expect(await preview.json()).toEqual({
+        ok: true,
+        provider: "acme-proxy",
+        current: 1,
+        fetched: 2,
+        kept: 1,
+        added: 1,
+        dropped: 0,
+      });
+      expect(fetchSpy.mock.calls[0]![0]).toBe("https://api.acme.test/v1/models");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("the owner's key-usage read answers 200 with the provider's snapshot", async () => {
+    world();
+    const store = createAppConfigStore(db, TEST_ENCRYPTION_KEY);
+    const plainKey = "sk-zai-owner-usage";
+    await store.addProviderKey(
+      { botId: HOME_BOT_ROW, workspaceId: OFFICIAL, role: "owner" },
+      HOME_BOT_ROW,
+      "zai",
+      plainKey,
+    );
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plainKey));
+    const keyId = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0"))
+      .join("")
+      .slice(0, 16);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            data: { limits: [{ type: "TOKENS_LIMIT", unit: 6, number: 1, currentValue: 25, usage: 200, remaining: 175 }] },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )) as unknown as typeof fetch,
+    );
+    try {
+      const usage = await read(OFFICIAL, "dana", {
+        name: "key usage",
+        path: "/api/review-bots/" + HOME_BOT_ROW + "/keys/usage",
+        method: "POST",
+        form: { provider: "zai", keyId },
+      });
+      expect(usage.status).toBe(200);
+      expect(await usage.json()).toMatchObject({ ok: true, status: "ok" });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

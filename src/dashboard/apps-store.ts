@@ -1574,22 +1574,33 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
         return "invalid";
       }
-      if (input.monthlyRp === null) {
-        await db
-          .prepare("DELETE FROM bot_quota_overrides WHERE bot_id = ?1 AND workspace_id = ?2")
-          .bind(input.botId, input.workspaceId)
-          .run();
-        return "ok";
-      }
-      await db
-        .prepare(
-          `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
-           VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (bot_id, workspace_id) DO UPDATE SET monthly_rp = excluded.monthly_rp, updated_at = excluded.updated_at`,
-        )
-        .bind(input.botId, input.workspaceId, input.monthlyRp, input.now)
-        .run();
-      return "ok";
+      // The archive predicate rides the MUTATION, not the read above: an archive
+      // that lands between the two changes zero rows instead of leaving an
+      // override on a locked bot.
+      const live = "EXISTS (SELECT 1 FROM review_bots r WHERE r.id = ?1 AND r.deleted_at IS NULL AND r.archived_at IS NULL)";
+      const res =
+        input.monthlyRp === null
+          ? await db
+              .prepare(`DELETE FROM bot_quota_overrides WHERE bot_id = ?1 AND workspace_id = ?2 AND ${live}`)
+              .bind(input.botId, input.workspaceId)
+              .run()
+          : await db
+              .prepare(
+                `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+                 SELECT ?1, ?2, ?3, ?4 WHERE ${live}
+                 ON CONFLICT (bot_id, workspace_id) DO UPDATE SET
+                   monthly_rp = excluded.monthly_rp, updated_at = excluded.updated_at`,
+              )
+              .bind(input.botId, input.workspaceId, input.monthlyRp, input.now)
+              .run();
+      if (res.meta.changes > 0) return "ok";
+      // Zero rows: the INSERT path can only miss that way, and a clear of an
+      // absent override is a no-op. Reading again only NAMES the reason.
+      const archived = await db
+        .prepare("SELECT 1 AS present FROM review_bots WHERE id = ?1 AND deleted_at IS NULL AND archived_at IS NOT NULL")
+        .bind(input.botId)
+        .first<{ present: number }>();
+      return archived === null ? "ok" : "archived";
     },
 
     /** Every override one bot carries, for the owner's editor. */
@@ -1611,11 +1622,15 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * App's chain is its owner's to write (D34, D35).
      *
      * A NEW bot must be live (not archived) and shared or owned by that
-     * workspace, and that predicate is checked INSIDE the write batch, so an
-     * owner unsharing or archiving one between the request and the batch cannot
-     * slip in. A RETAINED id — one the install already mounts — is inserted
+     * workspace. A RETAINED id — one the install already mounts — is inserted
      * regardless of its current scope or archive state: the UI shows such a row
      * as skipped and the operator chose to keep it.
+     *
+     * Both halves are decided INSIDE the batch. The guard statement runs while
+     * the OLD chain is still there, so "retained" means "the chain holds this id
+     * right now" — not what the request read a moment earlier. A bot another
+     * request removed and archived in that window is neither retained nor
+     * mountable, the guard row's CHECK fires, and the whole batch rolls back.
      */
     async replaceInstallChain(
       input: { appId: string; workspaceId: string; botIds: readonly string[] },
@@ -1626,57 +1641,41 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .first<{ present: number }>();
       if (own === null) return "not_installer";
 
-      // The ids the chain ALREADY holds. A retained row survives a rewrite even
-      // when its owner stopped sharing it: the UI shows such a row as skipped
-      // (D29), and dropping it here would silently un-mount a bot every operator
-      // on that page can still see. Only a NEW id must be mountable.
-      const retained = new Set(
-        (await db
-          .prepare(
-            "SELECT bot_id FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2",
-          )
-          .bind(input.appId, input.workspaceId)
-          .all<{ bot_id: string }>()).results.map((row) => row.bot_id),
-      );
-
-      // ONE batch: clear, re-insert, then a SHAPE GUARD. The guard is the repo's
-      // existing recipe (0057, 0115): a real table with `CHECK (n = 0)`, inserted
-      // from a SELECT that compares requested against inserted. A bot that went
-      // unavailable between the request and this batch inserts nothing, the counts
-      // disagree, the CHECK fires, and the WHOLE batch — the DELETE included —
-      // rolls back. The original chain stays byte-identical: no reader ever sees a
-      // partial chain, and no compensating write can overwrite a concurrent edit.
+      // ONE batch: ADMISSION GUARD, clear, re-insert. The guard is the repo's
+      // existing recipe (0057, 0115, 0124): a real table with `CHECK (n = 0)`,
+      // inserted from a SELECT that counts the ids the rewrite cannot admit. A
+      // refused id makes that count non-zero, the CHECK fires, and the WHOLE
+      // batch — the DELETE included — rolls back. The original chain stays
+      // byte-identical: no reader ever sees a partial chain, and no compensating
+      // write can overwrite a concurrent edit.
       const requested = JSON.stringify(input.botIds);
-      const retainedJson = JSON.stringify([...retained]);
       try {
         await db.batch([
+          db
+            .prepare("DELETE FROM app_install_chain_guard WHERE github_app_id = ?1 AND workspace_id = ?2")
+            .bind(input.appId, input.workspaceId),
+          db
+            .prepare(
+              `WITH unadmitted AS (
+                 SELECT COUNT(*) AS n FROM json_each(?3) j
+                  WHERE NOT (j.value IN (SELECT ib.bot_id FROM app_install_bots ib
+                                          WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2)
+                             OR EXISTS (SELECT 1 FROM review_bots b
+                                         WHERE b.id = j.value AND b.deleted_at IS NULL
+                                           AND b.archived_at IS NULL
+                                           AND (b.scope = 'shared' OR b.workspace_id = ?2)))
+               )
+               INSERT INTO app_install_chain_guard (github_app_id, workspace_id, n)
+               SELECT ?1, ?2, n FROM unadmitted WHERE n <> 0`,
+            )
+            .bind(input.appId, input.workspaceId, requested),
           db
             .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
             .bind(input.appId, input.workspaceId),
           db
             .prepare(
               `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
-               SELECT ?1, ?2, j.key + 1, j.value
-                 FROM json_each(?3) j
-                WHERE j.value IN (SELECT value FROM json_each(?4))
-                   OR EXISTS (SELECT 1 FROM review_bots b
-                               WHERE b.id = j.value AND b.deleted_at IS NULL
-                                 AND b.archived_at IS NULL
-                                 AND (b.scope = 'shared' OR b.workspace_id = ?2))`,
-            )
-            .bind(input.appId, input.workspaceId, requested, retainedJson),
-          db
-            .prepare("DELETE FROM app_install_chain_guard WHERE github_app_id = ?1 AND workspace_id = ?2")
-            .bind(input.appId, input.workspaceId),
-          db
-            .prepare(
-              `INSERT INTO app_install_chain_guard (github_app_id, workspace_id, n)
-               SELECT ?1, ?2, (SELECT COUNT(*) FROM json_each(?3))
-                                 - (SELECT COUNT(*) FROM app_install_bots
-                                     WHERE github_app_id = ?1 AND workspace_id = ?2)
-                WHERE (SELECT COUNT(*) FROM json_each(?3))
-                      <> (SELECT COUNT(*) FROM app_install_bots
-                           WHERE github_app_id = ?1 AND workspace_id = ?2)`,
+               SELECT ?1, ?2, j.key + 1, j.value FROM json_each(?3) j`,
             )
             .bind(input.appId, input.workspaceId, requested),
         ]);
@@ -2552,7 +2551,7 @@ const APP_SCOPE_READ_SQL = `
   SELECT scope, shared_at FROM github_apps WHERE id = ? AND deleted_at IS NULL`;
 
 const REVIEW_BOT_SCOPE_READ_SQL = `
-  SELECT scope, shared_at, workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
+  SELECT scope, shared_at, workspace_id, archived_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
 
 const BOT_SCOPE_LIST_SQL = `
   SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at,
@@ -2636,12 +2635,12 @@ const REVIEW_BOT_SCOPE_SHARE_AUDIT_SQL = `
            'after', json_object('scope', 'shared', 'shared_at', ?4)),
          ?5
    WHERE EXISTS (SELECT 1 FROM review_bots b
-                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'shared'
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.archived_at IS NULL AND b.scope <> 'shared'
                     AND ${botOfficialWorkspaceGuardSql.replace("review_bots.workspace_id", "b.workspace_id")})`;
 
 const REVIEW_BOT_SCOPE_SHARE_SQL = `
   UPDATE review_bots SET scope = 'shared', shared_at = ?2
-   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'shared'
+   WHERE id = ?1 AND deleted_at IS NULL AND archived_at IS NULL AND scope <> 'shared'
      AND ${botOfficialWorkspaceGuardSql}`;
 
 const REVIEW_BOT_SCOPE_UNSHARE_AUDIT_SQL = `
@@ -2654,11 +2653,11 @@ const REVIEW_BOT_SCOPE_UNSHARE_AUDIT_SQL = `
            'after', json_object('scope', 'owned', 'shared_at', NULL)),
          ?4
    WHERE EXISTS (SELECT 1 FROM review_bots b
-                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'owned')`;
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.archived_at IS NULL AND b.scope <> 'owned')`;
 
 const REVIEW_BOT_SCOPE_UNSHARE_SQL = `
   UPDATE review_bots SET scope = 'owned', shared_at = NULL
-   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'owned'`;
+   WHERE id = ?1 AND deleted_at IS NULL AND archived_at IS NULL AND scope <> 'owned'`;
 
 /**
  * The shared transition engine behind both share switches. A same-value
@@ -2683,8 +2682,9 @@ async function scopeTransition(
   const current = await db
     .prepare(sql.read)
     .bind(id)
-    .first<{ scope: BotScope; shared_at: string | null }>();
+    .first<{ scope: BotScope; shared_at: string | null; archived_at?: string | null }>();
   if (!current) return { outcome: "bot_not_found" };
+  if (current.archived_at != null) return { outcome: "archived" };
   if (current.scope === scope) return { outcome: "ok", scope, sharedAt: current.shared_at };
   if (scope === "owned" && input.confirm !== true) return { outcome: "confirm_required" };
 
@@ -2706,8 +2706,11 @@ async function scopeTransition(
   const persisted = await db
     .prepare(sql.read)
     .bind(id)
-    .first<{ scope: BotScope; shared_at: string | null }>();
+    .first<{ scope: BotScope; shared_at: string | null; archived_at?: string | null }>();
   if (persisted === null) return { outcome: "bot_not_found" };
+  // The share/unshare statements carry `archived_at IS NULL`, so a bot archived
+  // between the read above and the batch changes zero rows and lands here.
+  if (persisted.archived_at != null) return { outcome: "archived" };
   if (persisted.scope === scope) return { outcome: "ok", scope, sharedAt: persisted.shared_at };
   return { outcome: "outside_official_workspace" };
 }
@@ -2763,11 +2766,8 @@ export async function setReviewBotScope(
   if (input.authority.role !== "owner" && input.authority.role !== "admin") {
     return { outcome: "forbidden" };
   }
-  const archived = await db
-    .prepare(`SELECT 1 AS present FROM review_bots WHERE id = ? AND archived_at IS NOT NULL`)
-    .bind(input.botId)
-    .first<{ present: number }>();
-  if (archived !== null) return { outcome: "archived" };
+  // The archive flag is read AND enforced inside `scopeTransition`: its read
+  // carries `archived_at`, and both share statements carry `archived_at IS NULL`.
   return scopeTransition(
     db,
     { ...input, id: input.botId },

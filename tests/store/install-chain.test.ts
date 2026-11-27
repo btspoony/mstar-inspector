@@ -448,4 +448,150 @@ describe("setBotQuotaOverride — the writer bot_quota_overrides was missing", (
     expect(overrides(db, "bot-shared")).toEqual([]);
     db.raw.close();
   });
+
+  test("an archive between the read and the write changes zero rows and reports archived", async () => {
+    const db = world();
+    let fired = false;
+    // The seam: this request already read the bot as live. The archive lands
+    // immediately before the mutation statement executes.
+    const racing = {
+      ...db,
+      prepare(query: string) {
+        if (!fired && /(INSERT INTO|DELETE FROM) bot_quota_overrides/.test(query)) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-shared'").run(TS);
+        }
+        return db.prepare(query);
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(racing).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("archived");
+    expect(fired).toBe(true);
+    expect(overrides(db, "bot-shared")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("a clear between the read and an archive writes nothing and reports archived", async () => {
+    const db = world();
+    const store = createReviewBotsStore(db);
+    await store.setBotQuotaOverride({
+      botId: "bot-shared",
+      workspaceId: "tenant",
+      ownerWorkspaceId: "provider",
+      monthlyRp: 500,
+      now: TS,
+    });
+    let fired = false;
+    const racing = {
+      ...db,
+      prepare(query: string) {
+        if (!fired && /DELETE FROM bot_quota_overrides/.test(query)) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-shared'").run(TS);
+        }
+        return db.prepare(query);
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(racing).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: null,
+        now: TS,
+      }),
+    ).toBe("archived");
+    expect(overrides(db, "bot-shared")).toEqual([{ workspaceId: "tenant", monthlyRp: 500 }]);
+    db.raw.close();
+  });
+});
+
+describe("replaceInstallChain — an archive between the request and the batch", () => {
+  /**
+   * The retained set is decided INSIDE the batch, so a bot another request
+   * removed and archived in the same window is neither retained nor mountable:
+   * it is a NEW id by then, the admission guard refuses it, and the whole batch
+   * — including the DELETE — rolls back.
+   */
+  test("a bot removed and archived before the batch cannot be re-mounted from a stale payload", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-kept", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({
+      appId: "app-1",
+      workspaceId: "default",
+      botIds: ["bot-a", "bot-kept"],
+    });
+    const before = chainOf(db, "app-1", "default");
+
+    // The competing request: unmount bot-a and archive it, both landing after
+    // this call read the chain and before its batch runs.
+    const racing = {
+      ...db,
+      async batch(statements: Parameters<TestD1["batch"]>[0]) {
+        db.raw.prepare("DELETE FROM app_install_bots WHERE bot_id = 'bot-a'").run();
+        db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-a'").run(TS);
+        return db.batch(statements);
+      },
+    } as TestD1;
+
+    // This request still names bot-a FIRST: its payload says it was retained.
+    expect(
+      await createReviewBotsStore(racing).replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-a", "bot-kept"],
+      }),
+    ).toBe("bot_unavailable");
+    // The competitor's chain stands, exactly as it left it — no archived bot was
+    // mounted back, and this refused batch restored nothing over it.
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 2, bot_id: "bot-kept" }]);
+    expect(before).toEqual([
+      { position: 1, bot_id: "bot-a" },
+      { position: 2, bot_id: "bot-kept" },
+    ]);
+    db.raw.close();
+  });
+
+  test("a bot archived but STILL mounted stays retained through the same batch", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a"] });
+
+    const racing = {
+      ...db,
+      async batch(statements: Parameters<TestD1["batch"]>[0]) {
+        db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-a'").run(TS);
+        return db.batch(statements);
+      },
+    } as TestD1;
+
+    // Still in the OLD chain when the guard statement reads it: retained.
+    expect(
+      await createReviewBotsStore(racing).replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-a"],
+      }),
+    ).toBe("ok");
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-a" }]);
+    db.raw.close();
+  });
 });

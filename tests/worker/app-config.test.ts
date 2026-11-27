@@ -27,6 +27,7 @@ import {
   ProviderKeyTooLongError,
   UnknownModelChainError,
   UnknownModelRoleError,
+  BotArchivedError,
   createAppConfigStore,
   parseModelChain,
   type AppConfigD1,
@@ -4144,5 +4145,107 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const admin = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db), CUSTOM_FORM);
     expect(admin.status).toBe(200);
     expect(rawCount(db, "bot_custom_providers")).toBe(1);
+  });
+});
+
+/**
+ * F1-1/F1-5: `requireBotWrite` reads the bot, then the mutation runs. An archive
+ * that lands in that window must change ZERO rows — the guard rides each write
+ * statement itself — and the store must say `archived` rather than report a
+ * silent no-op as success.
+ */
+describe("an archive between the store's authority read and its write", () => {
+  /** A DB whose first statement matching `trigger` archives the bot first. */
+  function archiveOnFirst(inner: TestD1, botId: string, trigger: RegExp): { db: AppConfigD1; fired(): boolean } {
+    let fired = false;
+    const db: AppConfigD1 = {
+      prepare(query: string) {
+        if (!fired && trigger.test(query)) {
+          fired = true;
+          inner.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", botId);
+        }
+        return inner.prepare(query);
+      },
+      batch: (statements) => inner.batch(statements),
+    };
+    return { db, fired: () => fired };
+  }
+
+  test("a provider key insert writes nothing and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    const race = archiveOnFirst(db, app.id, /INSERT INTO bot_provider_keys/);
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_provider_keys")).toBe(0);
+  });
+
+  test("a custom-provider declaration writes nothing and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    const race = archiveOnFirst(
+      db,
+      app.id,
+      /INSERT INTO bot_custom_providers/,
+    );
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).upsertCustomProvider(
+        authority(app.id),
+        app.id,
+        {
+          provider_id: "my-custom",
+          base_url: "https://api.example.test/v1",
+          api: "openai-completions",
+          model_ids: ["deepseek-v4-flash"],
+        },
+        sk("racer-key-0001"),
+      ),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_custom_providers")).toBe(0);
+    expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
+  });
+
+  test("a chain write writes nothing and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    const race = archiveOnFirst(db, app.id, /INSERT INTO bot_model_chains/);
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).setModelChain(authority(app.id), app.id, PLAIN_CHAIN),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_model_chains")).toBe(0);
+  });
+
+  test("a seat write writes nothing and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertModelChain(authority(app.id), app.id, "review", PLAIN_CHAIN);
+    const race = archiveOnFirst(db, app.id, /INSERT INTO bot_model_chain_seats/);
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).setModelChainSeat(authority(app.id), app.id, MODEL_ROLE_IDS[0]!, "review"),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
+  });
+
+  test("a key deletion keeps the row and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const race = archiveOnFirst(db, app.id, /DELETE FROM bot_provider_keys/);
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).deleteProviderKey(
+        authority(app.id),
+        app.id,
+        "anthropic",
+        await keyIdOf(PLAIN_ANTHROPIC_KEY),
+      ),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_provider_keys")).toBe(1);
   });
 });

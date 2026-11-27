@@ -579,6 +579,100 @@ describe("bot scope transitions (contract § 7.1)", () => {
     ]);
   });
 
+  test("an archive between the read and the batch refuses the share, and audits nothing", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-archive-race", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          // The archive lands after this request read the bot as live and before
+          // its share batch runs.
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-archive-race'").run(NOW);
+        }
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setReviewBotScope(racingDb, {
+        botId: "bot-archive-race",
+        scope: "shared",
+        actor: "operator",
+        now: LATER,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
+    ).toEqual({ outcome: "archived" });
+    expect(fired).toBe(true);
+    expect(storedScope(db, "bot-archive-race")).toEqual({ scope: "owned", shared_at: null });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("an archive between the read and the batch refuses the revoke, keeping the share", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-archive-revoke", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-archive-revoke'").run(NOW);
+        }
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setReviewBotScope(racingDb, {
+        botId: "bot-archive-revoke",
+        scope: "owned",
+        confirm: true,
+        actor: "operator",
+        now: LATER,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
+    ).toEqual({ outcome: "archived" });
+    expect(storedScope(db, "bot-archive-revoke")).toEqual({ scope: "shared", shared_at: NOW });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("an already-archived bot is refused before the batch, with zero writes", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-archived-read", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+    db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-archived-read'").run(NOW);
+
+    let batched = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        batched = true;
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setReviewBotScope(racingDb, {
+        botId: "bot-archived-read",
+        scope: "shared",
+        actor: "operator",
+        now: LATER,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
+    ).toEqual({ outcome: "archived" });
+    expect(batched).toBe(false);
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
   test("a shared bot survives a designation clear: no revocation, no new share, still revocable", async () => {
     const db = createMigratedTestD1();
     seedScopedBot(db, "bot-orphan-share", { workspaceId: WS, scope: "shared", sharedAt: NOW });

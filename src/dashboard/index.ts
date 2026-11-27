@@ -163,6 +163,7 @@ import {
   PROVIDER_META,
   ProviderEndpointLockedError,
   ProviderKeyLimitError,
+  BotArchivedError,
   createAppConfigStore,
   parseModelChain,
   type AppConfigBatchFace,
@@ -2770,6 +2771,16 @@ function settingsFailureNotice(err: unknown): string {
     : "The dashboard database rejected the change — nothing was stored. You can resubmit.";
 }
 
+/**
+ * A store refusal as a response. The routes already answer 409 for a bot that
+ * was archived when the request arrived; `BotArchivedError` is the same answer
+ * for one archived between that check and the store's guarded write.
+ */
+function settingsStoreFailure(c: DashboardContext, landing: string | null, err: unknown): Response {
+  if (err instanceof BotArchivedError) return botArchivedResponse(c);
+  return settingsPostResponse(c, landing, settingsFailureNotice(err), 500);
+}
+
 function isOmpRuntimeImage(sandboxImageId: string): boolean {
   return getSandboxImage(sandboxImageId)?.runtime === "omp";
 }
@@ -3938,7 +3949,7 @@ const appProviderModelsPreviewRoute = async (c: DashboardContext): Promise<Respo
     });
   } catch (err) {
     logSettingsFailure("provider_models_preview", gate.app.id, err);
-    return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+    return settingsStoreFailure(c, repositoryLandingPath(gate), err);
   }
 };
 
@@ -4245,7 +4256,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (err instanceof ProviderKeyLimitError) {
         return settingsKeyLimitResponse(c, repositoryLandingPath(gate), provider);
       }
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Stored the ${provider} key for ${appDisplayName(gate.app)} — it is only ever shown masked.`,
     );
@@ -4282,7 +4293,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       await store.setModelChain(botWriteAuthority(gate), gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Saved the model chain for ${appDisplayName(gate.app)}.`);
   }
@@ -4324,7 +4335,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       await store.setModelChainSeats(botWriteAuthority(gate), gate.app.id, refs);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Saved the role models for ${appDisplayName(gate.app)}.`);
   }
@@ -4361,7 +4372,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       await store.upsertModelChain(botWriteAuthority(gate), gate.app.id, name, chain);
     } catch (err) {
       logSettingsFailure("add_chain", gate.app.id, err);
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Saved the ${name} model chain for ${appDisplayName(gate.app)}.`);
   }
@@ -4374,7 +4385,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       await store.removeModelChain(botWriteAuthority(gate), gate.app.id, name);
     } catch (err) {
       logSettingsFailure("remove_chain", gate.app.id, err);
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Removed the ${name} model chain for ${appDisplayName(gate.app)} — seats using it fall back to the default chain.`);
   }
@@ -4482,7 +4493,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (err instanceof ProviderKeyLimitError) {
         return settingsKeyLimitResponse(c, repositoryLandingPath(gate), providerId);
       }
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Declared custom provider ${providerId} for ${appDisplayName(gate.app)} — its key is stored encrypted and injected by environment variable name.`,
     );
@@ -4530,7 +4541,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       }
     } catch (err) {
       logSettingsFailure("add_custom_provider_key", gate.app.id, err);
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(
       c,
@@ -4657,7 +4668,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (err instanceof ProviderKeyLimitError) {
         return settingsKeyLimitResponse(c, repositoryLandingPath(gate), templateId);
       }
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Materialized the ${template.label} template as custom provider ${templateId} for ${appDisplayName(gate.app)} — its key is stored encrypted and injected by environment variable name.`,
     );
@@ -4714,7 +4725,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
           provider: providerId,
         });
       }
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(
       c,
@@ -4745,7 +4756,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
           provider: providerId,
         });
       }
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
   }
   if (op === "remove-custom-provider") {
@@ -4755,7 +4766,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       removed = await store.removeCustomProvider(botWriteAuthority(gate), gate.app.id, providerId);
     } catch (err) {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsRemoveResponse(
       c,
@@ -4773,10 +4784,14 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.runtimeHarnessUnknown);
     }
     try {
-      await createReviewBotsStore(gate.db).setSandboxImage(gate.app.id, image.id);
+      // `setSandboxImage` carries `archived_at IS NULL`, so a bot archived since
+      // the route's own check changed zero rows — report that, never success.
+      if (!(await createReviewBotsStore(gate.db).setSandboxImage(gate.app.id, image.id))) {
+        return botArchivedResponse(c);
+      }
     } catch (err) {
       logSettingsFailure("save_sandbox_image", gate.app.id, err);
-      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+      return settingsStoreFailure(c, repositoryLandingPath(gate), err);
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Saved the ${image.id} runtime harness for ${appDisplayName(gate.app)}.`);
   }
@@ -4802,7 +4817,7 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
       : await store.deleteProviderKey(botWriteAuthority(gate), gate.app.id, provider, keyId);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
-    return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+    return settingsStoreFailure(c, repositoryLandingPath(gate), err);
   }
   return settingsRemoveResponse(
     c,
