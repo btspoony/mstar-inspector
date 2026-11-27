@@ -30,7 +30,7 @@ The detail payload states which relation the viewer has to the App, and the face
 | 我创建的应用 | `/apps/<github_app_id>?from=created` | creator: merged App settings, delivery, installations — three tabs and no chain |
 
 - `SettingsPayload` gains the viewer relation (`installed`, `created`, or both). Without the query parameter the page picks `created` for a creator and `installed` for a consumer, so old links still open the face the viewer can actually use.
-- The installed face renders **no** creator-only section: no credentials, no share switch, no delete/enable, no metadata refresh, no delivery tab. Its metric band carries 挂载的机器人, 安装 and 本月 spend only — a 24h rejection count is removed from the face.
+- The installed face renders **no** creator-only section: no credentials, no share switch, no delete/enable, no metadata refresh, no delivery tab. Its metric band carries 挂载的机器人, 安装 and 本月已用 in Credits. A 24h rejection count is not rendered anywhere — not here, not on the creator face, not on a list.
 - The installed face's chain is the one writer here: the installing workspace's owner/admin reorders it, removes a bot and adds another, and its rows state each bot's default model chain, runtime, multiplier and month spend. A member sees the same rows with no controls present (not disabled). This keeps the split record's rule — only the installing workspace's owner or admin edits a chain.
 - The creator face keeps the App's own settings, delivery and installations, and owns no chain: the App is supply, the mount belongs to the install state. 应用设置 is ONE GitHub App section that carries the cached metadata and the credential state together (webhook URL, saved-credential line, refresh button) — there is no separate credentials block and no repository block, because review policy lives on the repository detail. The operations block stays; the share switch renders only for the official workspace, with the non-official read-only variant stated. The tab set is 应用设置 / 投递状态 / 已安装.
 - Authorization stays server-side: `canManageApp` continues to gate every creator route and field, and the face is a rendering choice over two already-authorized reads, never the gate itself.
@@ -42,10 +42,16 @@ The page header carries the display name, creator, status and the metric band. T
 ### Bots get a first-class entry
 
 - The sidebar gains a bots entry: `/bots` lists every bot this workspace can use as TWO sections — 我创建的机器人 and 共享给我的机器人 — not a filter over one table; each row opens `/bots/<botId>`.
-- `/bots/<botId>` is the only place a bot is configured, and it has two faces. The owner workspace's owner/admin sees `PageHeader` (name, provider workspace, sharing state), `MetricBand` (multiplier, month spend, mounted-App count), then 使用情况, 模型提供方 (one aggregate header per provider, its keys behind a disclosure), 模型链 (`ChainEditor`), 席位 and 运行时.
-- Any other workspace sees the same frame and then a pure read-only face: a read-only notice, 能力摘要 (default model chain, runtime and multiplier as text), 使用情况 (this workspace's spend against its ceiling) and 挂载于 (the Apps that mount it). The provider section, the seats and every chain control are **absent**, not disabled — a consumer must not see the owner's provider keys or chain mechanics at all.
+- `/bots/<botId>` is one route with two readings, and the reading decides the tab bar:
+  - **Owner workspace's owner/admin** gets `PageHeader` (name, provider workspace) and `MetricBand` (multiplier, 本月已用, mounted-App count), then two tabs. 概览 is read-only: 使用情况 as a `FlowSection` (本月已用, 每月上限, 剩余, 计费来源, UTC calendar-month basis), 能力摘要 (default chain, runtime, multiplier as text), 挂载于, and the sharing state. 配置 is the writable side: 共享与定价 (the share switch, the multiplier and the monthly ceiling as one decision), 模型提供方 (one aggregate header per provider, its keys behind a disclosure), 模型链 (`ChainEditor`), 席位 and 运行时.
+  - **Any other workspace** gets the same header and metric band, a read-only notice, and 使用情况 / 能力摘要 / 挂载于 — with **no tab bar at all**. A one-item tab bar would be a control that does nothing. 共享与定价, 模型提供方, 模型链, 席位 and 运行时 are **absent**, not disabled: a consumer must not see the owner's provider keys, pricing or chain mechanics.
+- 配置 never repeats 能力摘要 or 挂载于; the metric band stays as its only context. Read-only facts have one home, so the two tabs cannot drift.
 - The App detail keeps only the mount: each chain row links to the bot's detail and states that bot's default model chain, runtime and multiplier. The App detail header carries no bot-settings action, and the creator face carries no chain.
-- The chain has one control surface per face. Move, remove and add live on the table row itself; no second copy of the chain renders beside it.
+- The chain has one control surface per face. Move, remove and add live on the table row itself; no second copy of the chain renders beside it. The section header carries 添加机器人, matching the action placement other surfaces use.
+
+### Units: Credits outside, RP never
+
+RP is the platform's internal accounting unit (1,000 RP = 1 Credit). Every user-facing amount, ceiling and spend figure renders in **Credits** with two decimals; RP appears in no label, column, tooltip or empty state. A figure labelled 本月 is always 本月已用, and states its ceiling (`已用 / 上限`) or `不限（自有机器人）` — the reader must never guess whether the number is spend or remaining balance.
 
 ### Degraded reads degrade one control, not the page
 
@@ -64,16 +70,20 @@ A failed model-option read removes model *selection* only, and only on the bot's
 ## Acceptance criteria
 
 - The repo list's 已安装的应用 and 我创建的应用 rows open different faces of the same App; the URL records the origin, and an owner opening from 已安装 does not see creator-only blocks.
-- The installed face contains App identity, install/bind state and the mount chain; its App facts are read-only, its chain carries exactly one set of move/remove/add controls for the installing workspace's owner/admin, and a member sees no controls. It contains no credentials, share, delete, enable, metadata-refresh or delivery surface, and no 24h rejection metric.
+- The installed face contains App identity, install/bind state and the mount chain; its App facts are read-only, its chain carries exactly one set of move/remove/add controls for the installing workspace's owner/admin with 添加机器人 in the section header, and a member sees no controls. It contains no credentials, share, delete, enable, metadata-refresh or delivery surface, and no 24h rejection metric.
 - The creator face has exactly three tabs; the bots tab and every chain control are gone from it; 应用设置 renders one merged GitHub App section (metadata plus credential state), one operations block and the share switch, with no repository block.
-- `/bots` exists in the sidebar and renders two sections (我创建的机器人, 共享给我的机器人); `/bots/<botId>` shows 能力摘要 on the read-only face and 使用情况/模型提供方/模型链/席位/运行时 on the editable one.
-- The read-only bot face contains no provider block, no key list, no seat control and no chain control — asserted by absence, not by disabling.
+- `/bots` exists in the sidebar and renders two sections (我创建的机器人, 共享给我的机器人); `/bots/<botId>` gives the owner 概览/配置 and gives every other workspace a tab-bar-less 概览.
+- The 配置 tab contains 共享与定价 (share switch, multiplier, monthly ceiling), 模型提供方, 模型链, 席位 and 运行时, and contains no copy of 能力摘要 or 挂载于.
+- The read-only bot face contains no provider block, no key list, no seat control, no chain control and no tab bar — asserted by absence, not by disabling.
+- No user-visible string contains `RP`; every amount, ceiling and spend figure renders in Credits with two decimals, and every 本月 label reads 本月已用 with its ceiling or 不限.
 - The App detail header contains no bot-settings action; the App detail renders no identity fact twice.
 - A failed model-option read leaves existing chain rows visible on the editable bot face and states what the reader can still do.
 - `canManageApp` still refuses every creator route and field for a non-manager; the chain write on the installed face is authorized by installer owner/admin on the server, never by the rendered face.
 
 ## Risks
 
+- **One unit boundary.** The server keeps storing RP; the UI converts at the last step. A ceiling stored in RP and a figure rendered in Credits must round the same way in every surface, or the same month reads differently on a list, a metric band and a usage section. The conversion is a display concern only — never a stored value.
+- **Tab bars are viewer-dependent.** The owner's 概览/配置 and the consumer's no-tab bar are one route with two renderings; a shared component that always emits the tab bar would show a dead single tab to consumers.
 - **Payload and SPA ship together.** `SettingsPayload` gains the viewer relation, and the spec's invariant that SPA and API ship in one Worker bundle holds; a mismatched deploy must fall back to `can_manage` rather than render an empty face.
 - **Two authorization readings on one page.** The installed face's chain write needs the installer owner/admin check (the chain's owner), while the App's own fields stay creator-gated; a page that renders both must not derive either permission from the face it is showing.
 - **Read-only bot face must not leak the owner's configuration.** The consumer read has to be a narrower payload than the owner's: provider names, key counts, seats and chain mechanics stay owner-only. Serving one payload and hiding blocks in the SPA would put them in the response.
