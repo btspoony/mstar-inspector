@@ -347,7 +347,7 @@ export function parseQuotaNumbers(
     };
   }
   // The rate divides every amount on every face, so the writer applies the
-  // READ domain's bound: a version carrying a rate the SPA refuses would be a
+  // bounded WRITE domain: a version carrying an unrenderable rate would be a
   // page that cannot open.
   const rpPerCredit = isRpPerCredit(fields.rpPerCredit) ? fields.rpPerCredit : null;
   if (rpPerCredit === null) {
