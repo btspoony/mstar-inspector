@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
+import { isChainMultiplier } from "../../src/contracts/rp-limits";
 
 const TS = "2026-10-24T00:00:00.000Z";
 
@@ -348,6 +349,100 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
     // this asserts the read side sees the write side's order.
     const chains = await store.listInstallChainBots("default");
     expect(chains.get("app-1")?.map((bot) => bot.botId)).toEqual(["bot-own", "bot-a"]);
+    db.raw.close();
+  });
+});
+
+/**
+ * The chain's product is the Apps list's `month.multiplier`, which
+ * `isChainMultiplier` bounds at `CHAIN_MULTIPLIER_MAX`. A write the reader would
+ * refuse turns the whole Apps page into a load error, so the store refuses it
+ * first — and the refusal must leave the previous chain byte-identical.
+ */
+describe("replaceInstallChain — the chain product stays in the served domain", () => {
+  function seedBotWithMultiplier(db: TestD1, id: string, multiplier: number): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots (id, workspace_id, name, scope, multiplier, created_at, updated_at)
+         VALUES (?, 'provider', ?, 'shared', ?, ?, ?)`,
+      )
+      .run(id, id, multiplier, TS, TS);
+  }
+
+  test("three bots whose product exceeds the bound are refused, and the old chain stands", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBotWithMultiplier(db, "bot-1000a", 1000);
+    seedBotWithMultiplier(db, "bot-1000b", 1000);
+    seedBotWithMultiplier(db, "bot-4", 4);
+    seedBot(db, "bot-solo", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-solo"] });
+
+    // 1000 × 1000 × 4 = 4,000,000 > CHAIN_MULTIPLIER_MAX (3,333,333).
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-1000a", "bot-1000b", "bot-4"],
+      }),
+    ).toBe("chain_too_large");
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-solo" }]);
+    db.raw.close();
+  });
+
+  test("a chain whose product is exactly the bound is accepted, and the served product parses", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    // 3 × 239 × 4,649 = 3,333,333 = CHAIN_MULTIPLIER_MAX exactly.
+    seedBotWithMultiplier(db, "bot-3", 3);
+    seedBotWithMultiplier(db, "bot-239", 239);
+    seedBotWithMultiplier(db, "bot-4649", 4649);
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-3", "bot-239", "bot-4649"],
+      }),
+    ).toBe("ok");
+    const chain = (await store.listInstallChainBots("default")).get("app-1") ?? [];
+    expect(isChainMultiplier(chain.reduce((product, bot) => product * bot.multiplier, 1))).toBe(true);
+    db.raw.close();
+  });
+
+  /**
+   * A chain written before this bound existed can already be past it. The
+   * operator's only repair is to REMOVE from it, and that rewrite mounts no new
+   * id, so it is admitted — refusing it would strand the oversize chain on a
+   * page no parser accepts.
+   */
+  test("an oversize chain is still repairable by removing from it", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBotWithMultiplier(db, "bot-1000a", 1000);
+    seedBotWithMultiplier(db, "bot-1000b", 1000);
+    seedBotWithMultiplier(db, "bot-4", 4);
+    seedInstall(db, "app-1", "default");
+    // A legacy chain written before the write bound: 4,000,000.
+    const legacy = ["bot-1000a", "bot-1000b", "bot-4"];
+    legacy.forEach((botId, index) => {
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES ('app-1', 'default', ?, ?)")
+        .run(index + 1, botId);
+    });
+    const store = createReviewBotsStore(db);
+
+    expect(
+      await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-4"] }),
+    ).toBe("ok");
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-4" }]);
     db.raw.close();
   });
 });

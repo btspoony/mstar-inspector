@@ -1,7 +1,7 @@
 import { ATTRIBUTION_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
-import { isBotMultiplier, isRpCeiling, RP_CEILING_MAX } from "../contracts/rp-limits";
+import { CHAIN_MULTIPLIER_MAX, isBotMultiplier, isRpCeiling, RP_CEILING_MAX } from "../contracts/rp-limits";
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
 import type { WorkspaceRole } from "./workspace-store";
@@ -1721,10 +1721,19 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * right now" — not what the request read a moment earlier. A bot another
      * request removed and archived in that window is neither retained nor
      * mountable, the guard row's CHECK fires, and the whole batch rolls back.
+     *
+     * The chain's PRICE rides the same batch: the Apps list serves the product
+     * of the mounted multipliers, and `isChainMultiplier` refuses a product
+     * above `CHAIN_MULTIPLIER_MAX`, so a chain that overshoots would make the
+     * whole page fail to parse. The product is computed from the ids being
+     * written against the multipliers stored at write time — never from a
+     * pre-batch read. A rewrite that only SHRINKS an already-oversize chain (a
+     * removal, a reorder) is admitted: refusing it would leave the operator
+     * unable to repair the chain, and the served product can only fall.
      */
     async replaceInstallChain(
       input: { appId: string; workspaceId: string; botIds: readonly string[] },
-    ): Promise<"ok" | "not_installer" | "bot_unavailable"> {
+    ): Promise<"ok" | "not_installer" | "bot_unavailable" | "chain_too_large"> {
       const own = await db
         .prepare(`SELECT 1 AS present FROM app_installations WHERE github_app_id = ?1 AND workspace_id = ?2`)
         .bind(input.appId, input.workspaceId)
@@ -1759,6 +1768,36 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                SELECT ?1, ?2, n FROM unadmitted WHERE n <> 0`,
             )
             .bind(input.appId, input.workspaceId, requested),
+          // The PRICE guard, same recipe, same table: a row is inserted only
+          // when this rewrite would serve a chain product above
+          // `CHAIN_MULTIPLIER_MAX`. It deliberately omits `n`, so its refusal is
+          // the column's NOT NULL rather than the table's CHECK — that is what
+          // tells the two refusals apart below.
+          //
+          // The product is taken in `json_each` key order (left to right, the
+          // same order the served `month.multiplier` reduces in), so an
+          // exactly-at-bound chain is admitted by the writer on the very bits
+          // the reader accepts. A rewrite that mounts no id the chain does not
+          // already hold can only shrink or reorder what is served, so it is
+          // admitted even when the old chain was already past the bound: that
+          // is the operator's only way to repair it.
+          db
+            .prepare(
+              `WITH RECURSIVE step(i, p) AS (
+                 SELECT -1, 1.0
+                 UNION ALL
+                 SELECT j.key, step.p * COALESCE((SELECT b.multiplier FROM review_bots b
+                                                   WHERE b.id = j.value AND b.deleted_at IS NULL), 1)
+                   FROM step JOIN json_each(?3) j ON j.key = step.i + 1
+               )
+               INSERT INTO app_install_chain_guard (github_app_id, workspace_id)
+               SELECT ?1, ?2
+                WHERE (SELECT p FROM step ORDER BY i DESC LIMIT 1) > ?4
+                  AND EXISTS (SELECT 1 FROM json_each(?3) j
+                               WHERE j.value NOT IN (SELECT ib.bot_id FROM app_install_bots ib
+                                                      WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2))`,
+            )
+            .bind(input.appId, input.workspaceId, requested, CHAIN_MULTIPLIER_MAX),
           db
             .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
             .bind(input.appId, input.workspaceId),
@@ -1770,11 +1809,19 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             .bind(input.appId, input.workspaceId, requested),
         ]);
       } catch (err) {
-        if (!(err instanceof Error) || !/app_install_chain_guard/.test(err.message)) throw err;
+        if (!(err instanceof Error)) throw err;
         // The batch rolled back; the ids that failed to insert are the ones this
         // caller must retry without. Naming a specific one here would require
         // reading state the failed batch never wrote, so the caller re-reads the
         // chain and re-derives the list — the guard's rollback is the authority.
+        //
+        // A price refusal is its own outcome: the ids were all admissible, and
+        // the caller's fix is to mount fewer bots, not to re-derive the list.
+        // Its statement omits `n`, so the refusal is that column's NOT NULL —
+        // matched without the `table.column` spelling, which differs between
+        // the local driver and D1.
+        if (/NOT NULL/.test(err.message) && /app_install_chain_guard/.test(err.message)) return "chain_too_large";
+        if (!/app_install_chain_guard/.test(err.message)) throw err;
         return "bot_unavailable";
       }
       return "ok";

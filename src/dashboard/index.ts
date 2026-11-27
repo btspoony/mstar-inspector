@@ -5218,6 +5218,12 @@ const appChainRoute = async (c: DashboardContext): Promise<Response> => {
   if (outcome === "bot_unavailable") {
     return c.json({ error: "a bot in the chain is neither shared nor owned by this workspace" }, 400);
   }
+  if (outcome === "chain_too_large") {
+    return c.json(
+      { error: "the chain's combined multiplier is priced above what this workspace can be served" },
+      400,
+    );
+  }
   // Re-read the chain, not the whole page: the editor renders what the relay
   // will actually walk.
   return c.json({ chain: await appChainRead(member.db, app.id, member.scope.workspaceId) });

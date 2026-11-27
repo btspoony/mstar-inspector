@@ -73,6 +73,64 @@ async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Pro
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * The name of the function whose BODY contains `at`, or `<module>`.
+ *
+ * Line-scanning for the nearest `    async x(` credits an INSERT to whatever
+ * member was declared above it, so a hit moved into a later non-async function
+ * still read as its async neighbour. This instead finds every declaration,
+ * walks its body to the matching close brace, and returns the innermost
+ * declaration whose body spans `at`. Body braces are matched by depth; the
+ * `${…}` splices inside the store's template literals are themselves balanced,
+ * so the depth stays true.
+ */
+function enclosingFunction(text: string, at: number): string {
+  let best: { name: string; start: number } | null = null;
+  for (const decl of text.matchAll(/\b(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)\s*(?:<[^<>]*>)?\s*\(/g)) {
+    const name = decl[1]!;
+    // Control-flow keywords and member CALLS (`store.replaceInstallChain(`)
+    // look like declarations to a regex; both are rejected below, so a call
+    // nearer the hit can never win the innermost test.
+    if (/^(?:if|for|while|switch|catch|do|else|return|typeof|await|with)$/.test(name)) continue;
+    if (/\.\s*$/.test(text.slice(Math.max(0, decl.index! - 3), decl.index!))) continue;
+    // The parameter list's own close paren, then the body's opening brace.
+    let depth = 0;
+    let open = -1;
+    for (let i = decl.index! + decl[0].length - 1; i < text.length; i += 1) {
+      const ch = text[i];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          open = text.indexOf("{", i);
+          // A trailing `;` (or another `)`) before the brace means this was a
+          // CALL, not a declaration with a body.
+          const between = text.slice(i + 1, open === -1 ? text.length : open);
+          if (open === -1 || /[;)]/.test(between)) open = -1;
+          break;
+        }
+      }
+    }
+    if (open === -1 || open > at) continue;
+    depth = 0;
+    let close = -1;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === "{") depth += 1;
+      else if (text[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close === -1 || close < at) continue;
+    // Innermost wins: the declaration that starts closest before the hit.
+    if (best === null || decl.index! >= best.start) best = { name, start: decl.index! };
+  }
+  return best?.name ?? "<module>";
+}
+
 describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", () => {
   test("applies cleanly after 0001/0002 over existing review rows", () => {
     expect(() => createMigratedD1()).not.toThrow();
@@ -826,9 +884,35 @@ describe("apps-store workspace dual write (migration 0026)", () => {
   // fails here — so the intent survives the second path.
   //
   // A per-file count alone does not pin the PATHS: moving one INSERT to another
-  // function in the same file kept the count at 2 and the test green. Each hit
-  // is therefore attributed to its ENCLOSING member by name, so both creation
-  // functions must keep exactly one and nothing else may hold one.
+  // function in the same file kept the count at 2 and the test green. Neither
+  // does remembering the nearest preceding `    async x(` line: an INSERT moved
+  // into a later NON-async member was still credited to the async one above
+  // it. Each hit is therefore attributed to the function whose BODY contains
+  // it, found by brace depth from that function's opening brace, and the whole
+  // map must be exactly the two creation functions.
+  test("an INSERT is attributed to the function whose body encloses it, not the nearest member line", () => {
+    // The shape that broke line-scanning: a non-async function after an async
+    // one, holding the INSERT.
+    const source = [
+      "function outer() {",
+      "  return {",
+      "    async createBot(input: string): Promise<boolean> {",
+      "      const sql = `INSERT INTO review_bots (id) SELECT 'unused'`;",
+      "      return sql.length > 0;",
+      "    },",
+      "    createLater(input: string): void {",
+      "      void `INSERT INTO review_bots (id) SELECT ?1`;",
+      "      void input;",
+      "    },",
+      "  };",
+      "}",
+    ].join("\n");
+    expect([...source.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(source, hit.index!))).toEqual([
+      "createBot",
+      "createLater",
+    ]);
+  });
+
   test("src/ holds exactly the two creation-path INSERT INTO review_bots sites, one per creation function", () => {
     const root = join(import.meta.dir, "../../");
     const owners = new Map<string, string[]>();
@@ -840,12 +924,8 @@ describe("apps-store workspace dual write (migration 0026)", () => {
           const text = readFileSync(path, "utf8");
           const relative = path.slice(root.length);
           for (const match of text.matchAll(/INSERT INTO review_bots\b/g)) {
-            const before = text.slice(0, match.index);
-            // The nearest preceding member declaration at the store's own
-            // indentation (`    async createApp(input: ...`) is the owner.
-            const enclosing = [...before.matchAll(/\n {4}async (\w+)\(/g)].at(-1)?.[1] ?? "<module>";
             const list = owners.get(relative) ?? [];
-            list.push(enclosing);
+            list.push(enclosingFunction(text, match.index!));
             owners.set(relative, list);
           }
         }

@@ -9,6 +9,7 @@ import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import { applyMigrations, APPS_UI_MIGRATIONS } from "../helpers/migration-shapes";
 import { createTestD1 } from "../store/helpers";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
+import { isChainMultiplier } from "../../src/contracts/rp-limits";
 
 const SESSION_SECRET = ["test", "chain", "route", "session", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -114,6 +115,53 @@ describe("PATCH /api/apps/:appId/chain", () => {
     const res = await patch(`/dashboard/default/api/apps/999999/chain`, "octocat", makeEnv(db), { botIds: [] });
     expect(res.status).toBe(404);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM app_install_bots").get()).toEqual(before);
+    db.raw.close();
+  });
+
+  /**
+   * The served chain product is what the Apps list parses, so a write past the
+   * read bound must be refused HERE — otherwise the list it produced is a load
+   * error nothing on the page can repair. The exact-bound case is the other
+   * half: the writer and the reader must agree on the very last bit.
+   */
+  test("a chain whose product exceeds the bound is 400 and leaves the chain as it was", async () => {
+    const { db, internalId } = await world();
+    for (const [id, multiplier] of [["bot-1000a", 1000], ["bot-1000b", 1000], ["bot-4", 4]] as const) {
+      db.raw
+        .prepare("INSERT INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at) VALUES (?, 'default', ?, ?, datetime('now'), datetime('now'))")
+        .run(id, id, multiplier);
+    }
+    const chainOf = () =>
+      db.raw.query("SELECT position, bot_id FROM app_install_bots WHERE github_app_id = ? ORDER BY position").all(internalId);
+
+    const res = await patch(`/dashboard/default/api/apps/${GH_APP_ID}/chain`, "octocat", makeEnv(db), {
+      botIds: ["bot-1000a", "bot-1000b", "bot-4"],
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "the chain's combined multiplier is priced above what this workspace can be served",
+    });
+    expect(chainOf()).toEqual([{ position: 1, bot_id: internalId }]);
+    db.raw.close();
+  });
+
+  test("a chain exactly at the bound is accepted and the served product parses", async () => {
+    const { db } = await world();
+    // 3 × 239 × 4,649 = 3,333,333 = CHAIN_MULTIPLIER_MAX.
+    for (const [id, multiplier] of [["bot-3", 3], ["bot-239", 239], ["bot-4649", 4649]] as const) {
+      db.raw
+        .prepare("INSERT INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at) VALUES (?, 'default', ?, ?, datetime('now'), datetime('now'))")
+        .run(id, id, multiplier);
+    }
+
+    const res = await patch(`/dashboard/default/api/apps/${GH_APP_ID}/chain`, "octocat", makeEnv(db), {
+      botIds: ["bot-3", "bot-239", "bot-4649"],
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { chain: Array<{ multiplier: number }> };
+    expect(isChainMultiplier(body.chain.reduce((product, row) => product * row.multiplier, 1))).toBe(true);
     db.raw.close();
   });
 });
