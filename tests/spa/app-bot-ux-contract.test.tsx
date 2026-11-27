@@ -334,20 +334,25 @@ async function mountBot(payload: Record<string, unknown>, locale: SpaBoot["local
 }
 
 const NO_RP = /\bRP\b/;
-const CREDITS_FIGURE = /[\d.,]+ Credits/g;
+/** A number and its Credits unit, the space between them optional. */
+const CREDITS_FIGURE = /(\d+(?:[.,]\d+)?)\s*Credits?/g;
 
 /**
  * EVERY rendered figure is a two-decimal amount with its unit. A single good
  * figure must not excuse a bad one: the first version only asked that ONE
  * `N.NN Credits` matched somewhere, so "1 Credits" or "1.2 Credits" rode along
- * unseen beside a well-formed figure.
+ * unseen beside a well-formed figure. The unit scan is anchored on the number,
+ * not on the space before `Credits`, so "1.34 Credits 2Credits" cannot slip
+ * through, and any OTHER decimal figure is a foreign unit — Credits is the only
+ * currency this product states.
  */
 function assertCreditsShape(text: string): void {
-  const figures = text.match(CREDITS_FIGURE) ?? [];
-  expect(figures.length).toBeGreaterThan(0);
-  for (const figure of figures) expect(figure).toMatch(/^\d+\.\d{2} Credits$/);
-  // A decimal figure with no unit at all escapes the scan above.
-  expect(text).not.toMatch(/\d+\.\d{2} (?!Credits)[A-Za-z]/);
+  const amounts = [...text.matchAll(CREDITS_FIGURE)].map((match) => match[1]);
+  expect(amounts.length).toBeGreaterThan(0);
+  for (const amount of amounts) expect(amount).toMatch(/^\d+\.\d{2}$/);
+  expect(text.replace(CREDITS_FIGURE, "")).not.toMatch(/\d+[.,]\d+\s*[A-Za-z]/);
+  // Catches a stray amount in a unit label the scans above do not name.
+  expect(text).not.toMatch(NO_RP);
 }
 
 /** No rendered attribute — the chain row's month tooltip included — says RP. */
@@ -597,23 +602,32 @@ describe("5. Credits everywhere, RP nowhere", () => {
     expect(() => assertCreditsShape("1.2 Credits")).toThrow();
     expect(() => assertCreditsShape("1.340 Credits")).toThrow();
     expect(() => assertCreditsShape("1.34 Credits 2 Credits")).toThrow();
+    // No space before the unit, so the scan must anchor on the number.
+    expect(() => assertCreditsShape("1.34 Credits 2Credits")).toThrow();
+    expect(() => assertCreditsShape("1.34 Credits 2.1Credits")).toThrow();
+    // A well-formed figure beside a decimal in another unit.
+    expect(() => assertCreditsShape("1.34 Credits 2.1 tokens")).toThrow();
+    // A stray amount in the retired unit, even beside correct Credits.
+    expect(() => assertCreditsShape("1.34 Credits · 620 RP")).toThrow();
     expect(() => assertCreditsShape("no figures here")).toThrow();
   });
 
-  test("the installed face states every spend and ceiling figure in Credits, never RP", async () => {
-    const markup = renderApp(managerInstalledPayload());
-    // The band's total, the own row's spend, the shared row's spend AND its
-    // ceiling, and the archived row's spend — every one a two-decimal figure.
-    for (const figure of ["1.34 Credits", "1.24 Credits", "0.09 Credits", "2.00 Credits", "0.01 Credits"]) {
-      expect(markup, figure).toContain(figure);
-    }
-    await withMarkup(markup, (container) => {
-      assertCreditsShape(container.textContent ?? "");
-      expect(container.textContent ?? "").not.toMatch(NO_RP);
-      // Attributes too: the chain row's month tooltip is user-visible on hover.
-      assertNoRpInAttributes(container);
-    });
-  });
+  test.each(["en", "zh_CN"] as const)(
+    "the installed face states every spend and ceiling figure in Credits, never RP (%s)",
+    async (locale) => {
+      const markup = renderApp(managerInstalledPayload(), null, locale);
+      // The band's total, the own row's spend, the shared row's spend AND its
+      // ceiling, and the archived row's spend — every one a two-decimal figure.
+      for (const figure of ["1.34 Credits", "1.24 Credits", "0.09 Credits", "2.00 Credits", "0.01 Credits"]) {
+        expect(markup, figure).toContain(figure);
+      }
+      await withMarkup(markup, (container) => {
+        assertCreditsShape(container.textContent ?? "");
+        // Attributes too: the chain row's month tooltip is user-visible on hover.
+        assertNoRpInAttributes(container);
+      });
+    },
+  );
 
   test.each(["en", "zh_CN"] as const)("the installed face reads the 本月 spend label as 本月已用 (%s)", async (locale) => {
     const markup = renderApp(managerInstalledPayload(), null, locale);
@@ -630,13 +644,12 @@ describe("5. Credits everywhere, RP nowhere", () => {
     });
   });
 
-  test("the owner bot face states Credits and never RP", async () => {
-    const face = await mountBot({ ...botPayload(), rp_per_credit: RATE });
+  test.each(["en", "zh_CN"] as const)("the owner bot face states Credits and never RP (%s)", async (locale) => {
+    const face = await mountBot({ ...botPayload(), rp_per_credit: RATE }, locale);
     try {
       const text = face.text();
       assertCreditsShape(text);
       expect(text).toContain("2.48 Credits"); // 1,240 RP at 500 RP/Credit
-      expect(text).not.toMatch(NO_RP);
       assertNoRpInAttributes(face.container);
     } finally {
       await face.close();
@@ -654,12 +667,11 @@ describe("5. Credits everywhere, RP nowhere", () => {
     }
   });
 
-  test("the consumer bot face states Credits and never RP", async () => {
-    const face = await mountBot({ ...consumerPayload(), rp_per_credit: RATE });
+  test.each(["en", "zh_CN"] as const)("the consumer bot face states Credits and never RP (%s)", async (locale) => {
+    const face = await mountBot({ ...consumerPayload(), rp_per_credit: RATE }, locale);
     try {
       const text = face.text();
       assertCreditsShape(text);
-      expect(text).not.toMatch(NO_RP);
       assertNoRpInAttributes(face.container);
     } finally {
       await face.close();
