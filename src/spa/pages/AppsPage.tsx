@@ -124,20 +124,25 @@ export function appsTabQuery(tab: AppsTab, defaultTab: AppsTab): string {
  * rides the same string: 不限（自有机器人）for an all-own chain, 不限 for a
  * known-unlimited plan, `已用 / 上限` otherwise. An unknown ceiling is the
  * error marker, never "no ceiling" (F10).
+ *
+ * `rpPerCredit` is the payload's own rate. The 1,000 fallback inside
+ * {@link formatCredits} applies ONLY when the profile was unreadable and the
+ * server omitted the field — never because this surface forgot to pass it.
  */
 function monthSpendCell(
   locale: SpaBoot["locale"],
   month: { used_rp: number; owned: boolean } | null,
   quotaError: boolean,
   planRp: number | null,
+  rpPerCredit?: number,
 ): string {
   if (month === null) return t(locale, "bots.monthNone");
   // The bare two-decimal figure, for dictionary strings that carry their own unit.
-  const used = formatCredits(month.used_rp).slice(0, -" Credits".length);
+  const used = formatCredits(month.used_rp, rpPerCredit).slice(0, -" Credits".length);
   if (month.owned) return t(locale, "credits.unlimitedOwn", { used });
   if (quotaError) return t(locale, "bots.monthUnknown");
   if (planRp === null) return t(locale, "credits.noCeiling", { used });
-  return `${formatCredits(month.used_rp)} / ${formatCredits(planRp)}`;
+  return `${formatCredits(month.used_rp, rpPerCredit)} / ${formatCredits(planRp, rpPerCredit)}`;
 }
 
 /** The list's pending-bind flow, threaded from the stateful page. */
@@ -209,7 +214,7 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       setBinding(row.installation_id);
       setBindFailed(false);
       try {
-        const res = await postForm(`${base}/apps/${row.app_github_app_id}/bind-installation`, {
+        const res = await postForm(`${base}/api/apps/${row.app_github_app_id}/bind-installation`, {
           installationId: String(row.installation_id),
         });
         if (res.status !== 200) {
@@ -404,7 +409,6 @@ export function AppsView({
               installed={installed}
               quotaError={loaded.quota_error === true}
               canCreate={canCreate}
-              createAction={createAction}
               pendingBind={pendingBind}
             />
           </TabsContent>
@@ -442,7 +446,7 @@ export function AppsView({
  * the bind action. A pending row whose App has no installed row yet (a shared
  * App installed on GitHub but never bound) gets its own row in the same
  * table, named by the server-joined App name (F16). The empty state carries
- * the documented actions: browse the shared Apps and create one.
+ * only the shared-App browse action: the create control lives in the header.
  */
 function InstalledTab({
   locale,
@@ -450,7 +454,6 @@ function InstalledTab({
   installed,
   quotaError,
   canCreate,
-  createAction,
   pendingBind,
 }: {
   locale: SpaBoot["locale"];
@@ -458,7 +461,6 @@ function InstalledTab({
   installed: AppsPayload["apps"];
   quotaError: boolean;
   canCreate: boolean;
-  createAction: ReactNode;
   pendingBind?: PendingBindFlow;
 }) {
   const pending = payload.pending_installations ?? [];
@@ -470,19 +472,17 @@ function InstalledTab({
         title={t(locale, "apps.installed.emptyTitle")}
         description={t(locale, "apps.installed.emptyDescription")}
         action={
-          <div className="flex flex-wrap items-center gap-2">
-            {createAction}
-            {/* F9: browsing shared Apps opens the shared-APP chooser, whose
-                cards are GitHub Apps selected by `scope = 'shared'`. The Bots
-                tab lists bots, which is a different surface. */}
-            {canCreate ? (
-              <SharedAppsDialog
-                locale={locale}
-                sharedApps={payload.shared_apps ?? []}
-                trigger={<Button variant="secondary">{t(locale, "apps.installed.browseShared")}</Button>}
-              />
-            ) : null}
-          </div>
+          canCreate ? (
+            // F9: browsing shared Apps opens the shared-APP chooser, whose
+            // cards are GitHub Apps selected by `scope = 'shared'`. The Bots
+            // tab lists bots, which is a different surface. The create control
+            // itself lives in the page header only — one entry per state.
+            <SharedAppsDialog
+              locale={locale}
+              sharedApps={payload.shared_apps ?? []}
+              trigger={<Button variant="secondary">{t(locale, "apps.installed.browseShared")}</Button>}
+            />
+          ) : undefined
         }
       />
     );
@@ -552,7 +552,7 @@ function InstalledTab({
         ) : (
           <span className="text-muted-foreground tabular-nums">
             {/* F1: no chain mounted means nothing is metered — a dash, never 0. */}
-            {monthSpendCell(locale, row.app.month ?? null, quotaError, planRp)}
+            {monthSpendCell(locale, row.app.month ?? null, quotaError, planRp, payload.rp_per_credit)}
           </span>
         ),
     },
@@ -616,7 +616,12 @@ function PendingInstallationLine({
         variant="secondary"
         size="sm"
         disabled={pendingBind?.binding === true}
-        onClick={() => pendingBind?.onBind(pending)}
+        onClick={(event) => {
+          // The row around this control opens the App detail; a bind click must
+          // start the authorize flow, not navigate away while it is in flight.
+          event.stopPropagation();
+          pendingBind?.onBind(pending);
+        }}
       >
         {t(locale, "settings.installPendingBind")}
       </Button>
@@ -711,6 +716,7 @@ export function UsableBotsList({
             { used_rp: bot.month_used_rp, owned: bot.owned },
             payload.quota_error === true,
             payload.plan_monthly_rp,
+            payload.rp_per_credit,
           )}
         </span>
       ),

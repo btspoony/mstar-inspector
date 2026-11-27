@@ -2166,14 +2166,26 @@ const appListRoute = async (c: DashboardContext) => {
   // Every live installation this workspace bound, per App — one statement for
   // the whole page, never a read per row.
   const boundInstallations = await apps.listBoundInstallationsByWorkspace(gate.scope.workspaceId);
-  const quota = await readPlanMonthlyRp(
-    gate.db,
-    gate.scope.workspaceId,
-    new Date(),
-    deploymentModeOf(c.env.DEPLOYMENT_MODE),
-  );
+  const [quota, rpPerCredit] = await Promise.all([
+    readPlanMonthlyRp(
+      gate.db,
+      gate.scope.workspaceId,
+      new Date(),
+      deploymentModeOf(c.env.DEPLOYMENT_MODE),
+    ),
+    // The rate the list's Credits cells divide by. An unreadable profile
+    // (a deployment whose `quota_profiles` is empty) omits it — never 0, never
+    // a fabricated rate — and the SPA falls back to the documented 1,000 RP,
+    // exactly as the App detail does. Logged, not swallowed: a list load is
+    // where operators first see the profile break.
+    rpPerCreditRead(gate.db, gate.scope.workspaceId).catch((err) => {
+      logSettingsFailure("api_quota_profile_list", gate.scope.workspaceId, err);
+      return null;
+    }),
+  ]);
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
+    ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
     // F10: an UNKNOWN ceiling is an explicit error state, not an omitted field
     // that a UI could read as "no ceiling".
     ...(quota.kind === "unknown" ? { quota_error: true } : {}),
@@ -2259,6 +2271,8 @@ async function usableBotsRead(
 ): Promise<{
   workspace_id: string;
   plan_monthly_rp?: number | null;
+  /** The Credits rate, omitted when the operator profile is unreadable. */
+  rp_per_credit?: number;
   bots: Array<Record<string, unknown>>;
 }> {
   const rows = await createReviewBotsStore(db).listUsableBots(workspaceId);
@@ -2275,9 +2289,17 @@ async function usableBotsRead(
       .all<{ bot_id: string; total: number }>()
   ).results;
   const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
-  const quota = await readPlanMonthlyRp(db, workspaceId, new Date(), mode);
+  const [quota, rpPerCredit] = await Promise.all([
+    readPlanMonthlyRp(db, workspaceId, new Date(), mode),
+    // Same contract as the Apps list: an unreadable profile omits the rate.
+    rpPerCreditRead(db, workspaceId).catch((err) => {
+      logSettingsFailure("api_quota_profile_bots", workspaceId, err);
+      return null;
+    }),
+  ]);
   return {
     workspace_id: workspaceId,
+    ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
     ...(quota.kind === "unknown" ? { quota_error: true } : {}),
     ...(quota.kind === "unknown" ? {} : { plan_monthly_rp: quota.kind === "unlimited" ? null : quota.rp }),
     bots: rows.map((bot) => ({
@@ -5064,16 +5086,30 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   const apps = createReviewBotsStore(member.db);
-  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
-  if (!app) return c.json({ error: "unknown app" }, 404);
-  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
-  if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
   const form = await c.req.parseBody();
   const raw = form["installationId"];
   const installationId = typeof raw === "string" ? Number(raw) : Number.NaN;
   if (!Number.isSafeInteger(installationId) || installationId <= 0) {
     return c.json({ error: "installationId required" }, 400);
   }
+  const githubAppId = parseGithubAppId(c.req.param("appId") ?? "");
+  let app =
+    githubAppId === null ? null : await apps.getScopedAppByGithubId(githubAppId, member.scope.workspaceId);
+  if (app === null && githubAppId !== null) {
+    // F16 orphan pending: a SHARED App installed on GitHub but never bound has
+    // neither install state nor a target here, so the scoped read above finds
+    // no relation — yet the list just offered this very installation as
+    // bindable. The pending record is the admission: shared App, and this
+    // installation sits in this workspace's pending list. Nothing else widens.
+    const pendingApp = await apps.getAppByGithubId(githubAppId);
+    if (pendingApp !== null && pendingApp.scope === "shared" && pendingApp.deleted_at === null) {
+      const pending = await apps.listPendingInstallations(pendingApp.id, member.scope.workspaceId);
+      if (pending.some((row) => row.installation_id === installationId)) app = pendingApp;
+    }
+  }
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
   const binding = await apps.getInstallationBinding(app.id, installationId);
   if (binding?.removed_at === null && binding.bound_workspace_id === member.scope.workspaceId) {
     return c.json({ botId: app.id, installationId, bound: true });

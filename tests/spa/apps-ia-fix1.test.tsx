@@ -156,7 +156,11 @@ describe("F5 — ownership and manage permission are separate from publication s
   test("an owned bot PUBLISHED as shared still reads own-bot unlimited (no plan ceiling)", () => {
     const html = face([bot({ scope: "shared", owned: true })]);
     expect(html).toContain(t("en", "credits.unlimitedOwn", { used: "0.01" }));
+    // The plan is unlimited here, so `noCeiling` would ALSO pass if the cell
+    // rendered a finite ceiling — assert on the finite presentation itself.
     expect(html).not.toContain(t("en", "credits.noCeiling", { used: "0.01" }));
+    expect(html).not.toContain(`${formatCredits(7)} / ${formatCredits(1000)}`);
+    expect(html).not.toContain("0.01 Credits / 1.00 Credits");
   });
 
   test("a member of the owning workspace reads the bot as read-only, not editable", () => {

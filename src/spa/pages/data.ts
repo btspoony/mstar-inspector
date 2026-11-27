@@ -124,6 +124,10 @@ export type AppsPayload = {
   /** F10: absent = unknown (error face), `null` = known unlimited. */
   month_plan_rp?: number | null;
   quota_error?: boolean;
+  /** The operator profile's rate; ABSENT when the profile is unreadable, and
+   * readers then fall back to the ADR-documented 1 Credit = 1,000 RP
+   * ({@link formatCredits}). Never 0, never a fabricated rate. */
+  rp_per_credit?: number;
 };
 
 /** One unbound physical installation of an App the workspace may install through. */
@@ -171,6 +175,8 @@ export type UsableBotsPayload = {
   /** F10: the ceiling could not be resolved — render an error, never
    * "no ceiling". */
   quota_error?: boolean;
+  /** See {@link AppsPayload.rp_per_credit}: absent ⇒ the 1,000 RP fallback. */
+  rp_per_credit?: number;
   bots: UsableBotRow[];
 };
 
@@ -197,6 +203,8 @@ export function parseUsableBots(data: unknown): UsableBotsPayload | null {
   if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && typeof data.plan_monthly_rp !== "number") {
     return null;
   }
+  // Same guard the App-detail parser applies: a present rate must be usable.
+  if (data.rp_per_credit !== undefined && !isPositiveFinite(data.rp_per_credit)) return null;
   if (!Array.isArray(data.bots)) return null;
   const bots: UsableBotRow[] = [];
   for (const row of data.bots) {
@@ -207,6 +215,7 @@ export function parseUsableBots(data: unknown): UsableBotsPayload | null {
     workspace_id: data.workspace_id,
     plan_monthly_rp: data.plan_monthly_rp ?? null,
     ...(data.quota_error === true ? { quota_error: true } : {}),
+    ...(data.rp_per_credit === undefined ? {} : { rp_per_credit: data.rp_per_credit }),
     bots,
   };
 }
@@ -2152,6 +2161,7 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
+  if (data.rp_per_credit !== undefined && !isPositiveFinite(data.rp_per_credit)) return null;
   // Chain rows on the list face pass the same guard as the detail parser: a
   // malformed row fails the whole parse instead of rendering half a chain.
   for (const app of data.apps) {

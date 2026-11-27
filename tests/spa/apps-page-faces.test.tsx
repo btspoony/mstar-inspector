@@ -199,6 +199,46 @@ describe("pending installations attach to their App's row", () => {
     app_name: "Demo App",
   };
 
+  /** Mount the page on the installed tab with a stubbed list read. */
+  async function mountInstalled(appsPayload: Record<string, unknown>) {
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps?tab=installed");
+    const realFetch = globalThis.fetch;
+    const sent: Array<{ url: string; method: string }> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      sent.push({ url: String(input), method: init?.method ?? "GET" });
+      if ((init?.method ?? "GET") === "POST") return new Response('{"error":"unknown installation"}', { status: 404 });
+      return new Response(JSON.stringify(appsPayload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => root.render(createElement(AppsPage, { boot: BOOT })));
+    await act(async () => {});
+    const button = [...win.document.querySelectorAll("button")].find(
+      (node) => node.textContent === t("en", "settings.installPendingBind"),
+    );
+    return {
+      win,
+      sent,
+      buttonFound: button !== undefined,
+      click: async () => {
+        await act(async () => {
+          button?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+        });
+        await act(async () => {});
+      },
+      text: () => win.document.body.textContent ?? "",
+      async cleanup() {
+        globalThis.fetch = realFetch;
+        await act(async () => root.unmount());
+        cleanup();
+      },
+    };
+  }
+
   test("account, state and bind action render inside the owning App's row", async () => {
     const html = render(payload([app()], { pending_installations: [PENDING] }), "installed");
     await withMarkup(html, (container) => {
@@ -225,6 +265,29 @@ describe("pending installations attach to their App's row", () => {
       expect(table?.textContent).toContain("acme-org");
       expect(table?.textContent).toContain(t("en", "settings.installPendingBind"));
     });
+  });
+
+  test("one bind click posts to the registered API route and does not open the App detail", async () => {
+    const page = await mountInstalled({
+      viewer: { login: "octocat", role: "admin" },
+      apps: [app({ installed: true, month: { used_rp: 0, owned: true, multiplier: 1 } })],
+      shared_bots: [],
+      pending_installations: [PENDING],
+    });
+    try {
+      expect(page.buttonFound).toBe(true);
+      await page.click();
+      const posts = page.sent.filter((request) => request.method === "POST");
+      expect(posts).toHaveLength(1);
+      // The registered route carries `/api`; without it the bind never lands.
+      expect(posts[0]?.url).toBe("/dashboard/acme/api/apps/101/bind-installation");
+      // The row's own handler would have navigated to the detail page.
+      expect(page.win.location.pathname).toBe("/dashboard/acme/apps");
+      // A failed bind stays on screen instead of vanishing behind navigation.
+      expect(page.text()).toContain(t("en", "settings.installBindFailed"));
+    } finally {
+      await page.cleanup();
+    }
   });
 });
 
@@ -254,8 +317,38 @@ describe("spend reads 本月已用 in Credits", () => {
     expect(limited).not.toMatch(/\d RP\b/);
   });
 
+  test("a non-default profile rate divides both the spend and the ceiling", () => {
+    const html = render(
+      payload([app({ month: { used_rp: 1000, owned: false, multiplier: 1 } })], {
+        month_plan_rp: 5000,
+        rp_per_credit: 2000,
+      }),
+      "installed",
+    );
+    // 1,000 RP at 2,000 RP/Credit is 0.50 — never the 1,000-rate 1.00.
+    expect(html).toContain("0.50 Credits / 2.50 Credits");
+    expect(html).not.toContain("1.00 Credits / 5.00 Credits");
+  });
+
+  test("an absent rate (unreadable profile) keeps the documented 1,000 fallback", () => {
+    const html = render(
+      payload([app({ month: { used_rp: 1000, owned: false, multiplier: 1 } })], { month_plan_rp: 5000 }),
+      "installed",
+    );
+    expect(html).toContain("1.00 Credits / 5.00 Credits");
+  });
+
   test("an all-own chain reads its own-bot unlimited in Credits", () => {
     const html = render(payload([app({ month: { used_rp: 1240, owned: true, multiplier: 1 } })]), "installed");
     expect(html).toContain(t("en", "credits.unlimitedOwn", { used: "1.24" }));
+  });
+});
+
+describe("the installed empty state renders ONE create control", () => {
+  test("the header carries create; the empty state carries only browse-shared", () => {
+    const html = render(payload([]), "installed");
+    const createLabel = t("en", "apps.create");
+    expect(html.split(createLabel).length - 1).toBe(1);
+    expect(html).toContain(t("en", "apps.installed.browseShared"));
   });
 });
