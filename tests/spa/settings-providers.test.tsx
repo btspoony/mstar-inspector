@@ -38,6 +38,7 @@ const keyRow = (provider: string, keyId: string, overrides: Partial<ProviderKeyR
 function managePayload(overrides: Partial<SettingsManagePayload & ProviderManagementPayload> = {}): SettingsManagePayload & ProviderManagementPayload {
   return {
     can_manage: true,
+    viewer_relation: "created",
     installation: null,
     pending_installations: [],
     workspace_id: "ws_test",

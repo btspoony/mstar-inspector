@@ -478,7 +478,7 @@ function BotProfileEditor({
           <span className="text-muted-foreground">{t(locale, "botDetail.identity.description")}</span>
           <textarea
             aria-label={t(locale, "botDetail.identity.description")}
-            className="min-h-20 w-full rounded-sm border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="min-h-20 w-full rounded-sm border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
             value={description}
             onChange={(event) => setDescription(event.target.value)}
           />

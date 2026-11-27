@@ -949,7 +949,7 @@ export function AppDetailView({
             )}
             {/* Sharing is an App property only the OFFICIAL workspace may flip;
                 any other workspace gets the state as a read-only line. */}
-            {bot === null || payload.can_manage !== true ? null : payload.official_workspace === true ? (
+            {bot === null || bot.can_manage !== true ? null : bot.official_workspace === true ? (
               <AppShareSection locale={locale} appId={appId} app={payload.app} onReload={onReload} />
             ) : (
               <p className="py-3 text-sm text-muted-foreground" data-slot="app-share-readonly">

@@ -1,0 +1,659 @@
+/**
+ * Task 10: the ADR acceptance criteria that only hold ACROSS surfaces.
+ *
+ * Each screen already pins its own face (Tasks 5–9). This suite pins the rules
+ * that are only true when you read the App faces, the bot faces and the bots
+ * list together:
+ *
+ *   1. relation → face   the same App renders differently for its installer and its creator
+ *   2. tab sets          creator exactly three, every other face none
+ *   3. absence           the installed and consumer faces carry the owner's machinery nowhere
+ *   4. one chain control the installed chain has exactly one move/remove/add surface
+ *   5. Credits           every amount is `N.NN Credits`, and no rendered string says RP
+ *   6. archived          listed as 已归档, unavailable in an App chain, banner to the consumer
+ *   7. bots list         two sections, create in the owned header only for a manager
+ *
+ * Fixtures are built locally and minimally on purpose: importing another test's
+ * fixture would let one file's shape silently redefine this contract.
+ */
+import { describe, expect, test } from "bun:test";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
+import { t } from "../../src/i18n";
+import type {
+  AppChainEntry,
+  BotConfigSections,
+  SettingsManagePayload,
+  SettingsReadOnlyPayload,
+  SettingsUntargetedPayload,
+  UsableBotRow,
+  UsableBotsPayload,
+} from "../../src/spa/pages/data";
+import { formatCredits } from "../../src/spa/pages/data";
+import { AppDetailView, appDetailFace, type AppDetailFrom } from "../../src/spa/pages/AppDetailPage";
+import { BotsView } from "../../src/spa/pages/BotsPage";
+import { BotDetailPage } from "../../src/spa/pages/BotDetailPage";
+import type { SpaBoot } from "../../src/spa/boot";
+import { installDom, withMarkup } from "./dom";
+
+const WORKSPACE_ID = "ws_0123456789abcdefghijkl";
+const RATE = 500;
+const BOOT: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
+const SEARCH = { tab: "settings" as const, window: "30" as const, repo: "", pr: "" };
+
+/** One chain row carrying every field the faces read; callers override what they test. */
+function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id: string }): AppChainEntry {
+  return {
+    name: overrides.bot_id,
+    description: null,
+    provider_workspace: "Acme",
+    owned: true,
+    available: true,
+    multiplier: 1,
+    month_used_rp: 0,
+    monthly_rp: null,
+    effective_monthly_rp: null,
+    archived: false,
+    default_chain: null,
+    runtime: "omp",
+    ...overrides,
+  };
+}
+
+/** 620 RP live + 45 RP shared + 5 RP archived = 670 RP → 1.34 Credits at 500 RP/Credit. */
+const CHAIN: AppChainEntry[] = [
+  chainRow({ position: 1, bot_id: "bot-live", name: "Live Bot", month_used_rp: 620 }),
+  chainRow({
+    position: 2,
+    bot_id: "bot-shared",
+    name: "Shared Bot",
+    provider_workspace: "platform",
+    owned: false,
+    month_used_rp: 45,
+    monthly_rp: 1000,
+    effective_monthly_rp: 1000,
+  }),
+  chainRow({ position: 3, bot_id: "bot-archived", name: "Archived Bot", owned: false, month_used_rp: 5, archived: true }),
+];
+
+const INSTALLATIONS = [{ installation_id: 88123456, account_login: "mallory", seen_at: "2026-11-27 08:14" }];
+
+const IDENTITY_APP = {
+  github_slug: "acme-app",
+  id: "app-acme",
+  github_app_id: 4803300,
+  status: "active",
+  review_enabled: true,
+  created_by: "mallory",
+  created_at: "2026-01-01 00:00:00",
+  github_name: "Acme Inspector",
+  github_description: null,
+  github_html_url: "https://github.com/apps/acme-app",
+  github_avatar_url: null,
+  github_metadata_synced_at: "2026-01-01 00:00:00",
+};
+
+/** The bot-owned sections the manager/unmanaged creator face carries. */
+const CONFIG_SECTIONS: Omit<BotConfigSections, "app"> = {
+  keys: [],
+  model_chain: null,
+  model_roles: {},
+  model_chains: [],
+  custom_providers: [],
+  configured_providers: [],
+  provider_catalog_version: "fixture-catalog",
+  provider_eligibility: {},
+  model_role_ids: [],
+  custom_provider_api_ids: [],
+  sandbox_images: [{ id: "omp", enabled: true }],
+  installations: INSTALLATIONS,
+};
+
+/** The manager (creator face) payload: this workspace owns the App and targets it. */
+function managerPayload(): SettingsManagePayload {
+  return {
+    can_manage: true,
+    viewer_relation: "created",
+    rp_per_credit: RATE,
+    official_workspace: true,
+    can_configure_bot: true,
+    installation: null,
+    pending_installations: [],
+    blocked: false,
+    blocked_reason: null,
+    workspace_id: WORKSPACE_ID,
+    target_id: "rt-1",
+    app: {
+      ...IDENTITY_APP,
+      last_webhook_at: null,
+      scope: "owned",
+      sandbox_image_id: "omp",
+      review_trigger_mode: "every_push",
+      review_level: null,
+      default_review_level: "default",
+      github_visibility: "unknown",
+    },
+    check_gate: null,
+    chain: CHAIN,
+    ...CONFIG_SECTIONS,
+  };
+}
+
+/** The installed face opened by a member: no writes, the same rows read-only. */
+function memberInstalledPayload(): SettingsReadOnlyPayload {
+  return {
+    can_manage: false,
+    viewer_relation: "installed",
+    rp_per_credit: RATE,
+    workspace_id: WORKSPACE_ID,
+    blocked: false,
+    blocked_reason: null,
+    app: IDENTITY_APP,
+    installations: INSTALLATIONS,
+    chain: CHAIN,
+  };
+}
+
+/** A manager of a workspace that did not create the App: the installed face with controls. */
+function managerInstalledPayload(): SettingsManagePayload {
+  return {
+    ...managerPayload(),
+    viewer_relation: "installed",
+    installation: { id: 88123456, account_login: "mallory", removed: false },
+  };
+}
+
+function renderApp(
+  payload: SettingsManagePayload | SettingsReadOnlyPayload | SettingsUntargetedPayload,
+  from: AppDetailFrom | null = null,
+): string {
+  return renderToStaticMarkup(
+    createElement(AppDetailView, {
+      locale: "en",
+      appId: "app-acme",
+      payload,
+      groups: [],
+      notice: null,
+      search: SEARCH,
+      from,
+      mountable: [{ id: "bot-mountable", name: "Mountable Bot" }],
+      onReload: async () => true,
+      onSearch: () => {},
+    }),
+  );
+}
+
+const tabLabels = (container: HTMLElement): string[] =>
+  [...(container.querySelector('[role="tablist"]')?.querySelectorAll('[role="tab"]') ?? [])].map(
+    (tab) => tab.textContent ?? "",
+  );
+
+/* ------------------------------------------------------------------ *
+ * Bot-side fixtures
+ * ------------------------------------------------------------------ */
+
+function botPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    can_manage: true,
+    owned: true,
+    archived: false,
+    official_workspace: true,
+    app: {
+      github_app_id: null,
+      id: "bot-1",
+      name: "Team Bot",
+      description: "The team's review bot.",
+      status: null,
+      scope: "owned",
+      sandbox_image_id: "omp",
+      multiplier: 1,
+      monthly_rp: null,
+      last_webhook_at: null,
+      github_name: null,
+      github_slug: null,
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_metadata_synced_at: null,
+    },
+    ...CONFIG_SECTIONS,
+    overview: {
+      provider_workspace: "Acme",
+      month_used_rp: 1240,
+      plan_monthly_rp: null,
+      effective_ceiling: null,
+      default_chain: "anthropic/claude",
+      mounted_apps: [{ id: "app-acme", github_app_id: 4803300, name: "Acme Inspector" }],
+    },
+    ...overrides,
+  };
+}
+
+/** The consumer read: not the owner, not manageable, and no official-workspace fact. */
+function consumerPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...botPayload(),
+    can_manage: false,
+    owned: false,
+    official_workspace: undefined,
+    app: { ...(botPayload().app as Record<string, unknown>), scope: "shared" },
+    ...overrides,
+  };
+}
+
+/** Mount BotDetailPage against a stubbed network; the only way to read both bot faces. */
+async function mountBot(payload: Record<string, unknown>) {
+  const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input);
+    if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(payload);
+    if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+    if (url.includes("/api/provider-catalog")) {
+      return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
+    }
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  try {
+    await act(async () => root.render(createElement(BotDetailPage, { boot: BOOT, botId: "bot-1" })));
+    for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+  } catch (err) {
+    globalThis.fetch = realFetch;
+    throw err;
+  }
+  return {
+    container,
+    text: () => container.textContent ?? "",
+    async close() {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    },
+  };
+}
+
+const NO_RP = /\bRP\b/;
+const CREDITS_AMOUNT = /\d+\.\d{2} Credits/g;
+
+/** Every rendered Credits figure is a two-decimal amount with its unit. */
+function assertCreditsShape(text: string): void {
+  const amounts = text.match(CREDITS_AMOUNT) ?? [];
+  expect(amounts.length).toBeGreaterThan(0);
+  // The rendered figures are ALWAYS bare "N.NN Credits"; a stray decimal with no
+  // unit, or one with three decimals or a different unit, would escape the match.
+  expect(text).not.toMatch(/\d+\.\d{3,} Credits/);
+  expect(text).not.toMatch(/\d+\.\d+ (?!Credits)[A-Za-z]/);
+}
+
+/* ------------------------------------------------------------------ *
+ * 1. Relation selects the face
+ * ------------------------------------------------------------------ */
+
+describe("1. the relation selects the face", () => {
+  test("installed opens the mount, created opens the creator", () => {
+    expect(appDetailFace("installed", null)).toBe("installed");
+    expect(appDetailFace("created", null)).toBe("creator");
+  });
+
+  test("both follows the ?from= param, and defaults to the creator face", () => {
+    expect(appDetailFace("both", "installed")).toBe("installed");
+    expect(appDetailFace("both", "created")).toBe("creator");
+    expect(appDetailFace("both", null)).toBe("creator");
+  });
+
+  test("the rendered faces follow the same rule, not the payload alone", async () => {
+    const installed = renderApp(managerInstalledPayload());
+    await withMarkup(installed, (container) => {
+      expect(container.querySelector('[data-slot="tabs"]')).toBeNull();
+      expect(container.querySelector('[data-slot="installed-chain"]')).not.toBeNull();
+    });
+
+    // The SAME payload opened with from=created is the creator face.
+    const created = renderApp({ ...managerPayload(), viewer_relation: "both" }, "created");
+    await withMarkup(created, (container) => {
+      expect(container.querySelector('[data-slot="tabs"]')).not.toBeNull();
+      expect(container.querySelector('[data-slot="installed-chain"]')).toBeNull();
+    });
+
+    // both + ?from=installed renders the mount even though the workspace created it.
+    const bothInstalled = renderApp({ ...managerPayload(), viewer_relation: "both" }, "installed");
+    await withMarkup(bothInstalled, (container) => {
+      expect(container.querySelector('[data-slot="tabs"]')).toBeNull();
+      expect(container.querySelector('[data-slot="installed-chain"]')).not.toBeNull();
+    });
+
+    // both without the param is the creator face.
+    const bothBare = renderApp({ ...managerPayload(), viewer_relation: "both" });
+    await withMarkup(bothBare, (container) => {
+      expect(container.querySelector('[data-slot="tabs"]')).not.toBeNull();
+    });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 2. Tab sets
+ * ------------------------------------------------------------------ */
+
+describe("2. the tab sets", () => {
+  test("the creator face has exactly three tabs", async () => {
+    const markup = renderApp(managerPayload());
+    expect(
+      await withMarkup(markup, tabLabels),
+    ).toEqual([
+      t("en", "appDetail.tabSettings"),
+      t("en", "appDetail.tabDelivery"),
+      t("en", "appDetail.tabInstallations"),
+    ]);
+  });
+
+  test("the installed face has no tab bar", async () => {
+    const markup = renderApp(managerInstalledPayload());
+    await withMarkup(markup, (container) => {
+      expect(container.querySelector('[data-slot="tabs"]')).toBeNull();
+      expect(container.querySelector('[role="tablist"]')).toBeNull();
+    });
+  });
+
+  test("the consumer bot face has no tab bar", async () => {
+    const face = await mountBot(consumerPayload());
+    try {
+      expect(face.container.querySelector('[role="tablist"]')).toBeNull();
+    } finally {
+      await face.close();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 3. Absence assertions
+ * ------------------------------------------------------------------ */
+
+describe("3. absence — the installed face carries none of the creator machinery", () => {
+  const markup = renderApp(managerInstalledPayload());
+
+  test("no credentials, share, delete, metadata refresh or delivery", () => {
+    for (const absent of [
+      t("en", "appDetail.credentialsTitle"),
+      t("en", "apps.shareAppSwitch"),
+      t("en", "settings.confirmDeleteTitle", { slug: "Acme Inspector" }),
+      t("en", "settings.appInfoRefresh"),
+      t("en", "appDetail.delivery.copy"),
+    ]) {
+      expect(markup.includes(absent), absent).toBe(false);
+    }
+    expect(markup).not.toContain("24h");
+  });
+});
+
+describe("3. absence — the consumer bot face carries no owner machinery", () => {
+  test("no provider block, key list, seat control, chain control or pricing", async () => {
+    const face = await mountBot(consumerPayload());
+    try {
+      const text = face.text();
+      for (const absent of [
+        t("en", "settings.providers.title"),
+        t("en", "settings.seats"),
+        t("en", "settings.modelChains"),
+        t("en", "botDetail.share.title"),
+        t("en", "botDetail.overrides.title"),
+        t("en", "botDetail.identity.title"),
+        t("en", "botDetail.archive.dangerTitle"),
+        t("en", "settings.addKey"),
+      ]) {
+        expect(text.includes(absent), absent).toBe(false);
+      }
+      // Absence of CONTROLS, not disabled ones.
+      expect(face.container.querySelector(`input[aria-label="${t("en", "botDetail.identity.name")}"]`)).toBeNull();
+      expect(face.container.querySelector(`input[aria-label="${t("en", "botDetail.share.multiplier")}"]`)).toBeNull();
+    } finally {
+      await face.close();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 4. One chain control surface
+ * ------------------------------------------------------------------ */
+
+describe("4. the installed face has exactly one chain control surface", () => {
+  test("one add affordance in the section header, one move/remove set on the rows", async () => {
+    const markup = renderApp(managerInstalledPayload());
+    await withMarkup(markup, (container) => {
+      const sections = container.querySelectorAll('[data-slot="installed-chain"]');
+      expect(sections.length).toBe(1);
+      const section = sections[0] as HTMLElement;
+
+      // The add affordance lives in the section HEADER, and there is exactly one.
+      const header = section.firstElementChild as HTMLElement;
+      expect(header.querySelector("summary")?.textContent).toBe(t("en", "appDetail.installed.addBot"));
+      expect(container.querySelectorAll('[data-slot="app-chain-add"]').length).toBe(1);
+
+      // One set of controls per row: no competing reorder surface on the page.
+      expect(container.querySelectorAll('[data-slot="app-chain-reorder"]').length).toBe(0);
+      expect(container.querySelectorAll(`[aria-label="${t("en", "apps.chain.moveUp", { bot: "Live Bot" })}"]`).length).toBe(1);
+      expect(container.querySelectorAll(`[aria-label="${t("en", "apps.chain.moveDown", { bot: "Live Bot" })}"]`).length).toBe(1);
+      expect(container.querySelectorAll(`[aria-label="${t("en", "apps.chain.removeBot", { bot: "Live Bot" })}"]`).length).toBe(1);
+    });
+  });
+
+  test("a member sees the same rows and no controls at all", async () => {
+    const markup = renderApp(memberInstalledPayload());
+    await withMarkup(markup, (container) => {
+      expect(container.querySelector('[data-slot="installed-chain"]')).not.toBeNull();
+      expect(container.querySelector('[data-slot="app-chain-add"]')).toBeNull();
+      expect(container.querySelector(`[aria-label="${t("en", "apps.chain.moveUp", { bot: "Live Bot" })}"]`)).toBeNull();
+      expect(container.querySelector(`[aria-label="${t("en", "apps.chain.removeBot", { bot: "Live Bot" })}"]`)).toBeNull();
+    });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 5. Credits
+ * ------------------------------------------------------------------ */
+
+describe("5. Credits everywhere, RP nowhere", () => {
+  test("the helper renders the ADR quantum and its documented fallback", () => {
+    expect(formatCredits(670, RATE)).toBe("1.34 Credits");
+    expect(formatCredits(670)).toBe("0.67 Credits");
+    expect(formatCredits(0, RATE)).toBe("0.00 Credits");
+  });
+
+  test("the installed face states Credits at the payload rate and never RP", async () => {
+    const markup = renderApp(managerInstalledPayload());
+    expect(markup).toContain("1.34 Credits");
+    // Rendered TEXT, not attributes: a tooltip is the ADR's own open residual
+    // (see the report), and this pins what a reader actually sees.
+    const text = await withMarkup(markup, (container) => container.textContent ?? "");
+    assertCreditsShape(text);
+    expect(text).not.toMatch(NO_RP);
+  });
+
+  test("the owner bot face states Credits and never RP", async () => {
+    const face = await mountBot({ ...botPayload(), rp_per_credit: RATE });
+    try {
+      const text = face.text();
+      assertCreditsShape(text);
+      expect(text).toContain("2.48 Credits"); // 1,240 RP at 500 RP/Credit
+      expect(text).not.toMatch(NO_RP);
+    } finally {
+      await face.close();
+    }
+  });
+
+  test("the consumer bot face states Credits and never RP", async () => {
+    const face = await mountBot({ ...consumerPayload(), rp_per_credit: RATE });
+    try {
+      const text = face.text();
+      assertCreditsShape(text);
+      expect(text).not.toMatch(NO_RP);
+    } finally {
+      await face.close();
+    }
+  });
+
+  test("the 本月 spend label reads 本月已用, never the bare month shorthand", () => {
+    // zh carries the ADR's exact wording; en says the same thing in its own
+    // words. The bare 本月 / "This month" shorthand is a DIFFERENT key, and it
+    // must never be the spend label — that is what makes the figure ambiguous.
+    expect(t("zh_CN", "credits.usedThisMonth")).toBe("本月已用");
+    expect(t("en", "credits.usedThisMonth")).toBe("Used this month");
+    for (const locale of ["en", "zh_CN"] as const) {
+      expect(t(locale, "credits.usedThisMonth")).not.toBe(t(locale, "bots.monthLabel"));
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 6. Archived
+ * ------------------------------------------------------------------ */
+
+describe("6. archived is unavailable everywhere and visible to consumers", () => {
+  test("listed in the bots list with 已归档", async () => {
+    const markup = renderToStaticMarkup(
+      createElement(BotsView, {
+        locale: "en",
+        base: "/dashboard/acme",
+        state: { kind: "ok", payload: botsPayload() },
+        canCreate: true,
+        onCreated: () => {},
+      }),
+    );
+    const rowText = await withMarkup(markup, (container) => {
+      const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+        tr.textContent?.includes("Retired Bot"),
+      );
+      return row?.textContent ?? null;
+    });
+    expect(rowText).not.toBeNull();
+    expect(rowText).toContain(t("en", "bots.list.archived"));
+  });
+
+  test("unavailable in an App chain, and its row says why", async () => {
+    const markup = renderApp(managerInstalledPayload());
+    expect(markup).toContain(t("en", "appDetail.installed.archivedSkipped"));
+    await withMarkup(markup, (container) => {
+      const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+        tr.textContent?.includes("Archived Bot"),
+      );
+      expect(row).toBeDefined();
+      expect(row?.textContent).toContain(t("en", "appDetail.installed.archivedSkipped"));
+    });
+  });
+
+  test("the archived bot still counts its month spend in the band", async () => {
+    // Archiving stops selection, not accounting: 620 + 45 + 5 RP → 1.34 Credits.
+    expect(renderApp(managerInstalledPayload())).toContain("1.34 Credits");
+  });
+
+  test("the consumer bot face shows the banner", async () => {
+    const face = await mountBot(consumerPayload({ archived: true }));
+    try {
+      const text = face.text();
+      expect(text).toContain(t("en", "botDetail.archive.consumerBanner"));
+      expect(text).not.toContain(t("en", "botDetail.archive.ownerBanner"));
+    } finally {
+      await face.close();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 7. Bots list
+ * ------------------------------------------------------------------ */
+
+function botRow(overrides: Partial<UsableBotRow> & { id: string; name: string; owned: boolean }): UsableBotRow {
+  return {
+    description: null,
+    workspace_id: WORKSPACE_ID,
+    workspace_name: "Acme",
+    can_manage: overrides.owned,
+    scope: overrides.owned ? "owned" : "shared",
+    multiplier: 1,
+    month_used_rp: 0,
+    archived: false,
+    ...overrides,
+  };
+}
+
+function botsPayload(): UsableBotsPayload {
+  return {
+    workspace_id: WORKSPACE_ID,
+    plan_monthly_rp: null,
+    rp_per_credit: RATE,
+    bots: [
+      botRow({ id: "bot-own", name: "My Bot", owned: true, description: "Mine to configure.", month_used_rp: 500 }),
+      botRow({ id: "bot-retired", name: "Retired Bot", owned: true, archived: true }),
+      botRow({ id: "bot-theirs", name: "Their Bot", owned: false, workspace_name: "platform" }),
+    ],
+  };
+}
+
+describe("7. the bots list", () => {
+  test("renders two sections, each naming its bots", async () => {
+    const markup = renderToStaticMarkup(
+      createElement(BotsView, {
+        locale: "en",
+        base: "/dashboard/acme",
+        state: { kind: "ok", payload: botsPayload() },
+        canCreate: true,
+        onCreated: () => {},
+      }),
+    );
+    expect(markup).toContain(t("en", "bots.list.ownedSection"));
+    expect(markup).toContain(t("en", "bots.list.sharedSection"));
+    await withMarkup(markup, (container) => {
+      expect(container.querySelectorAll('[data-slot="group-card"]').length).toBe(2);
+    });
+  });
+
+  test("the create action sits in the owned header only for a manager", async () => {
+    const manager = renderToStaticMarkup(
+      createElement(BotsView, {
+        locale: "en",
+        base: "/dashboard/acme",
+        state: { kind: "ok", payload: botsPayload() },
+        canCreate: true,
+        onCreated: () => {},
+      }),
+    );
+    expect(manager.match(new RegExp(t("en", "bots.create.open"), "g")) ?? []).toHaveLength(1);
+
+    const member = renderToStaticMarkup(
+      createElement(BotsView, {
+        locale: "en",
+        base: "/dashboard/acme",
+        state: { kind: "ok", payload: botsPayload() },
+        canCreate: false,
+        onCreated: () => {},
+      }),
+    );
+    expect(member).toContain(t("en", "bots.list.ownedSection"));
+    expect(member.includes(t("en", "bots.create.open"))).toBe(false);
+  });
+
+  test("rows carry the name, the description and the Credits spend", async () => {
+    const markup = renderToStaticMarkup(
+      createElement(BotsView, {
+        locale: "en",
+        base: "/dashboard/acme",
+        state: { kind: "ok", payload: botsPayload() },
+        canCreate: true,
+        onCreated: () => {},
+      }),
+    );
+    const rowText = await withMarkup(markup, (container) => {
+      const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+        tr.textContent?.includes("My Bot"),
+      );
+      return row?.textContent ?? null;
+    });
+    expect(rowText).toContain("Mine to configure.");
+    expect(rowText).toContain("1.00 Credits"); // 500 RP at 500 RP/Credit
+    expect(markup).not.toMatch(NO_RP);
+  });
+});

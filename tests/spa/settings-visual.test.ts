@@ -29,6 +29,7 @@ const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
+  viewer_relation: "created",
   installation: null,
   pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",
@@ -409,6 +410,7 @@ describe("delivery-status summary line (I-000251)", () => {
 describe("the bot page carries the moved sections", () => {
   const botPayload = (): BotSettingsPayload => ({
     can_manage: true,
+    archived: false,
     app: {
       github_app_id: 1,
       id: "app-demo",

@@ -48,6 +48,7 @@ const IDENTITY_APP = {
 
 const identityPayload: SettingsPayload = {
   can_manage: false,
+  viewer_relation: "installed",
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
   blocked: false as const,

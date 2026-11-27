@@ -140,6 +140,7 @@ describe("the console document's own styles", () => {
 describe("the release version lives on the console only", () => {
   const TENANT_PAYLOAD = {
     can_manage: false as const,
+    viewer_relation: "installed" as const,
     workspace_id: "ws_0123456789abcdefghijkl",
     target_id: "rt-501",
     blocked: false as const,

@@ -448,7 +448,7 @@ describe("a confirmed restore whose re-read fails", () => {
       await click(buttonWith(t("en", "botDetail.archive.restore"), container as unknown as ParentNode));
       await act(async () => {});
 
-      expect(lastArchived).toBe(false);
+      expect(lastArchived === false).toBe(true);
       const fieldset = container.querySelector("fieldset[disabled]");
       expect(fieldset).not.toBeNull();
       expect(fieldset?.querySelector(`input[aria-label="${t("en", "botDetail.identity.name")}"]`)).not.toBeNull();
@@ -461,7 +461,7 @@ describe("a confirmed restore whose re-read fails", () => {
       // round trip. Once a re-read succeeds the lock must clear.
       await click(buttonWith(t("en", "botDetail.archive.open"), container as unknown as ParentNode));
       await click(buttonWith(t("en", "botDetail.archive.confirm"), win.document.body as unknown as ParentNode));
-      expect(lastArchived).toBe(true);
+      expect(lastArchived === true).toBe(true);
       readFails = false;
       await click(buttonWith(t("en", "botDetail.archive.restore"), container as unknown as ParentNode));
       await act(async () => {});

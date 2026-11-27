@@ -98,6 +98,9 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
     month_used_rp: 0,
     monthly_rp: null,
     effective_monthly_rp: null,
+    archived: false,
+    default_chain: null,
+    runtime: "omp",
     ...overrides,
   };
 }

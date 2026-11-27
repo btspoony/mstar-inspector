@@ -59,6 +59,7 @@ const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat"
 
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
+  viewer_relation: "created",
   installation: null,
   pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",
@@ -804,7 +805,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
       renderToStaticMarkup(
         createElement(BotSettingsView, {
           locale: "en",
-          payload: { ...detailPayload(), can_manage: true },
+          payload: { ...detailPayload(), can_manage: true, archived: false },
           groups: [],
           notice: null,
           onReload: async () => true,
