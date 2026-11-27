@@ -2380,7 +2380,7 @@ describe("API settings face — several repositories under one App (targets_many
     expect(body.blocked_reason).toBe("bot_not_shared");
     expect(body.targets_many).toBe(true);
     expect(body.target_id).toBeNull();
-    const parsed = parseSettings({ ...body, can_manage: true, workspace_id: consumer });
+    const parsed = parseSettings({ ...body, can_manage: true, workspace_id: consumer, viewer_relation: "created" });
     expect(parsed).not.toBeNull();
     expect(parsed?.target_id).toBeNull();
     expect(parsed?.targets_many).toBe(true);

@@ -5,7 +5,7 @@
  * into the page's error face instead of rendering an undefined value.
  */
 import { describe, expect, test } from "bun:test";
-import { formatCredits, parseBotSettings, parseSettings } from "../../src/spa/pages/data";
+import { formatCredits, parseApps, parseBotSettings, parseSettings } from "../../src/spa/pages/data";
 
 const chainRow = {
   position: 0,
@@ -131,6 +131,189 @@ describe("parseBotSettings — archived", () => {
     const { archived: _omitted, ...without } = botPayload;
     expect(parseBotSettings(without)).toBeNull();
     expect(parseBotSettings({ ...botPayload, archived: 1 })).toBeNull();
+  });
+});
+
+describe("parseApps — list chain rows", () => {
+  const listPayload = {
+    viewer: { login: "mallory", role: "member" },
+    apps: [
+      {
+        github_app_id: 123,
+        github_name: "Morning Star",
+        github_slug: "morning-star",
+        github_avatar_url: null,
+        status: "active",
+        review_enabled: 1,
+        created_by: "btspoony",
+        health: { latest: null, rejected24h: 0 },
+        chain: [chainRow],
+      },
+    ],
+  };
+
+  test("a list row whose chain entries carry archived parses", () => {
+    const parsed = parseApps(listPayload);
+    expect(parsed?.apps[0]?.chain?.[0]?.archived).toBe(false);
+  });
+
+  test("a missing or non-boolean archived in a list chain row fails the parse", () => {
+    const { archived: _omitted, ...without } = chainRow;
+    expect(parseApps({ ...listPayload, apps: [{ ...listPayload.apps[0], chain: [without] }] })).toBeNull();
+    expect(
+      parseApps({ ...listPayload, apps: [{ ...listPayload.apps[0], chain: [{ ...chainRow, archived: "yes" }] }] }),
+    ).toBeNull();
+  });
+});
+
+/**
+ * Every App-detail face carries `viewer_relation`: the manage, untargeted,
+ * blocked and blocked-many payloads below mirror the production shapes pinned
+ * in `tests/spa/app-detail.test.tsx` (copied, not imported).
+ */
+describe("parseSettings — viewer_relation on every App-detail face", () => {
+  const manageFace = {
+    can_manage: true,
+    official_workspace: true,
+    can_configure_bot: true,
+    installation: null,
+    pending_installations: [],
+    viewer_relation: "created",
+    workspace_id: "ws-1",
+    target_id: "rt-1",
+    blocked: false,
+    blocked_reason: null,
+    chain: [chainRow],
+    app: {
+      github_app_id: 123,
+      id: "app-1",
+      status: "active",
+      created_by: "btspoony",
+      last_webhook_at: null,
+      scope: "owned",
+      sandbox_image_id: "omp",
+      review_enabled: true,
+      review_trigger_mode: "every_push",
+      review_level: null,
+      default_review_level: "default",
+      github_visibility: "unknown",
+      github_name: "Morning Star",
+      github_slug: "morning-star",
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+    },
+    check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+    keys: [],
+    model_chain: null,
+    model_roles: {},
+    model_chains: [],
+    custom_providers: [],
+    configured_providers: [],
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
+    model_role_ids: [],
+    custom_provider_api_ids: [],
+    sandbox_images: [{ id: "omp", enabled: true }],
+    installations: [],
+  };
+
+  const untargetedFace = {
+    ...manageFace,
+    target_id: undefined,
+    app: {
+      github_app_id: manageFace.app.github_app_id,
+      id: manageFace.app.id,
+      status: manageFace.app.status,
+      created_by: manageFace.app.created_by,
+      last_webhook_at: null,
+      scope: "owned",
+      sandbox_image_id: "omp",
+      github_visibility: "unknown",
+      github_name: manageFace.app.github_name,
+      github_slug: manageFace.app.github_slug,
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_metadata_synced_at: null,
+    },
+  };
+
+  const blockedFace = {
+    can_manage: true,
+    blocked: true,
+    blocked_reason: "bot_not_shared",
+    viewer_relation: "created",
+    workspace_id: "ws-1",
+    target_id: "rt-1",
+    chain: [chainRow],
+    app: {
+      github_app_id: manageFace.app.github_app_id,
+      id: manageFace.app.id,
+      status: manageFace.app.status,
+      created_by: manageFace.app.created_by,
+      review_enabled: true,
+      review_trigger_mode: "every_push",
+      review_level: null,
+      default_review_level: "default",
+      scope: "owned",
+      github_name: manageFace.app.github_name,
+      github_slug: manageFace.app.github_slug,
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_visibility: "unknown",
+    },
+    installation: null,
+    check_gate: manageFace.check_gate,
+  };
+
+  const blockedManyFace = {
+    ...blockedFace,
+    target_id: null,
+    targets_many: true,
+    app: {
+      github_app_id: manageFace.app.github_app_id,
+      id: manageFace.app.id,
+      status: "active",
+      created_by: "btspoony",
+      scope: "owned",
+      github_name: null,
+      github_slug: "morning-star",
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_visibility: "unknown",
+    },
+    installation: null,
+  };
+
+  const faces = [
+    ["manage", manageFace],
+    ["untargeted", untargetedFace],
+    ["blocked", blockedFace],
+    ["blocked-many", blockedManyFace],
+  ] as const;
+
+  test("each face parses with a valid viewer_relation", () => {
+    for (const [name, face] of faces) {
+      const parsed = parseSettings(face);
+      expect(parsed, name).not.toBeNull();
+      expect(parsed?.viewer_relation, name).toBe("created");
+    }
+  });
+
+  test("each face fails the parse without viewer_relation", () => {
+    for (const [name, face] of faces) {
+      const { viewer_relation: _omitted, ...without } = face;
+      expect(parseSettings(without), name).toBeNull();
+    }
+  });
+
+  test("each face fails the parse on an unknown viewer_relation value", () => {
+    for (const [name, face] of faces) {
+      expect(parseSettings({ ...face, viewer_relation: "owner" }), name).toBeNull();
+    }
   });
 });
 

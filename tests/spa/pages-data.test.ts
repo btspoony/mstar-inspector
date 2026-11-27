@@ -275,6 +275,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -331,6 +332,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the sandbox image selection + selector choices", () => {
     const manageBase = {
       can_manage: true,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -386,6 +388,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review trigger mode and review depth on the manage face; off-vocabulary fails the parse", () => {
     const base = {
       can_manage: true,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -447,6 +450,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review gate and visibility on the manage face; malformed values fail the parse", () => {
     const base = {
       can_manage: true,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -512,6 +516,7 @@ describe("members/apps/settings parsers", () => {
 
   const MANAGER_PAYLOAD = {
     can_manage: true,
+    viewer_relation: "created",
     official_workspace: true,
     can_configure_bot: true,
     workspace_id: "ws_0123456789abcdefghijkl",
@@ -598,6 +603,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings (identity-only face) requires the D4 identity set — created_at joins the required keys", () => {
     const identityBase = {
       can_manage: false,
+      viewer_relation: "installed",
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
       blocked: false as const,
@@ -630,6 +636,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings separates configured state from the catalog", () => {
     const manageBase = {
       can_manage: true,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -760,6 +767,7 @@ describe("members/apps/settings parsers", () => {
       blocked: false as const,
       blocked_reason: null,
       can_manage: false,
+      viewer_relation: "installed",
       app: identityApp,
     });
     expect(readOnly?.can_manage).toBe(false);
@@ -774,11 +782,13 @@ describe("members/apps/settings parsers", () => {
       blocked: false as const,
       blocked_reason: null,
       can_manage: false,
+      viewer_relation: "installed",
       app: withoutCreated,
     })).toBeNull();
     expect(
       parseSettings({
         can_manage: true,
+        viewer_relation: "created",
         official_workspace: true,
         can_configure_bot: true,
         installation: null,
@@ -858,6 +868,7 @@ describe("model chain tab model", () => {
 describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
+    viewer_relation: "created",
     official_workspace: true,
     can_configure_bot: true,
     installation: null,

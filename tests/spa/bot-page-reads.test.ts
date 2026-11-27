@@ -12,6 +12,7 @@ import { loadProviderCatalog } from "../../src/spa/provider-catalog";
 const botPayload = {
   can_manage: true,
   owned: true,
+  archived: false,
   app: {
     github_app_id: null,
     id: "bot-1",

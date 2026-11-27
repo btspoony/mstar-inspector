@@ -2152,6 +2152,17 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
+  // Chain rows on the list face pass the same guard as the detail parser: a
+  // malformed row fails the whole parse instead of rendering half a chain.
+  for (const app of data.apps) {
+    if (
+      isRecord(app) &&
+      app.chain !== undefined &&
+      (!Array.isArray(app.chain) || !app.chain.every(isAppChainEntry))
+    ) {
+      return null;
+    }
+  }
   const pending = Array.isArray(data.pending_installations)
     ? data.pending_installations.filter(isPendingBindRow)
     : [];
