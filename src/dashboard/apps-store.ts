@@ -2435,6 +2435,12 @@ export type BotScopeOutcome =
   | { outcome: "forbidden" };
 
 /**
+ * A bot profile/pricing/archive write's outcome. Same value-not-message rule as
+ * {@link BotScopeOutcome}: the route maps the value to a frozen status.
+ */
+export type BotWriteOutcome = "ok" | "bot_not_found" | "forbidden" | "invalid";
+
+/**
  * One live App/bot pair as the operator console lists it (contract § 8.3).
  * Post-split the two scopes are independent columns: `scope`/`shared_at` are
  * the APP's share switch (`github_apps` — who may act through these
@@ -2683,6 +2689,106 @@ export async function setReviewBotScope(
       unshare: REVIEW_BOT_SCOPE_UNSHARE_SQL,
     },
   );
+}
+
+/**
+ * The authorization every bot face-write shares: the row must be live, belong
+ * to the AUTHORIZING workspace, and the role must be owner or admin. Read here,
+ * inside the store, so a caller that bypasses the route cannot write either.
+ */
+async function botWriteAuthority(
+  db: AppsStoreD1,
+  botId: string,
+  authority: { workspaceId: string; role: WorkspaceRole },
+): Promise<BotWriteOutcome> {
+  const owner = await db
+    .prepare(`SELECT workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+    .bind(botId)
+    .first<{ workspace_id: string }>();
+  if (owner === null) return "bot_not_found";
+  if (owner.workspace_id !== authority.workspaceId) return "forbidden";
+  if (authority.role !== "owner" && authority.role !== "admin") return "forbidden";
+  return "ok";
+}
+
+/** The name and description the bot detail writes together. */
+export async function updateBotProfile(
+  db: AppsStoreD1,
+  input: {
+    botId: string;
+    name: string;
+    description: string | null;
+    authority: { workspaceId: string; role: WorkspaceRole };
+    now: string;
+  },
+): Promise<BotWriteOutcome> {
+  const gate = await botWriteAuthority(db, input.botId, input.authority);
+  if (gate !== "ok") return gate;
+  if (input.name.trim().length === 0) return "invalid";
+  await db
+    .prepare(
+      `UPDATE review_bots SET name = ?, description = ?, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .bind(input.name.trim(), input.description, input.now, input.botId)
+    .run();
+  return "ok";
+}
+
+/**
+ * The bot's price face: `multiplier` (> 0) and `monthly_rp` (NULL = no bot-level
+ * ceiling). Both columns move together, so a price edit never writes half a
+ * pair.
+ */
+export async function updateBotPricing(
+  db: AppsStoreD1,
+  input: {
+    botId: string;
+    multiplier: number;
+    monthlyRp: number | null;
+    authority: { workspaceId: string; role: WorkspaceRole };
+    now: string;
+  },
+): Promise<BotWriteOutcome> {
+  const gate = await botWriteAuthority(db, input.botId, input.authority);
+  if (gate !== "ok") return gate;
+  if (!Number.isFinite(input.multiplier) || input.multiplier <= 0) return "invalid";
+  if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
+    return "invalid";
+  }
+  await db
+    .prepare(
+      `UPDATE review_bots SET multiplier = ?, monthly_rp = ?, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .bind(input.multiplier, input.monthlyRp, input.now, input.botId)
+    .run();
+  return "ok";
+}
+
+/**
+ * Archive (`archived_at = now`) or restore (`NULL`). Archiving keeps the row
+ * listed and auditable; the relay's chain read is what stops selecting it.
+ */
+export async function setBotArchived(
+  db: AppsStoreD1,
+  input: {
+    botId: string;
+    archived: boolean;
+    authority: { workspaceId: string; role: WorkspaceRole };
+    now: string;
+  },
+): Promise<BotWriteOutcome> {
+  const gate = await botWriteAuthority(db, input.botId, input.authority);
+  if (gate !== "ok") return gate;
+  await db
+    .prepare(
+      `UPDATE review_bots SET archived_at = ?, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .bind(input.archived ? input.now : null, input.now, input.botId)
+    .run();
+  return "ok";
 }
 
 /**

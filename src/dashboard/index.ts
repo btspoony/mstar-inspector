@@ -60,8 +60,12 @@ import {
   type PullRequestReviewing,
   type BotScope,
   type BotScopedRow,
+  type BotWriteOutcome,
   setAppScope,
+  setBotArchived,
   setReviewBotScope,
+  updateBotPricing,
+  updateBotProfile,
 } from "./apps-store";
 import {
   checkGateOf,
@@ -3327,6 +3331,8 @@ const appBotRoute = async (c: DashboardContext) => {
   return c.json({
     can_manage: canManage,
     owned,
+    // Archived is a state fact for every viewer; only the owner may flip it.
+    archived: bot.archived_at !== null,
     // The owner's exception layer, read only for the owner: a consumer never sees
     // another workspace's negotiated ceiling.
     ...(canManage
@@ -3499,6 +3505,109 @@ const botQuotaOverrideRoute = async (c: DashboardContext): Promise<Response> => 
 
 const appScopeRoute = scopeSwitchRoute("app");
 const botScopeRoute = scopeSwitchRoute("bot");
+
+type BotFaceWriteKind = "profile" | "pricing" | "archive";
+
+const BOT_FACE_WRITE_COPY: Record<
+  BotFaceWriteKind,
+  { notFound: string; shape: string; invalid: string }
+> = {
+  profile: {
+    notFound: "unknown bot",
+    shape: "body must be { name, description? }",
+    invalid: "name must be a non-empty string and description a string or null",
+  },
+  pricing: {
+    notFound: "unknown bot",
+    shape: "body must be { multiplier, monthly_rp? }",
+    invalid: "multiplier must be greater than 0 and monthly_rp a whole number greater than 0, or null",
+  },
+  archive: {
+    notFound: "unknown bot",
+    shape: "body must be { archived: boolean }",
+    invalid: "archived must be a boolean",
+  },
+};
+
+/**
+ * One bot face-write route (profile | pricing | archive). Member gate here, the
+ * manager gate and the store's own ownership+role re-check inside, so a caller
+ * that bypasses this route cannot write another workspace's bot.
+ *
+ * An omitted field keeps the stored value: the route already holds the row it
+ * resolved for the 404, so a partial body can never clear a column by omission.
+ */
+function botFaceWriteRoute(kind: BotFaceWriteKind) {
+  return async (c: DashboardContext): Promise<Response> => {
+    const gate = await requireMember(c);
+    if (!gate.ok) return gate.response;
+    const copy = BOT_FACE_WRITE_COPY[kind];
+    const bot = await createReviewBotsStore(gate.db).getScopedBotById(
+      c.req.param("botId") ?? "",
+      gate.scope.workspaceId,
+    );
+    if (!bot) return c.json({ error: copy.notFound }, 404);
+    if (!canManageApp(gate.scope)) return c.json({ error: "forbidden" }, 403);
+    let body: Record<string, unknown> | null = null;
+    try {
+      const parsed = (await c.req.json()) as unknown;
+      body = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    } catch {
+    }
+    if (body === null) return c.json({ error: copy.shape }, 400);
+    const authority = { workspaceId: gate.scope.workspaceId, role: gate.scope.role };
+    const now = new Date().toISOString();
+    const invalid = () => c.json({ error: copy.invalid }, 400);
+    let outcome: BotWriteOutcome;
+    if (kind === "profile") {
+      const name = body.name;
+      if (typeof name !== "string" || name.trim().length === 0) return invalid();
+      const rawDescription = body.description === undefined ? bot.description : body.description;
+      let description: string | null;
+      if (rawDescription === null) description = null;
+      else if (typeof rawDescription === "string") description = rawDescription;
+      else return invalid();
+      outcome = await updateBotProfile(gate.db, {
+        botId: bot.id,
+        name,
+        description,
+        authority,
+        now,
+      });
+    } else if (kind === "pricing") {
+      const multiplier = body.multiplier;
+      if (typeof multiplier !== "number" || !Number.isFinite(multiplier) || multiplier <= 0) return invalid();
+      const rawMonthly = body.monthly_rp === undefined ? bot.monthly_rp : body.monthly_rp;
+      let monthlyRp: number | null;
+      if (rawMonthly === null) monthlyRp = null;
+      else if (typeof rawMonthly === "number" && Number.isInteger(rawMonthly) && rawMonthly > 0) monthlyRp = rawMonthly;
+      else return invalid();
+      outcome = await updateBotPricing(gate.db, {
+        botId: bot.id,
+        multiplier,
+        monthlyRp,
+        authority,
+        now,
+      });
+    } else {
+      if (typeof body.archived !== "boolean") return invalid();
+      outcome = await setBotArchived(gate.db, {
+        botId: bot.id,
+        archived: body.archived,
+        authority,
+        now,
+      });
+    }
+    if (outcome === "bot_not_found") return c.json({ error: copy.notFound }, 404);
+    if (outcome === "forbidden") return c.json({ error: "forbidden" }, 403);
+    if (outcome === "invalid") return invalid();
+    return c.json({ ok: true });
+  };
+}
+
+const botProfileRoute = botFaceWriteRoute("profile");
+const botPricingRoute = botFaceWriteRoute("pricing");
+const botArchiveRoute = botFaceWriteRoute("archive");
 
 const DELIVERY_PAGE_LIMIT = 20;
 const DELIVERY_PAGE_OFFSET_MAX = 100_000;
@@ -5760,6 +5869,9 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/review-bots/:botId/bot", handler: appBotRoute, access: "write" },
   { method: "patch", path: "/api/apps/:appId/scope", handler: appScopeRoute, access: "write" },
   { method: "patch", path: "/api/review-bots/:botId/scope", handler: botScopeRoute, access: "write" },
+  { method: "patch", path: "/api/review-bots/:botId/profile", handler: botProfileRoute, access: "write" },
+  { method: "patch", path: "/api/review-bots/:botId/pricing", handler: botPricingRoute, access: "write" },
+  { method: "patch", path: "/api/review-bots/:botId/archive", handler: botArchiveRoute, access: "write" },
   {
     method: "patch",
     path: "/api/review-bots/:botId/quota-overrides",
