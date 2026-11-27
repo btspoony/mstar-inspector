@@ -1113,6 +1113,32 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return db.prepare(VISIBLE_BOT_SQL).bind(botId, workspaceId).first<BotScopedRow>();
     },
 
+    /**
+     * The operator's price view: every live Review Bot's `multiplier`, grouped
+     * by value, with the Bots at each value. Platform-wide by design — the
+     * operator is asking what the platform is currently priced at, and a
+     * rollback means editing each of these rows — so this read is NOT scoped by
+     * workspace and cannot live in `src/admin/` under the tenant read-face rule.
+     */
+    async readMultiplierDistribution(): Promise<
+      Array<{ multiplier: number; bots: Array<{ botId: string; name: string; workspaceId: string }> }>
+    > {
+      const res = await db
+        .prepare(
+          `SELECT multiplier,
+                  json_group_array(json_object('botId', id, 'name', name, 'workspaceId', workspace_id)) AS bots_json
+             FROM review_bots
+            WHERE deleted_at IS NULL
+            GROUP BY multiplier
+            ORDER BY multiplier ASC`,
+        )
+        .all<{ multiplier: number; bots_json: string }>();
+      return res.results.map((row) => ({
+        multiplier: row.multiplier,
+        bots: JSON.parse(row.bots_json) as Array<{ botId: string; name: string; workspaceId: string }>,
+      }));
+    },
+
     async listSharedBots(workspaceId: string): Promise<SharedBotRow[]> {
       const res = await db.prepare(SHARED_BOT_LIST_SQL).bind(workspaceId).all<SharedBotRow>();
       return res.results;
