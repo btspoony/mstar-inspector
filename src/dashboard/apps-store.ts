@@ -1581,9 +1581,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       // archive followed by a restore in between would report `ok` for a write
       // that never happened.
       const live = "EXISTS (SELECT 1 FROM review_bots r WHERE r.id = ?1 AND r.deleted_at IS NULL AND r.archived_at IS NULL)";
+      // The probe carries `present` as well as `live`: a target DELETED before
+      // the batch must not be reported as an archived one.
       const probe = db
-        .prepare(`SELECT ${live} AS n`)
-        .bind(input.botId);
+        .prepare(
+          `SELECT ${live} AS live,
+                  EXISTS (SELECT 1 FROM review_bots r WHERE r.id = ?2 AND r.deleted_at IS NULL) AS present`,
+        )
+        .bind(input.botId, input.botId);
       const write =
         input.monthlyRp === null
           ? db
@@ -1598,7 +1603,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
               )
               .bind(input.botId, input.workspaceId, input.monthlyRp, input.now);
       const [probed, written] = await db.batch([probe, write]);
-      if (countOf(probed!) !== 1) return "archived";
+      // A deleted target is the same answer the owner read gives: not the
+      // caller's bot. Only an ARCHIVED one is the archive refusal.
+      const state = targetStateOf(probed);
+      if (state === "gone") return "not_owner";
+      if (state === "archived") return "archived";
       // Live and unchanged: a clear of an absent override is a no-op, and the
       // INSERT path always writes when the bot is live.
       return (written?.meta.changes ?? 0) > 0 || input.monthlyRp === null ? "ok" : "archived";
@@ -2574,9 +2583,18 @@ const APP_LIVENESS_PROBE_SQL = `
 /** One probe row: `live` = writable now, `present` = the row exists at all. */
 type LivenessRow = { live: number; present: number };
 
-function archivedOf(result: AppsStoreBatchResult | undefined): boolean {
+/**
+ * The probe's three states — the ONE mapping every guarded write reads:
+ * `live` proceeds, `archived` is a refusal, `gone` is an absent target (a
+ * deleted row or one that never existed). A refusal that cannot tell them
+ * apart reports `archived` for a DELETED target, which is a different answer.
+ */
+export type TargetState = "live" | "archived" | "gone";
+
+export function targetStateOf(result: { results: unknown[] } | undefined): TargetState {
   const [row] = (result?.results ?? []) as LivenessRow[];
-  return row !== undefined && row.live !== 1 && row.present === 1;
+  if (row === undefined || row.present !== 1) return "gone";
+  return row.live === 1 ? "live" : "archived";
 }
 
 const BOT_SCOPE_LIST_SQL = `
@@ -2732,7 +2750,12 @@ async function scopeTransition(
           db.prepare(sql.unshare).bind(id),
         ]);
 
-  if (archivedOf(probed)) return { outcome: "archived" };
+  // The batch's own probe decides: a target DELETED before it is an absent
+  // target, not an archived one, and the post-batch read cannot tell them
+  // apart (a restore between the two makes a refused write look live).
+  const state = targetStateOf(probed);
+  if (state === "gone") return { outcome: "bot_not_found" };
+  if (state === "archived") return { outcome: "archived" };
   if ((write?.meta.changes ?? 0) > 0) {
     return { outcome: "ok", scope, sharedAt: scope === "shared" ? now : null };
   }

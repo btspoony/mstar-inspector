@@ -28,6 +28,7 @@ import {
   UnknownModelChainError,
   UnknownModelRoleError,
   BotArchivedError,
+  BotWriteForbiddenError,
   createAppConfigStore,
   parseModelChain,
   type AppConfigD1,
@@ -4360,5 +4361,72 @@ describe("an archive the batch itself saw decides the outcome", () => {
     const config = await configStore(db).getAppConfig(app.id);
     expect(config.keys).toEqual({ anthropic: [PLAIN_ANTHROPIC_KEY] });
     expect(db.raw.query("SELECT key_id, key_enc FROM bot_provider_keys").get()).toEqual(before);
+  });
+});
+
+/**
+ * F1 re-review 3: the probe's `present` column separates a DELETED target from
+ * an ARCHIVED one. A deletion inside the write's own batch is the same
+ * forbidden refusal `requireBotWrite` gives — never the archive refusal, and
+ * never a silent success for a write that changed nothing.
+ */
+describe("a target deleted inside the batch is refused as forbidden, not as archived", () => {
+  function deleteWithinBatch(inner: TestD1, botId: string): AppConfigD1 {
+    let fired = false;
+    return {
+      prepare: (query: string) => inner.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          inner.raw.prepare("UPDATE review_bots SET deleted_at = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", botId);
+        }
+        return await inner.batch(statements);
+      },
+    };
+  }
+
+  test("a void chain write refuses instead of reporting success", async () => {
+    const { db, app } = await seededWorld();
+    await expect(
+      configStore(deleteWithinBatch(db, app.id)).upsertModelChain(authority(app.id), app.id, "gone", "a/b"),
+    ).rejects.toBeInstanceOf(BotWriteForbiddenError);
+    expect(await configStore(db).getModelChain(app.id)).toBeNull();
+  });
+
+  test("a key delete refuses instead of reporting another admission failure", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const keyId = await keyIdOf(PLAIN_ANTHROPIC_KEY);
+    await expect(
+      configStore(deleteWithinBatch(db, app.id)).deleteProviderKey(authority(app.id), app.id, "anthropic", keyId),
+    ).rejects.toBeInstanceOf(BotWriteForbiddenError);
+    expect(rawCount(db, "bot_provider_keys")).toBe(1);
+  });
+
+  test("an archived target is still the archive refusal", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE review_bots SET archived_at = ? WHERE id = ?", "2026-02-01T00:00:00.000Z", app.id);
+    await expect(
+      configStore(db).upsertModelChain(authority(app.id), app.id, "gone", "a/b"),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+  });
+
+  test("a target archived and restored inside the batch writes successfully", async () => {
+    const { db, app } = await seededWorld();
+    let fired = false;
+    const racing: AppConfigD1 = {
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", app.id);
+          db.raw.prepare("UPDATE review_bots SET archived_at = NULL WHERE id = ?").run(app.id);
+        }
+        return await db.batch(statements);
+      },
+    };
+    await createAppConfigStore(racing, TEST_KEY).setModelChain(authority(app.id), app.id, "a/b");
+    expect(await configStore(db).getModelChain(app.id)).toBe("a/b");
   });
 });

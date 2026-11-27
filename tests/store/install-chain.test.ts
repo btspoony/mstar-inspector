@@ -547,6 +547,69 @@ describe("setBotQuotaOverride — the writer bot_quota_overrides was missing", (
     expect(overrides(db, "bot-shared")).toEqual([{ workspaceId: "tenant", monthlyRp: 500 }]);
     db.raw.close();
   });
+
+  test("a bot deleted inside the batch reports not_owner, not archived", async () => {
+    const db = world();
+    let fired = false;
+    const racing = {
+      ...db,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements: Parameters<TestD1["batch"]>[0]) => {
+        if (!fired) {
+          fired = true;
+          // Deleted after the owner read: the probe's `present` column is the
+          // only witness that this is an absent target, not a locked one.
+          db.raw.prepare("UPDATE review_bots SET deleted_at = ? WHERE id = 'bot-shared'").run(TS);
+        }
+        return db.batch(statements);
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(racing).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("not_owner");
+    expect(fired).toBe(true);
+    expect(overrides(db, "bot-shared")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("an archive restored before the batch runs lets the write succeed", async () => {
+    const db = world();
+    let fired = false;
+    // Archive and restore both land before the statements run: the probe and
+    // the write see one live target, so the override IS stored.
+    const restoredFirst = {
+      ...db,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements: Parameters<TestD1["batch"]>[0]) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-shared'").run(TS);
+          db.raw.prepare("UPDATE review_bots SET archived_at = NULL WHERE id = 'bot-shared'").run();
+        }
+        return db.batch(statements);
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(restoredFirst).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("ok");
+    expect(fired).toBe(true);
+    expect(overrides(db, "bot-shared")).toEqual([{ workspaceId: "tenant", monthlyRp: 500 }]);
+    db.raw.close();
+  });
 });
 
 describe("replaceInstallChain — an archive between the request and the batch", () => {
