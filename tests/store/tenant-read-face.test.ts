@@ -174,6 +174,10 @@ const MAINTENANCE_SITES: Record<string, number> = {
   // The relay's ceiling fallback: `review_bots` by the bot id the chain named,
   // projecting one price column.
   "worker/select-review-bot.ts": 1,
+  // The split-integrity report's two maintenance counts over `review_bots`
+  // liveness (Apps without a live Bot, chain rows whose Bot is gone); both
+  // project COUNT(*) only.
+  "admin/data-upgrades/split-integrity.ts": 2,
 };
 
 /**

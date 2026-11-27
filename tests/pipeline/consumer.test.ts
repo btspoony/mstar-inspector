@@ -116,6 +116,18 @@ import {
 
 const GATE = { minScore: 60, passVerdicts: ["ship it"] } as const;
 
+/**
+ * The executor line a completed review's Check carries: the fixture App and its
+ * same-id Bot are both named `consumer-test-app` (the split pair's shape), and
+ * `readExecutorNames` falls back to the App row's own name.
+ */
+const EXECUTOR = {
+  appId: TEST_APP_ID,
+  appName: "consumer-test-app",
+  botId: TEST_APP_ID,
+  botName: "consumer-test-app",
+} as const;
+
 const SATURATED_NUMSTAT = "9000\t11000\tsrc/generated.ts\n";
 
 import {
@@ -6489,7 +6501,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(update.status).toBe("completed");
     expect(update.conclusion).toBe("success");
     expect(update.output.title).toBe(CHECK_NAME);
-    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR));
     expect(update.output.summary).toContain('verdict "ship it"');
     expect(update.output.summary).toContain("score 85");
     expect(update.output.summary).toContain(`floor ${GATE.minScore}`);
@@ -6540,7 +6552,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     const update = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("success");
-    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR));
     expect(checkRowFor(db, SHA).desired).toBe("success");
   });
 
@@ -7159,7 +7171,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("success");
-    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR));
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("success");
     expect(row.observed).toBe("success");
@@ -7399,7 +7411,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(1);
     expect(row.check_run_id).not.toBeNull();
     expect(row.desired).toBe("success");
-    expect(row.desired_summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(row.desired_summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR));
     expect(row.desired_summary).toContain('verdict "ship it"');
     expect(row.desired_summary).toContain("score 85");
     expect(row.desired_summary).toContain(`floor ${GATE.minScore}`);
@@ -9180,7 +9192,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = lifecycleFor(db, checkClock);
     const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
     expect(handle).not.toBeNull();
-    const gateSummary = CHECK_SUMMARIES.gateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE);
+    const gateSummary = CHECK_SUMMARIES.gateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE, EXECUTOR);
     expect(
       await setCheckDesired(
         db,
@@ -9218,7 +9230,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = lifecycleFor(db, checkClock);
     const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
     expect(handle).not.toBeNull();
-    const successSummary = CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE);
+    const successSummary = CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR);
     expect(
       await setCheckDesired(
         db,
@@ -10267,7 +10279,7 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(terminal.status).toBe("completed");
     expect(terminal.conclusion).toBe("success");
     expect(terminal.output.summary).toBe(
-      `${CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE)} ${SEAT_LINE}`,
+      `${CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR)} ${SEAT_LINE}`,
     );
     expect(checkRowFor(db, SHA).desired).toBe("success");
     expect(failureRows(db)).toHaveLength(0);
@@ -10284,7 +10296,7 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(publishedBody()).not.toContain("Reviewed 2/2 seats");
     const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
     expect(terminal.conclusion).toBe("success");
-    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR));
   });
 
   test("a malformed coverage block never degrades the round — the envelope alone decides the parse, and no line renders", async () => {
@@ -10296,7 +10308,7 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(failureRows(db)).toHaveLength(0);
     expect(publishedBody()).not.toContain("Reviewed");
     const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
-    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR));
   });
 
   test("an empty-coverage cap stop keeps the failure: review.budget.runner_spent and a failed Check", async () => {
@@ -10384,7 +10396,7 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(publishedBody()).not.toContain("Reviewed 1/2 seats");
     const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
     expect(terminal.conclusion).toBe("success");
-    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE, EXECUTOR));
   });
 
   test("a scope path carrying Inspector-marker text renders the exact same normalized sentence on both surfaces", async () => {

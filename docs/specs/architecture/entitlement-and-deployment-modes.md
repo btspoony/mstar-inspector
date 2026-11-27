@@ -156,9 +156,13 @@ with a refusal carrying the resolved plan id = refused. `assertSharedBotAllowed`
 survives only as that branch's internal body, so it has no caller outside the
 module. Exactly two surfaces ask the question, and neither re-derives the rule:
 
-- creating a target on a shared bot (`targetsStore.createOnSharedBot`), which
-  decides before writing anything, so a refusal leaves no target and no audit
-  row, and answers the plan-named `400` body;
+- creating a target on a shared bot: `targetCreateRoute`
+  (`src/dashboard/index.ts`) asks once per request, before its create loop, for
+  the workspace the target is written into, and reads the resolved App's
+  install chain to decide `botScope` — a chain that mounts a bot the workspace
+  owns is admitted on ownership, exactly as the relay admits it, so the plan is
+  read only for a chain that can execute solely through a shared bot. A refusal
+  answers the plan-named `400` body and writes nothing: no target, no audit row;
 - enqueueing a review for a target on a shared bot: the webhook route decides
   ONCE, before the enqueue, from the TARGET's workspace (the bot's workspace is
   another fact). `handleReviewJob` then takes no KV claim and writes no comment
@@ -391,11 +395,10 @@ before its first read.
 
 - `src/dashboard/entitlement.ts`: `checkEntitlement` (the one decision: `member-slot`, `free-workspace-slot`, `shared-bot`, `app-count`, `review-quota`), `resolveWorkspacePlan`, `resolveWorkspacePlans`, `sharedBotAvailability`.
 - `src/dashboard/review-usage-store.ts`: `readReviewUsage` (the counts the usage card and the console's usage page read).
-- `src/dashboard/targets-store.ts`: `createOnSharedBot` (the creation refusal).
 - `src/worker/index.ts` + `src/worker/handlers.ts`: the enqueue refusal (`deliveryOutcomeFromWebhook`, `handleReviewJob`, `DeliveryRefusal`).
 - `src/dashboard/invite-store.ts`: `createInvite`, `acceptInvite`, seat/free-slot SQL guards.
 - `src/dashboard/workspace-store.ts`: `createWorkspace` and subscription writes.
-- `src/dashboard/index.ts`: members/invite routes and plan rendering.
+- `src/dashboard/index.ts`: members/invite routes, the target creation refusal (`targetCreateRoute`) and plan rendering.
 - `src/worker/env.ts`: `deploymentModeOf`.
 - `src/store/usage-store.ts`: `chargeUsage` (the one batch: the month's binding plus the priced row), `sumMonthlyRp` (a month's RP, whole or per bot), `readMonthlyRp` and `readMonthlyRpByWorkspace` (the month aggregate and its shared/own split).
 - `src/store/quota-store.ts`: `resolveQuotaProfile` (the profile in force), `resolveWorkspaceQuotaProfile` (THE resolver over the binding), `resolveWorkspaceMonthlyQuota`, `readBotMultiplier`, `rpFor`, `quotaMonth`, `quotaSpent`, `quotaStartsOn`.

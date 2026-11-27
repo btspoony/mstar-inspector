@@ -183,6 +183,7 @@ export type ReviewCheckRow = {
   observed: string;
   recovery_state: string;
   publication_id: string | null;
+  executor_bot_id: string | null;
   attempts: number;
   next_attempt_ms: number | null;
   last_error: string | null;

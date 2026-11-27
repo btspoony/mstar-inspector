@@ -639,6 +639,7 @@ describe("the data-upgrade routes", () => {
       "orphan-ledger-attribution",
       "repo-backfill",
       "repo-id-claim",
+      "split-integrity",
       "usage-bot-attribution",
     ]);
     const listed = body.upgrades.find((item) => item.id === ITEM_ID)!;
