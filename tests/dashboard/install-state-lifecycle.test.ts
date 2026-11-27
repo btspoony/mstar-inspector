@@ -32,10 +32,18 @@ function seedApp(
     .prepare(
       `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
-          status, created_at, updated_at)
-       VALUES (?, ?, ?, 'enc', 'enc', 'fixture', 'active', ?, ?)`,
+          status, scope, shared_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'enc', 'enc', 'fixture', 'active', ?, ?, ?, ?)`,
     )
-    .run(id, nextGithubAppId, opts.name ?? id, TS, TS);
+    .run(
+      id,
+      nextGithubAppId,
+      opts.name ?? id,
+      opts.scope ?? "owned",
+      opts.scope === "shared" ? TS : null,
+      TS,
+      TS,
+    );
   db.raw
     .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
     .run(id, workspaceId);

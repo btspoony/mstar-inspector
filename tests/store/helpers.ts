@@ -152,6 +152,18 @@ function wrapStatement(
   recordBindCount: (count: number) => void,
 ): D1StatementLike {
   let bound: unknown[] = [];
+  // D1 rejects a bind whose value count differs from the statement's parameter
+  // count ("D1_ERROR: Wrong number of parameter bindings"); bun:sqlite silently
+  // tolerates surplus values. Enforcing it here makes a `.bind()` with no
+  // matching placeholder fail in every test that runs it, instead of passing
+  // locally and 500ing in production.
+  const assertBinding = (): void => {
+    if (bound.length !== stmt.paramsCount) {
+      throw new Error(
+        `bound ${bound.length} values to a statement with ${stmt.paramsCount} parameters: ${String(stmt)}`,
+      );
+    }
+  };
   return {
     bind(...values: unknown[]): D1StatementLike {
       bound = values;
@@ -159,16 +171,19 @@ function wrapStatement(
       return this;
     },
     async first<T = Record<string, unknown>>(): Promise<T | null> {
+      assertBinding();
       const row = stmt.get(...bound) as T | undefined;
       return row ?? null;
     },
     async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
+      assertBinding();
       return { results: stmt.all(...bound) as T[] };
     },
     async run<T = Record<string, unknown>>(): Promise<{
       results: T[];
       meta: { changes: number; last_row_id: number };
     }> {
+      assertBinding();
       if (stmt.columnNames.length > 0) {
         const before = counter(db, "SELECT total_changes() AS n");
         const results = stmt.all(...bound) as T[];

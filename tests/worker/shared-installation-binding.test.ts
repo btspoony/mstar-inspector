@@ -491,7 +491,6 @@ describe("shared bot installations are bound to one workspace", () => {
     ).toBe(302);
     const pending = await createReviewBotsStore(db).listPendingInstallations(
       SHARED_BOT,
-      WS_A,
       true,
     );
     expect(pending.map((row) => row.installation_id)).toEqual([INSTALLATION_B]);
@@ -516,7 +515,7 @@ describe("shared bot installations are bound to one workspace", () => {
       )
       .run(WS_A);
     expect(
-      (await apps.listPendingInstallations(SHARED_BOT, WS_B, true)).map(
+      (await apps.listPendingInstallations(SHARED_BOT, true)).map(
         (r) => r.installation_id,
       ),
     ).toContain(INSTALLATION_A);

@@ -147,6 +147,12 @@ export type PendingBindRow = {
   can_bind: boolean;
 };
 
+/**
+ * One pending installation as a payload states it. `can_bind` is ABSENT on
+ * payloads written before the server stated it; such a row is still shown —
+ * dropping it would hide an installation the workspace really has — with the
+ * action withheld, because "unknown" must never read as "may bind".
+ */
 function isPendingBindRow(value: unknown): value is PendingBindRow {
   return (
     isRecord(value) &&
@@ -157,8 +163,13 @@ function isPendingBindRow(value: unknown): value is PendingBindRow {
     typeof value.app_name === "string" &&
     isNullableString(value.account_login) &&
     typeof value.seen_at === "string" &&
-    typeof value.can_bind === "boolean"
+    (value.can_bind === undefined || typeof value.can_bind === "boolean")
   );
+}
+
+/** The row's own bindability, and `false` for a payload that never stated it. */
+function pendingBindRow(value: PendingBindRow): PendingBindRow {
+  return { ...value, can_bind: value.can_bind === true };
 }
 
 /** One row of the "Bots I can use" read (D6): the bot plus the caller's month. */
@@ -2250,8 +2261,11 @@ export function parseApps(data: unknown): AppsPayload | null {
       return null;
     }
   }
+  // A pending row is an installation the workspace really has. A row whose
+  // `can_bind` is missing is an OLDER payload: it is kept and shown with the
+  // action withheld, never filtered away silently.
   const pending = Array.isArray(data.pending_installations)
-    ? data.pending_installations.filter(isPendingBindRow)
+    ? data.pending_installations.filter(isPendingBindRow).map(pendingBindRow)
     : [];
   return {
     ...(data as AppsPayload),

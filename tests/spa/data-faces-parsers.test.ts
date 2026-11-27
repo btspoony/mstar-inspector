@@ -399,3 +399,49 @@ describe("formatCredits", () => {
     expect(formatCredits(1240, 500)).toBe("2.48 Credits");
   });
 });
+
+/**
+ * F2-5: a pending-bind row from an OLDER payload must stay visible.
+ *
+ * The list's pending block gained `can_bind` when the server started stating
+ * bindability. A page served by an older deployment (or a cached payload) has
+ * the row WITHOUT that flag. Filtering such a row out hides a real installation
+ * silently — the user sees fewer pending installs than they have. The parser
+ * therefore keeps the row and withholds the ACTION, because an unknown
+ * permission must never read as a granted one.
+ */
+describe("parseApps — a pending row without can_bind is shown, not dropped", () => {
+  const pending = {
+    installation_id: 8801,
+    account_login: "acme-org",
+    seen_at: "2026-11-20 09:00:00",
+    app_id: "app-shared",
+    app_github_app_id: 7601,
+    app_name: "Platform",
+  };
+  const payload = (rows: unknown[]) => ({
+    viewer: { login: "alice", role: "member" },
+    apps: [],
+    pending_installations: rows,
+  });
+
+  test("an older row survives with the bind action withheld", () => {
+    const parsed = parseApps(payload([pending]));
+    expect(parsed?.pending_installations).toEqual([{ ...pending, can_bind: false }]);
+  });
+
+  test("a stated true is preserved, and rows mix without losing either", () => {
+    const parsed = parseApps(
+      payload([pending, { ...pending, installation_id: 8802, can_bind: true }]),
+    );
+    expect(parsed?.pending_installations?.map((row) => [row.installation_id, row.can_bind])).toEqual([
+      [8801, false],
+      [8802, true],
+    ]);
+  });
+
+  test("a malformed can_bind is still a refusal — absence is the only thing tolerated", () => {
+    expect(parseApps(payload([{ ...pending, can_bind: "yes" }]))?.pending_installations).toEqual([]);
+    expect(parseApps(payload([{ ...pending, can_bind: null }]))?.pending_installations).toEqual([]);
+  });
+});

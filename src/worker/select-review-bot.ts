@@ -128,14 +128,17 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
     }
     if (bot.workspaceId === target.workspace_id) {
       // ZERO quota reads from here to the return: an own bot is admitted by
-      // ownership alone (D15).
+      // ownership alone (D15). Its stored price is enforced at the CHARGE
+      // (`chargeUsage` refuses an out-of-domain multiplier for every path), so
+      // selection here needs no read and cannot admit an unpriceable charge.
       return { kind: "selected", botId: bot.botId };
     }
     if (mode === "self-hosted") {
       // Self-hosted has no plan and no quota: the plan is unlimited by
       // definition, so a shared bot is selected without touching a profile or a
       // ceiling. Resolving one there would refuse on an absent profile row for a
-      // deployment that never needed quota at all.
+      // deployment that never needed quota at all. The price domain is enforced
+      // at the charge for this path too.
       return { kind: "selected", botId: bot.botId };
     }
 

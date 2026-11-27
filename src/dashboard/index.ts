@@ -2252,7 +2252,6 @@ const appListRoute = async (c: DashboardContext) => {
     // membership (D43); `can_bind` is the manager fact the bind route checks,
     // stated by the server so the row never offers an action it cannot perform.
     pending_installations: await apps.listWorkspacePendingInstallationsNamed(
-      gate.scope.workspaceId,
       canManageApp(gate.scope),
     ),
   });
@@ -2725,11 +2724,7 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
       // action the route would refuse.
       pending_installations:
         appRow.scope === "shared"
-          ? await store.listPendingInstallations(
-              appRow.id,
-              member.scope.workspaceId,
-              canManageApp(member.scope),
-            )
+          ? await store.listPendingInstallations(appRow.id, canManageApp(member.scope))
           : [],
       // F7: the bots this App's chain actually mounts in THIS workspace — the
       // only App-to-bot relation that exists — in position order, each with its
@@ -5248,7 +5243,10 @@ async function bindAdmission(
   if (binding === null || binding.removed_at !== null) return { kind: "unknown_installation" };
   if (binding.bound_workspace_id === workspaceId) return { kind: "bound" };
   if (binding.bound_workspace_id !== null) return { kind: "bound_elsewhere" };
-  const pending = await apps.listPendingInstallations(app.id, workspaceId, true);
+  // The pending list applies `APP_BINDABLE_SQL` itself, so "in this workspace's
+  // pending list" is exactly "the App is live, shared and bindable right now" —
+  // the same predicate `bindInstallation`'s own UPDATE re-checks at the write.
+  const pending = await apps.listPendingInstallations(app.id, true);
   return pending.some((row) => row.installation_id === installationId)
     ? { kind: "pending" }
     : { kind: "unknown_installation" };
@@ -5384,6 +5382,10 @@ async function completeInstallationBind(
   if (!(await stillManager())) return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
   const outcome = await apps.bindInstallation(app.id, state.installationId, state.workspaceId);
   if (outcome === "bound_elsewhere") return fail("common.oauth.bindConflict", 409, "bound_elsewhere");
+  // `app_unavailable` is the App losing its live/shared state during the OAuth
+  // round trip: the write's own predicate refused it. The caller learns the same
+  // `unknown app` the start route answers, never that an App existed.
+  if (outcome === "app_unavailable") return fail("common.oauth.bindUnavailable", 404, "app_unbindable");
   if (outcome === "unknown") return fail("common.oauth.bindUnavailable", 404, "unknown_installation");
   return c.redirect(state.returnTo, 302);
 }

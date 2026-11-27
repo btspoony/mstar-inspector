@@ -1,5 +1,6 @@
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
+import { isBotMultiplier, isRpPrice, QUOTA_BASE_MAX, RP_CEILING_MAX } from "../contracts/rp-limits";
 import type { D1Like } from "./types";
 
 /**
@@ -139,10 +140,28 @@ const LEVEL_BASE_COLUMN: Record<ReviewLevel, string> = {
 };
 
 /**
+ * The price expression, spelled ONCE: `max(1, ceil(base × multiplier))`, with
+ * the multiplier's placeholder named by the caller so each statement numbers
+ * its own parameters without a surplus bind (D1 rejects those). The ceiling is
+ * written portably as `CAST(x AS INTEGER) + CASE WHEN x > CAST(x AS INTEGER)
+ * THEN 1 ELSE 0 END` — `ceil()` exists in this engine, but the spelled-out form
+ * is what this repo can rely on if a driver or target lacks it, and it is exact
+ * for positive products. `rpFor` states the same rule for callers that price
+ * outside a batch.
+ */
+function priceOf(baseColumn: string, multiplierParam: string): string {
+  const product = `p.${baseColumn} * ${multiplierParam}`;
+  return `max(1, CAST(${product} AS INTEGER) + CASE WHEN ${product} > CAST(${product} AS INTEGER) THEN 1 ELSE 0 END)`;
+}
+
+/** Why a charge was refused: the stored factors price outside the RP domain. */
+export type ChargeRefusal = "price-out-of-domain";
+
+/**
  * One metering call: bind the month's version, price the review and append the
  * usage row — ALL in one batch, so the three can never disagree.
  *
- * The two statements are ONE write, and that is the whole design:
+ * The statements are ONE write, and that is the whole design:
  *
  *  - **Statement 1** binds `(workspace, month)` to the profile in force at
  *    `occurredAt`, `INSERT OR IGNORE` so a concurrent first metering keeps one
@@ -153,18 +172,24 @@ const LEVEL_BASE_COLUMN: Record<ReviewLevel, string> = {
  *    statement 1 (or a concurrent statement 1) actually left in the table — so
  *    the price follows the BINDING, never a resolve the caller did beforehand —
  *    and again only when this token has not been charged.
+ *  - **Statement 3** reports the factors statement 2 would have priced with, so
+ *    a refusal can be NAMED. It reads the same table state in the same batch and
+ *    writes nothing.
  *
  * Because they are one batch: a failed bot lookup or an insert error rolls the
  * binding back with the row (no premature binding), and a concurrent first
  * metering cannot leave a binding without its matching usage row.
  *
- * Pricing happens in SQL because the two statements must be atomic. `rp` is
- * `max(1, ceil(base * multiplier))` — the same rule `rpFor` states for callers
- * that price outside a batch. The ceiling is spelled portably as
- * `CAST(x AS INTEGER) + CASE WHEN x > CAST(x AS INTEGER) THEN 1 ELSE 0 END`:
- * `ceil()` is available in this engine, but the spelled-out form is the one
- * this repo can rely on if a driver or target lacks it, and it is exact for
- * positive products (all factors are > 0 by DDL CHECK).
+ * THE RP DOMAIN IS ENFORCED HERE, at the charge — for EVERY path, own-bot and
+ * self-hosted included. The relay refuses an out-of-domain bot before a
+ * delivery is admitted, but it is not the only way a row reaches this write, and
+ * a stored multiplier or profile that some other writer admitted must never
+ * produce an out-of-range charge. Statement 2 therefore admits a price only when
+ * all three of its factors are inside the shared domain `src/contracts/rp-limits`
+ * defines — the multiplier, the profile's base weight for this level, and the
+ * computed product — and refuses (appends nothing, reports `price-out-of-domain`)
+ * otherwise. Refusing to record an unrepresentable charge is the only safe
+ * answer: a charge no ceiling can bound would be unpayable AND unrefundable.
  *
  * `seq` is minted inside the same statement, so the attempt ordinal is a
  * property of the write, not of a prior read.
@@ -172,10 +197,19 @@ const LEVEL_BASE_COLUMN: Record<ReviewLevel, string> = {
 export async function chargeUsage(
   db: D1Like,
   input: ChargeUsageInput,
-): Promise<{ charged: boolean }> {
+): Promise<{ charged: boolean; refused?: ChargeRefusal }> {
   const baseColumn = LEVEL_BASE_COLUMN[input.level];
   if (baseColumn === undefined) {
     throw new Error(`chargeUsage: unknown review level '${input.level}'`);
+  }
+  // The one factor the caller supplies, so it is checked without a read: an
+  // unbounded multiplier is refused before this write can even bind a month.
+  // A REPLAY is the exception — a token that already paid is benign even if its
+  // bot's row has since left the domain, and reporting it as a refusal would
+  // raise a failure row for a run that was charged correctly.
+  if (!isBotMultiplier(input.multiplier)) {
+    if (await hasUsageEventForExecutionToken(db, input.executionToken)) return { charged: false };
+    return { charged: false, refused: "price-out-of-domain" };
   }
   const results = await db.batch([
     db
@@ -184,14 +218,22 @@ export async function chargeUsage(
         // before the instant, else the EARLIEST (a month that precedes every
         // profile is still resolvable). Expressed as one statement so the bind
         // and the price below it read one table state.
+        //
+        // The resolved profile is then put THROUGH THE DOMAIN before it may be
+        // pinned: a month bound to a profile that cannot price this review would
+        // be a binding with no matching row — the invariant the batch exists to
+        // keep. A governing profile outside the domain therefore binds nothing,
+        // exactly as if no profile covered the instant.
         `INSERT OR IGNORE INTO workspace_quota_binding (workspace_id, month, profile_id)
-         SELECT ?1, ?2, p.id
-           FROM quota_profiles p
-          WHERE NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)
-          ORDER BY CASE WHEN p.effective_from <= ?3 THEN 0 ELSE 1 END,
-                   CASE WHEN p.effective_from <= ?3 THEN p.effective_from END DESC,
-                   p.effective_from ASC
-          LIMIT 1`,
+         SELECT ?1, ?2, chosen.id
+           FROM (SELECT p.id AS id, p.${baseColumn} AS base
+                   FROM quota_profiles p
+                  WHERE NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)
+                  ORDER BY CASE WHEN p.effective_from <= ?3 THEN 0 ELSE 1 END,
+                           CASE WHEN p.effective_from <= ?3 THEN p.effective_from END DESC,
+                           p.effective_from ASC
+                  LIMIT 1) chosen
+          WHERE chosen.base <= ${QUOTA_BASE_MAX}`,
       )
       .bind(input.workspaceId, input.month, input.occurredAt, input.executionToken),
     db
@@ -201,15 +243,15 @@ export async function chargeUsage(
          SELECT ?5,
                 (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?5),
                 ?4, ?1, ?6,
-                max(1, CAST(p.${baseColumn} * ?7 AS INTEGER)
-                       + CASE WHEN p.${baseColumn} * ?7 > CAST(p.${baseColumn} * ?7 AS INTEGER)
-                              THEN 1 ELSE 0 END),
+                ${priceOf(baseColumn, "?7")},
                 ?8, ?9
            FROM workspace_quota_binding b
            JOIN quota_profiles p ON p.id = b.profile_id
           WHERE b.workspace_id = ?1
             AND b.month = ?2
-            AND NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)`,
+            AND NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)
+            AND ${priceOf(baseColumn, "?7")} <= ${RP_CEILING_MAX}
+            AND p.${baseColumn} <= ${QUOTA_BASE_MAX}`,
       )
       .bind(
         input.workspaceId,
@@ -222,11 +264,39 @@ export async function chargeUsage(
         input.source,
         input.botId,
       ),
+    // The factors the statements above would have used, so a refusal can be
+    // NAMED. It follows the same rule as statement 1 — the month's binding when
+    // one exists, else the profile the resolver would pick — but WITHOUT the
+    // domain filter, because an out-of-domain profile is exactly what it must
+    // report. Gated on the token so a replay reports no factors rather than a
+    // price that belongs to the run that already paid.
+    db
+      .prepare(
+        `SELECT p.${baseColumn} AS base, ${priceOf(baseColumn, "?3")} AS rp
+           FROM quota_profiles p
+          WHERE p.id = COALESCE(
+                  (SELECT b.profile_id FROM workspace_quota_binding b
+                    WHERE b.workspace_id = ?1 AND b.month = ?2),
+                  (SELECT q.id FROM quota_profiles q
+                    ORDER BY CASE WHEN q.effective_from <= ?5 THEN 0 ELSE 1 END,
+                             CASE WHEN q.effective_from <= ?5 THEN q.effective_from END DESC,
+                             q.effective_from ASC
+                    LIMIT 1))
+            AND NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)`,
+      )
+      .bind(input.workspaceId, input.month, input.multiplier, input.executionToken, input.occurredAt),
   ]);
-  // The usage insert is the last statement: its change count says whether this
+  // The usage insert is the second statement: its change count says whether this
   // call charged anything. A token already charged, or a workspace with no
   // profile, appends nothing and the caller must not log a phantom charge.
-  return { charged: (results[1]?.meta.changes ?? 0) > 0 };
+  if ((results[1]?.meta.changes ?? 0) > 0) return { charged: true };
+  const [observed] = (results[2]?.results ?? []) as Array<{ base: number; rp: number }>;
+  // A profile DID resolve and its price is outside the domain: the charge was
+  // refused, not merely absent. Anything else is the caller's to interpret.
+  if (observed !== undefined && (!isRpPrice(observed.rp) || observed.base > QUOTA_BASE_MAX)) {
+    return { charged: false, refused: "price-out-of-domain" };
+  }
+  return { charged: false };
 }
 
 /**

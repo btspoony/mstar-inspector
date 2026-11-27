@@ -1,8 +1,9 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, createTestD1, execMigrationScript } from "./helpers";
+import { createMigratedTestD1, createTestD1, execMigrationScript, type TestD1 } from "./helpers";
 import { rpFor } from "../../src/store/quota-store";
+import { BOT_MULTIPLIER_MAX, QUOTA_BASE_MAX } from "../../src/contracts/rp-limits";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import {
   chargeUsage,
@@ -581,5 +582,112 @@ describe("usage_events.bot_id (migration 0117)", () => {
         botId: "no-such-bot",
       }),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+  });
+});
+
+describe("F2-2 — the RP domain is enforced AT THE CHARGE, on every path", () => {
+  /**
+   * Own-bot and self-hosted deliveries select a bot WITHOUT pricing it (the
+   * relay's D15 shortcut and its no-plan branch), and a stored multiplier or
+   * profile written by some other path may sit outside the shared domain. The
+   * charge write is therefore the last line, and these cases pin it there: a
+   * multiplier above the bound and an out-of-domain profile both REFUSE, for an
+   * own bot (source `byok`) and a shared bot (source `shared`) alike, recording
+   * nothing at all.
+   */
+  const outOfDomain = (db: TestD1) => ({
+    events: db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get(),
+    bindings: db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get(),
+  });
+
+  test("an own bot's multiplier past the bound refuses instead of charging", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const result = await chargeUsage(db, {
+      ...USAGE,
+      executionToken: "own-over-bound",
+      source: "byok",
+      multiplier: BOT_MULTIPLIER_MAX + 1,
+    });
+    expect(result).toEqual({ charged: false, refused: "price-out-of-domain" });
+    // Nothing recorded: no usage row AND no binding pinned for a month it never
+    // legitimately metered.
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("a shared bot's multiplier past the bound refuses instead of charging", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    expect(
+      await chargeUsage(db, {
+        ...USAGE,
+        executionToken: "shared-over-bound",
+        source: "shared",
+        multiplier: 1e300,
+      }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("an own bot under a profile whose base weight is out of domain refuses", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // A profile no writer would have accepted, present because it reached the
+    // table another way. The multiplier is fine; the BASE is not.
+    db.raw
+      .prepare("UPDATE quota_profiles SET base_deep = ?, base_quick = ?")
+      .run(QUOTA_BASE_MAX + 1, QUOTA_BASE_MAX + 1);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "own-bad-profile", source: "byok", level: "deep" }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("a shared bot under that profile refuses too — the guard is on the write, not a path", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    db.raw.prepare("UPDATE quota_profiles SET base_standard = ?").run(QUOTA_BASE_MAX + 1);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "shared-bad-profile", source: "shared", level: "default" }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("both factors at their individual maxima still charge — the domain admits the pair", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // The shipped v1 profile's deep weight (6) at the largest multiplier is
+    // 6,000 RP: a whole number inside the ceiling domain, so it must CHARGE.
+    // The guard refuses only what no ceiling could bound.
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "max-pair", multiplier: BOT_MULTIPLIER_MAX, level: "deep" }),
+    ).toEqual({ charged: true });
+    expect(db.raw.query("SELECT rp FROM usage_events").get()).toEqual({ rp: 6 * BOT_MULTIPLIER_MAX });
+  });
+
+  test("replay of an out-of-domain token stays refused and still records nothing", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const input = { ...USAGE, executionToken: "replayed-bad", multiplier: BOT_MULTIPLIER_MAX + 1 };
+    expect(await chargeUsage(db, input)).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(await chargeUsage(db, input)).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+});
+
+describe("F2-2 — a paid replay is not a refusal, even if the bot's row went bad", () => {
+  test("a charged token replayed with an out-of-domain multiplier reports plain charged: false", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const token = "replay-after-reprice";
+    expect(await chargeUsage(db, { ...USAGE, executionToken: token })).toEqual({ charged: true });
+    // The bot is re-priced out of the domain after the run was paid. The replay
+    // must be recognised as a replay: raising a metering failure here would
+    // report a correctly charged review as unbilled.
+    db.raw.prepare("UPDATE review_bots SET multiplier = ? WHERE id = ?").run(BOT_MULTIPLIER_MAX + 500, "bot-usage");
+    expect(await chargeUsage(db, { ...USAGE, executionToken: token, multiplier: BOT_MULTIPLIER_MAX + 500 })).toEqual({
+      charged: false,
+    });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get()).toEqual({ n: 1 });
   });
 });

@@ -905,17 +905,18 @@ function seedInstallation(db: TestD1, botId: string, installationId: number, rem
 }
 
 describe("pending installations of a bot", () => {
-  test("lists the bot's live installations, newest seen first", async () => {
+  test("lists a bindable App's live installations, newest seen first", async () => {
     const db = createMigratedTestD1();
-    seedScopedBot(db, "bot-pending", { workspaceId: WS });
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-pending", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
     seedInstallation(db, "bot-pending", 100);
     seedInstallation(db, "bot-pending", 200, true);
 
-    const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", WS, true);
+    const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", true);
     expect(rows.map((row) => row.installation_id)).toEqual([100]);
   });
 
-  test("answers nothing for a bot the addressed workspace may not use", async () => {
+  test("answers nothing for an App that is not bindable — an owned App never is", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-other");
     seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
@@ -924,10 +925,26 @@ describe("pending installations of a bot", () => {
     seedInstallation(db, "bot-shared", 502);
 
     const store = createReviewBotsStore(db);
-    expect(await store.listPendingInstallations("bot-foreign", WS, true)).toEqual([]);
-    expect(
-      (await store.listPendingInstallations("bot-shared", WS, true)).map((row) => row.installation_id),
-    ).toEqual([502]);
+    // Not shared: the bind route refuses it outright, so it has no pending row.
+    expect(await store.listPendingInstallations("bot-foreign", true)).toEqual([]);
+    // Shared: bindable by App, and the row states bindability rather than hiding.
+    expect((await store.listPendingInstallations("bot-shared", true)).map((row) => row.installation_id)).toEqual([
+      502,
+    ]);
+  });
+
+  test("an App whose associated workspaces are all deleted is not bindable", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
+    seedInstallation(db, "bot-shared", 601);
+    const store = createReviewBotsStore(db);
+    expect((await store.listPendingInstallations("bot-shared", true)).map((r) => r.installation_id)).toEqual([601]);
+
+    // The App's ONLY association goes away: nothing is left to bind through, so
+    // the row the route can no longer honour disappears here too.
+    db.raw.run("UPDATE workspaces SET deleted_at = datetime('now') WHERE id = 'ws-other'");
+    expect(await store.listPendingInstallations("bot-shared", true)).toEqual([]);
   });
 });
 

@@ -136,8 +136,13 @@ export type AppInstallationRow = {
   seen_at: string;
 };
 
-/** The outcome of binding one installation to a workspace. */
-export type BindInstallationOutcome = "bound" | "bound_elsewhere" | "unknown";
+/**
+ * The outcome of binding one installation to a workspace. `app_unavailable` is
+ * the App losing its live+shared state between the route's admission and this
+ * write: the write refuses, and the route answers the same `unknown app` it
+ * answers for an App that was never there.
+ */
+export type BindInstallationOutcome = "bound" | "bound_elsewhere" | "unknown" | "app_unavailable";
 
 /**
  * One installation INCLUDING a removed one — the bound-state read. Unlike
@@ -451,6 +456,35 @@ function countOf(result: AppsStoreBatchResult): number {
 }
 
 /**
+ * The bind write. Its WHERE clause IS the bindability predicate — the route's
+ * admission (`bindAdmission`) and this write apply the same facts:
+ *
+ *  - the installation is live (`removed_at IS NULL`);
+ *  - it is unbound, bound to this workspace, or bound to a workspace that was
+ *    deleted (a dead binding counts as unbound — first binder wins);
+ *  - the App is still BINDABLE (`APP_BINDABLE_SQL` — live, shared, at least one
+ *    live association): the very predicate the route admitted through, so an
+ *    App unshared or deleted after the route checked it refuses HERE;
+ *  - the binding workspace is itself live.
+ *
+ * Being one UPDATE means the check and the write cannot be split by another
+ * writer: SQLite evaluates the predicate against the row it writes.
+ */
+function bindUpdate(db: AppsStoreD1, appId: string, installationId: number, workspaceId: string): AppsStoreStatement {
+  return db
+    .prepare(
+      `UPDATE github_app_installations SET bound_workspace_id = ?3
+        WHERE app_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
+          AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3
+               OR NOT EXISTS (SELECT 1 FROM workspaces w
+                               WHERE w.id = github_app_installations.bound_workspace_id AND w.deleted_at IS NULL))
+          AND EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ?1 AND ${APP_BINDABLE_SQL})
+          AND EXISTS (SELECT 1 FROM workspaces ws WHERE ws.id = ?3 AND ws.deleted_at IS NULL)`,
+    )
+    .bind(appId, installationId, workspaceId);
+}
+
+/**
  * The install state for `(appId, workspaceId)`, written only when the App and
  * the workspace are live and no state exists yet. `guard` is the writer's own
  * precondition on the batch: the bind passes `changes() > 0` (only a bind that
@@ -668,6 +702,20 @@ export const APP_READ_SQL = {
 } as const;
 
 const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.app_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL) OR EXISTS (SELECT 1 FROM app_installations ai WHERE ai.github_app_id = g.id AND ai.workspace_id = ?2)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+
+/**
+ * The App-level half of bindability, spelled ONCE for every surface that
+ * offers or performs a bind: a live SHARED App with at least one live
+ * associated workspace. It is `getLiveSharedAppById`'s own predicate — the
+ * resolver the bind route admits through — and `bindUpdate` and both pending
+ * lists reuse it, so a row can never offer an action the route refuses and the
+ * write can never accept one the route would not have admitted. Alias the App
+ * as `g`.
+ */
+const APP_BINDABLE_SQL = `g.deleted_at IS NULL AND g.scope = 'shared'
+          AND EXISTS (SELECT 1 FROM app_workspaces aw
+                        JOIN workspaces ws ON ws.id = aw.workspace_id AND ws.deleted_at IS NULL
+                       WHERE aw.app_id = g.id)`;
 
 /**
  * The bot-scoped read faces: the BOT's own columns, authorized from its own
@@ -1112,7 +1160,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           `SELECT g.*, w.workspace_id FROM github_apps g
              INNER JOIN app_workspaces w ON w.app_id = g.id
              INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
-            WHERE g.id = ?1 AND g.deleted_at IS NULL AND g.scope = 'shared'
+            WHERE g.id = ?1 AND ${APP_BINDABLE_SQL}
             LIMIT 1`,
         )
         .bind(appId)
@@ -1469,6 +1517,13 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * Bind a live installation to a workspace. First binder wins: a row already
      * bound to another live workspace is never rebound here; a binding whose
      * workspace was deleted counts as unbound.
+     *
+     * This write RE-STATES the route's admission in its own WHERE clause
+     * (`bindUpdate`), because the OAuth round trip happens between the two: an
+     * App unshared or deleted, or this workspace deleted, in that window
+     * refuses here instead of binding an installation the route no longer
+     * admits. The batch's guard is that same UPDATE, so the install state and
+     * the chain follow only a bind that actually wrote.
      */
     async bindInstallation(
       appId: string,
@@ -1476,15 +1531,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       workspaceId: string,
     ): Promise<BindInstallationOutcome> {
       const [res] = await db.batch([
-        db
-          .prepare(
-            `UPDATE github_app_installations SET bound_workspace_id = ?3
-           WHERE app_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
-             AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3
-                  OR NOT EXISTS (SELECT 1 FROM workspaces w
-                                  WHERE w.id = github_app_installations.bound_workspace_id AND w.deleted_at IS NULL))`,
-          )
-          .bind(appId, installationId, workspaceId),
+        bindUpdate(db, appId, installationId, workspaceId),
         // The workspace's install state, written in the same batch as the
         // ownership proof: this bind is its first installation of the App. A
         // refused bind (an UPDATE that matched nothing) writes none, and a later
@@ -1495,15 +1542,34 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         installChainCopy(db, appId, workspaceId),
       ]);
       if (res!.meta.changes > 0) return "bound";
-      const row = await db
-        .prepare(`SELECT removed_at FROM github_app_installations WHERE app_id = ? AND installation_id = ?`)
+      // Refused. Which fact failed decides what the caller is told, and the
+      // question is asked with the SAME "a dead binding counts as unbound" rule
+      // the UPDATE and `bindAdmission` use: a LEFT JOIN onto live workspaces
+      // nulls a binding whose workspace was deleted, so it is never reported as
+      // a conflict the user could act on.
+      const binding = await db
+        .prepare(
+          `SELECT i.removed_at, w.id AS bound_workspace_id FROM github_app_installations i
+             LEFT JOIN workspaces w ON w.id = i.bound_workspace_id AND w.deleted_at IS NULL
+            WHERE i.app_id = ? AND i.installation_id = ?`,
+        )
         .bind(appId, installationId)
-        .first<{ removed_at: string | null }>();
-      return row !== null && row.removed_at === null ? "bound_elsewhere" : "unknown";
+        .first<{ removed_at: string | null; bound_workspace_id: string | null }>();
+      if (binding === null || binding.removed_at !== null) return "unknown";
+      // A LIVE binding to another workspace is the one race the caller can
+      // understand (409). Everything else that refused — App unshared, deleted,
+      // left with no live association, or this workspace deleted — is the App
+      // no longer being bindable at all (404).
+      return binding.bound_workspace_id !== null && binding.bound_workspace_id !== workspaceId
+        ? "bound_elsewhere"
+        : "app_unavailable";
     },
 
     /**
      * One App's unbound live installations this workspace may bind.
+     *
+     * The rows exist only for a BINDABLE App (`APP_BINDABLE_SQL`, the route's own
+     * predicate), so this list and the bind it offers cannot disagree.
      *
      * `canBind` is the manager fact the bind route checks first; it is stamped
      * on every row so the App detail's install block renders the action only
@@ -1512,49 +1578,21 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      */
     async listPendingInstallations(
       appId: string,
-      workspaceId: string,
       canBind: boolean,
     ): Promise<Array<AppInstallationRow & { can_bind: boolean }>> {
       const res = await db
         .prepare(
           `SELECT i.installation_id, i.account_login, i.seen_at FROM github_app_installations i
-             JOIN github_apps b ON b.id = i.app_id
+             JOIN github_apps g ON g.id = i.app_id
             WHERE i.app_id = ?1 AND i.removed_at IS NULL
               AND NOT EXISTS (SELECT 1 FROM workspaces bw
                                WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
-              AND (b.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM app_workspaces w
-                               WHERE w.app_id = b.id AND w.workspace_id = ?2))
+              AND ${APP_BINDABLE_SQL}
             ORDER BY i.seen_at DESC, i.installation_id`,
         )
-        .bind(appId, workspaceId)
+        .bind(appId)
         .all<AppInstallationRow>();
       return res.results.map((row) => ({ ...row, can_bind: canBind }));
-    },
-
-    /**
-     * Every unbound live installation of an App the workspace may install
-     * through (its own, or a shared one) — the installed tab's "Waiting to be
-     * bound" rows, each carrying its App row id so the UI can name the App.
-     */
-    async listWorkspacePendingInstallations(
-      workspaceId: string,
-    ): Promise<Array<AppInstallationRow & { app_id: string }>> {
-      const res = await db
-        .prepare(
-          `SELECT i.installation_id, i.account_login, i.seen_at, i.app_id FROM github_app_installations i
-             JOIN github_apps b ON b.id = i.app_id AND b.deleted_at IS NULL
-            WHERE i.removed_at IS NULL
-              AND NOT EXISTS (SELECT 1 FROM workspaces bw
-                               WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
-              AND (b.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM app_workspaces w
-                               WHERE w.app_id = b.id AND w.workspace_id = ?1))
-            ORDER BY i.seen_at DESC, i.installation_id`,
-        )
-        .bind(workspaceId)
-        .all<AppInstallationRow & { app_id: string }>();
-      return res.results;
     },
 
     /**
@@ -1923,14 +1961,17 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * installation of a SHARED App, each carrying the App's display name, its
      * numeric GitHub id, and whether THIS caller may bind it.
      *
-     * Only shared Apps qualify. An owned App never binds (D47), so its own
-     * unbound installation is a webhook artifact, not an action: listing it
-     * offered a button the bind route answers 404 for. `can_bind` is the
-     * manager fact the bind route checks first, so a member's row states the
-     * installation without offering the action.
+     * Only a BINDABLE shared App qualifies (`APP_BINDABLE_SQL` — live, shared,
+     * one live association), the same predicate the bind route admits through;
+     * an owned App's unbound installation is a webhook artifact, not an action.
+     * `canBind` is the manager fact the route checks first, so a member's row
+     * states the installation without offering the action.
+     *
+     * The statement has no placeholders: a workspace predicate here would
+     * contradict "shared App" (the App belongs to its owner, not to the reader),
+     * so there is nothing to bind — D1 rejects surplus parameters outright.
      */
     async listWorkspacePendingInstallationsNamed(
-      workspaceId: string,
       canBind: boolean,
     ): Promise<
       Array<
@@ -1943,14 +1984,13 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                   g.github_app_id AS app_github_app_id,
                   COALESCE(g.github_name, g.github_slug, CAST(g.github_app_id AS TEXT)) AS app_name
              FROM github_app_installations i
-             JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
+             JOIN github_apps g ON g.id = i.app_id
             WHERE i.removed_at IS NULL
-              AND g.scope = 'shared'
               AND NOT EXISTS (SELECT 1 FROM workspaces bw
                                WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
+              AND ${APP_BINDABLE_SQL}
             ORDER BY i.seen_at DESC, i.installation_id`,
         )
-        .bind(workspaceId)
         .all<AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string }>();
       return res.results.map((row) => ({ ...row, can_bind: canBind }));
     },
