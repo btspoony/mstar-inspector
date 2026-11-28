@@ -100,7 +100,7 @@ export function insightsRepoOptions(repos: readonly string[], current: string): 
 }
 
 export type AppsPayload = {
-  viewer: { login: string; role: Role };
+  viewer: { login: string; role: WorkspaceRole };
   apps: Array<{
     github_app_id: number;
     owned?: boolean;
@@ -2332,7 +2332,7 @@ export function parseApps(data: unknown): AppsPayload | null {
   if (!isRecord(data) || !isRecord(data.viewer) || !Array.isArray(data.apps)) return null;
   const login = data.viewer.login;
   const role = data.viewer.role;
-  if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
+  if (typeof login !== "string" || !isWorkspaceRole(role)) return null;
   if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (data.month_plan_rp !== undefined && data.month_plan_rp !== null && !isStoredRpCeiling(data.month_plan_rp)) {
     return null;

@@ -2247,7 +2247,7 @@ const appListRoute = async (c: DashboardContext) => {
     );
   }
   return c.json({
-    viewer: { login: gate.user.github_login, role: gate.user.role },
+    viewer: { login: gate.user.github_login, role: gate.scope.role },
     ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
     // F10: an UNKNOWN ceiling is an explicit error state, not an omitted field
     // that a UI could read as "no ceiling".

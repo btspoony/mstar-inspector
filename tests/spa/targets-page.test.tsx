@@ -127,10 +127,10 @@ function confirmDisabled(markup: string): boolean {
 }
 
 describe("repository list (static SSR)", () => {
-  const renderView = (targets: TargetListRow[]): string =>
+  const renderView = (targets: TargetListRow[], onAdd?: () => void): string =>
     withLocation("/dashboard/acme/repos", () =>
       renderToStaticMarkup(
-        createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {} }),
+        createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {}, onAdd }),
       ),
     );
 
@@ -167,11 +167,16 @@ describe("repository list (static SSR)", () => {
   });
 
   test("an empty workspace keeps the fixed row and states the empty case", () => {
-    const markup = renderView([]);
+    const markup = renderView([], () => {});
     expect(markup).toContain(t("en", "targets.allRepositories"));
     expect(markup).toContain("0 repositories");
     expect(markup).toContain(t("en", "targets.emptyTitle"));
     expect(markup).toContain(t("en", "targets.emptyDescription"));
+    // R5: the empty state's single call to action is 添加仓库.
+    const action = /<div data-slot="empty-state-action"[^>]*>([\s\S]*?)<\/div>/.exec(markup);
+    if (action === null) throw new Error("the empty state rendered no action");
+    expect(action[0]).toContain("<button ");
+    expect(action[0]).toContain(`>${t("en", "targets.add")}</button>`);
   });
 
   test("the default face omits a pending target's row link", () => {
@@ -352,6 +357,36 @@ describe("the 待安装 filter (mounted)", () => {
     } finally {
       await act(async () => root.unmount());
       cleanup();
+    }
+  });
+});
+
+describe("the zero-target empty state (mounted)", () => {
+  test("its 添加仓库 action opens the one add dialog the page mounts", async () => {
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/apps")) {
+        return wireJson({
+          viewer: { login: "mallory", role: "owner" },
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector", github_slug: "acme-inspector" }],
+          shared_bots: [],
+        });
+      }
+      if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
+      if (wire.url.endsWith("/api/apps/9401")) return settingsWith(INSTALLED);
+      return wireJson({});
+    });
+    try {
+      expect(view.dialog()).toBeNull();
+      const emptyState = view.win.document.querySelector('[data-slot="empty-state-action"]');
+      const action = [...(emptyState?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      expect(action).toBeDefined();
+      await view.click(action as unknown as DomElement | undefined);
+      expect(view.dialog()?.textContent ?? "").toContain(t("en", "targets.addDialog.title"));
+      expect(view.win.document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    } finally {
+      await view.unmount();
     }
   });
 });
