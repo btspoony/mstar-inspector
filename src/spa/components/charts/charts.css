@@ -15,7 +15,7 @@
  * repo controls (no .chart-frame ancestor).
  *
  * Version coupling: the recharts-internal class names targeted here
- * (.recharts-cartesian-*) couple to recharts 2.15.4 — a recharts upgrade
+ * (.recharts-cartesian-*) couple to recharts 3.11.1 — a recharts upgrade
  * must re-verify the chart pins (the probe pins render shape, not
  * these class names).
  *
