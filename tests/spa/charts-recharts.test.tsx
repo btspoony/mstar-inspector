@@ -1,16 +1,21 @@
-import { describe, expect, test } from "bun:test";
-import { renderToStaticMarkup } from "react-dom/server";
-import { BarChart, Bar, XAxis, YAxis } from "recharts";
-import { TrendChart, type TrendPoint } from "../../src/spa/components/charts/TrendChart";
-import {
-  attachWidthObserver,
-  DEFAULT_CHART_WIDTH,
-} from "../../src/spa/components/charts/useContainerWidth";
-import {
-  insightsTrendPoints,
-  type InsightsSummary,
-  type InsightsTrendPoint,
-} from "../../src/spa/pages/data";
+import { afterAll, describe, expect, test } from "bun:test";
+import { act, createElement, type ReactElement } from "react";
+import { createRoot } from "react-dom/client";
+import { installDom } from "./dom";
+import type { InsightsSummary, InsightsTrendPoint } from "../../src/spa/pages/data";
+
+// recharts 3 reads its SSR flag when the module is imported and renders an
+// empty wrapper until a layout effect reports the chart size. Mount in the
+// browser-facing DOM path instead: install the DOM first, then import.
+const { win, cleanup } = installDom("http://localhost/");
+afterAll(cleanup);
+
+const { BarChart, Bar, XAxis, YAxis } = await import("recharts");
+const { TrendChart } = await import("../../src/spa/components/charts/TrendChart");
+const { attachWidthObserver, DEFAULT_CHART_WIDTH } = await import(
+  "../../src/spa/components/charts/useContainerWidth"
+);
+const { insightsTrendPoints } = await import("../../src/spa/pages/data");
 
 const DATA = [
   { name: "must-fix", count: 7 },
@@ -18,56 +23,84 @@ const DATA = [
   { name: "nit", count: 3 },
 ];
 
+async function mountDom(el: ReactElement): Promise<{
+  container: HTMLElement;
+  cleanup: () => Promise<void>;
+}> {
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  await act(async () => root.render(el));
+  return {
+    container: container as unknown as HTMLElement,
+    cleanup: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+const mount = async (el: ReactElement): Promise<string> => {
+  const { container, cleanup: unmount } = await mountDom(el);
+  const html = container.innerHTML;
+  await unmount();
+  return html;
+};
+
 const renderBar = () =>
-  renderToStaticMarkup(
-    <BarChart width={520} height={200} data={DATA}>
-      <XAxis dataKey="name" />
-      <YAxis allowDecimals={false} />
-      <Bar dataKey="count" isAnimationActive={false} />
-    </BarChart>,
+  mount(
+    createElement(
+      BarChart,
+      { width: 520, height: 200, data: DATA },
+      createElement(XAxis, { dataKey: "name" }),
+      createElement(YAxis, { allowDecimals: false }),
+      createElement(Bar, { dataKey: "count", isAnimationActive: false }),
+    ),
   );
 
 const geometryRects = (html: string): string[] =>
-  (html.match(/<rect\b[^>]*>/g) ?? []).filter(
-    (rect) => /\bx="\d+"/.test(rect) && /\by="\d+"/.test(rect) && /\bheight="[1-9]\d*"/.test(rect),
-  );
+  (html.match(/<path\b[^>]*>/g) ?? []).filter((rect) => {
+    const y = /\by="([0-9.]+)"/.exec(rect)?.[1];
+    const height = /\bheight="([0-9.]+)"/.exec(rect)?.[1];
+    return y !== undefined && height !== undefined && Number(height) > 0;
+  });
 
-describe("recharts pin probe", () => {
-  test("static render emits the full-size chart surface (never the 3.x empty-wrapper face)", () => {
-    const html = renderBar();
+describe("recharts chart surface (client face)", () => {
+  test("renders the full-size chart surface, never the empty-wrapper face", async () => {
+    const html = await renderBar();
     expect(html).toContain('class="recharts-surface" width="520" height="200"');
     expect(html).toContain('viewBox="0 0 520 200"');
     expect(html).toContain("<svg");
   });
 
-  test("bars render as real series geometry — rect with non-empty x/y/height and data-driven labels", () => {
-    const html = renderBar();
+  test("bars render as real series geometry — path with non-empty x/y/height and data-driven labels", async () => {
+    const html = await renderBar();
     expect(geometryRects(html).length).toBeGreaterThanOrEqual(1);
     expect(html).toContain("must-fix");
     expect(html).toContain("should-fix");
     expect(html).toContain("nit");
   });
 
-  test("the pin path never routes through ResponsiveContainer — fixed dimensions only", () => {
-    const html = renderBar();
+  test("the pin path never routes through ResponsiveContainer — fixed dimensions only", async () => {
+    const html = await renderBar();
     expect(html).not.toContain("responsive-container");
   });
 });
 
 describe("measured-width pin (v0.3.4 — true-size chart rendering)", () => {
-  const points: TrendPoint[] = [
+  const points: { week: string; reviews: number; findings: number }[] = [
     { week: "2026-08-17", reviews: 1, findings: 2 },
     { week: "2026-08-24", reviews: 3, findings: 4 },
   ];
 
-  test("the static/SSR face renders at the fixed 560 default — no viewBox upscale", () => {
+  test("the default face renders at the fixed 560 width — no viewBox upscale", async () => {
     expect(DEFAULT_CHART_WIDTH).toBe(560);
-    const html = renderToStaticMarkup(
-      <TrendChart
-        points={points}
-        seriesLabels={{ reviews: "Reviews", findings: "Findings" }}
-        ariaLabel="Weekly trend"
-      />,
+    const html = await mount(
+      createElement(TrendChart, {
+        points,
+        seriesLabels: { reviews: "Reviews", findings: "Findings" },
+        ariaLabel: "Weekly trend",
+      }),
     );
     expect(html).toContain('width="560"');
     expect(html).toContain('height="166"');
@@ -116,7 +149,7 @@ describe("measured-width pin (v0.3.4 — true-size chart rendering)", () => {
     }
   });
 
-  test("no ResizeObserver (SSR face, old webviews) keeps the default face — wiring no-ops", () => {
+  test("no ResizeObserver (old webviews) keeps the default face — wiring no-ops", () => {
     const original = globalThis.ResizeObserver;
     delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
     try {
@@ -201,18 +234,18 @@ describe("insightsTrendPoints (window-bucketing contract)", () => {
   });
 });
 
-describe("trend card static render (day and week window faces)", () => {
+describe("trend card client render (day and week window faces)", () => {
   const renderTrend = (points: InsightsTrendPoint[]) =>
-    renderToStaticMarkup(
-      <TrendChart
-        points={points.map((row) => ({ week: row.bucket_start, reviews: row.reviews, findings: row.findings }))}
-        seriesLabels={{ reviews: "Reviews", findings: "Findings" }}
-        ariaLabel="Trend"
-      />,
+    mount(
+      createElement(TrendChart, {
+        points: points.map((row) => ({ week: row.bucket_start, reviews: row.reviews, findings: row.findings })),
+        seriesLabels: { reviews: "Reviews", findings: "Findings" },
+        ariaLabel: "Trend",
+      }),
     );
 
-  test("day-window face: fixed-size static chart, real geometry, no ResponsiveContainer", () => {
-    const html = renderTrend(insightsTrendPoints(DAY_WINDOW));
+  test("day-window face: fixed-size chart, real geometry, no ResponsiveContainer", async () => {
+    const html = await renderTrend(insightsTrendPoints(DAY_WINDOW));
     expect(html).toContain('width="560"');
     expect(html).toContain('height="166"');
     expect(html).toContain('viewBox="0 0 560 166"');
@@ -221,8 +254,8 @@ describe("trend card static render (day and week window faces)", () => {
     expect(html).toContain("9/9");
   });
 
-  test("week-window face: the zero-filled empty week stays on the axis at fixed size", () => {
-    const html = renderTrend(insightsTrendPoints(WEEK_WINDOW));
+  test("week-window face: the zero-filled empty week stays on the axis at fixed size", async () => {
+    const html = await renderTrend(insightsTrendPoints(WEEK_WINDOW));
     expect(html).toContain('width="560"');
     expect(html).toContain('height="166"');
     expect(html).not.toContain("responsive-container");
