@@ -471,7 +471,9 @@ describe("the bot page's share switch", () => {
       await act(async () => {
         view
           .buttonWith(t(locale, "common.save"))
-          ?.dispatchEvent(new view.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+          ?.dispatchEvent(
+            new view.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as unknown as Event,
+          );
       });
       let pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
       expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 5 } }]);
