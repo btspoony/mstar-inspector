@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { t } from "../../i18n";
 import {
   Button,
@@ -95,16 +95,16 @@ export function BotPricingSection({
 
   const [multiplier, setMultiplier] = useState(String(app.multiplier ?? 1));
   const [cap, setCap] = useState(monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit));
-  // Whether the ceiling field holds a user edit. The editor renders the stored
-  // ceiling at the read faces' two-decimal quantum, so converting it back on a
-  // save nobody asked for would rewrite `1234 RP` as `1230 RP` (or round a
-  // sub-0.005-Credit ceiling to `0.00` and refuse it). Untouched therefore
-  // sends the stored RP verbatim.
-  const [capEdited, setCapEdited] = useState(false);
-  // The multiplier is edit-tracked for the same reason, and one more: a stored
-  // price below the write floor (a legacy ×0.001) must not refuse a save that
-  // only touches the ceiling — the partial PATCH never carries it.
-  const [multEdited, setMultEdited] = useState(false);
+  // Whether each field holds a user edit, and its text as of the latest
+  // keystroke: refs, because a save reads them after its PATCH, when the
+  // handler's state copy is the one taken at request start. No render depends
+  // on either. An untouched field is omitted — the editor renders the stored
+  // ceiling at the read faces' two-decimal quantum, so converting it back
+  // would rewrite `1234 RP` as `1230 RP` (or round a sub-0.005-Credit ceiling
+  // to `0.00` and refuse it) — and a stored multiplier below the write floor
+  // (a legacy ×0.001) must not refuse a save that only touches the ceiling.
+  const edited = useRef({ cap: false, multiplier: false });
+  const drafts = useRef({ cap, multiplier: String(app.multiplier ?? 1) });
   const [busy, setBusy] = useState(false);
   // A committed pricing write whose re-read failed leaves stored values this
   // page cannot show, so every further write is refused until a page reload —
@@ -114,14 +114,22 @@ export function BotPricingSection({
   const [shareNotice, setShareNotice] = useState<OpNotice | null>(null);
   const [pending, setPending] = useState<PendingAction | null>(null);
 
-  // A landed write re-reads the payload; the stored values replace the draft.
+  // A landed write re-reads the payload; the stored values replace the draft —
+  // except a field the user typed into after the request that produced them
+  // started, whose newer draft stays pending.
   useEffect(() => {
-    setMultiplier(String(app.multiplier ?? 1));
+    const storedMultiplier = String(app.multiplier ?? 1);
     // The same two-decimal quantum the read faces render: 1,234 RP reads
     // 1.23 here exactly as it does in `1.23 Credits` there.
-    setCap(monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit));
-    setCapEdited(false);
-    setMultEdited(false);
+    const storedCap = monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit);
+    if (!edited.current.multiplier) {
+      setMultiplier(storedMultiplier);
+      drafts.current.multiplier = storedMultiplier;
+    }
+    if (!edited.current.cap) {
+      setCap(storedCap);
+      drafts.current.cap = storedCap;
+    }
   }, [app.multiplier, monthlyRp, rpPerCredit]);
 
   async function submitScope(scope: "owned" | "shared"): Promise<OpNotice> {
@@ -154,7 +162,11 @@ export function BotPricingSection({
     // page's stored copy would overwrite a value another admin changed
     // meanwhile — and the multiplier would additionally refuse a ceiling-only
     // save on a legacy price below the write floor.
-    const capValue = capEdited ? parseCreditsInput(cap, rate) : undefined;
+    // The submitted text is the snapshot a landing has to be compared against:
+    // a keystroke that arrives while the request is in flight must survive it.
+    const submittedCap = edited.current.cap ? cap : null;
+    const submittedMultiplier = shared && edited.current.multiplier ? multiplier : null;
+    const capValue = submittedCap === null ? undefined : parseCreditsInput(submittedCap, rate);
     if (capValue === "invalid") {
       setNotice({ kind: "error", message: t(locale, "bots.overrideInvalid") });
       return;
@@ -162,8 +174,8 @@ export function BotPricingSection({
     // The multiplier is inert (and its control disabled) while unshared, so
     // an unshared save omits it — the route keeps the stored value.
     let nextMultiplier: number | undefined;
-    if (shared && multEdited) {
-      nextMultiplier = Number(multiplier);
+    if (submittedMultiplier !== null) {
+      nextMultiplier = Number(submittedMultiplier);
       if (!isBotMultiplier(nextMultiplier)) {
         setNotice({ kind: "error", message: t(locale, "botDetail.share.multiplierInvalid") });
         return;
@@ -186,12 +198,15 @@ export function BotPricingSection({
         setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
         return;
       }
+      // A submitted field is only no longer pending if its draft still reads
+      // what the PATCH carried; one retyped meanwhile stays dirty, so the next
+      // save submits it. Cleared before the re-read — not in the payload
+      // effect — so a failed re-read cannot resurrect a committed edit.
+      if (submittedCap !== null && drafts.current.cap === submittedCap) edited.current.cap = false;
+      if (submittedMultiplier !== null && drafts.current.multiplier === submittedMultiplier) {
+        edited.current.multiplier = false;
+      }
       const reloaded = await onReload();
-      // The PATCH is committed: neither field is a pending edit any more, so a
-      // later save must never replay a value this page only remembers. Clearing
-      // here — not in the payload effect — is what survives a failed re-read.
-      setCapEdited(false);
-      setMultEdited(false);
       if (reloaded) {
         setNotice({ kind: "success", message: t(locale, "settings.changesSaved") });
       } else {
@@ -258,7 +273,8 @@ export function BotPricingSection({
               value={shared ? multiplier : "1"}
               onChange={(event) => {
                 setMultiplier(event.target.value);
-                setMultEdited(true);
+                drafts.current.multiplier = event.target.value;
+                edited.current.multiplier = true;
               }}
             />
           </label>
@@ -271,7 +287,8 @@ export function BotPricingSection({
               value={cap}
               onChange={(event) => {
                 setCap(event.target.value);
-                setCapEdited(true);
+                drafts.current.cap = event.target.value;
+                edited.current.cap = true;
               }}
             />
             <span className="text-xs text-muted-foreground">{t(locale, "botDetail.share.monthlyCapHint")}</span>

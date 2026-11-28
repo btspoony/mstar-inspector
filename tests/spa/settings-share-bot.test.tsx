@@ -63,6 +63,7 @@ async function mount(
   status = 200,
   body = "{}",
   reloadOk = true,
+  gate?: Promise<void>,
 ) {
   const { win, cleanup } = installDom("http://localhost/dashboard/acme/repos");
   const container = win.document.createElement("div");
@@ -77,6 +78,8 @@ async function mount(
       method: init?.method ?? "GET",
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
     });
+    // Lets a test hold a PATCH in flight and type into the page meanwhile.
+    if ((init?.method ?? "GET") === "PATCH") await gate;
     return new Response(body, { status, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
   try {
@@ -431,6 +434,54 @@ describe("the bot page's share switch", () => {
 
       expect(view.sent.filter((row) => row.path.endsWith("/pricing"))).toEqual([]);
       expect(String(view.container.textContent)).toContain(t(locale, "botSettings.nothingToSave"));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a field typed into while the save is in flight stays pending, and the next save sends it", async () => {
+    // The PATCH carries ×5 and the operator retypes ×7 before it lands. The
+    // landing confirms ×5 only: ×7 is still on screen, so it must stay dirty
+    // and go out on the next save instead of being silently retired.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mount(
+      { rp_per_credit: 1000, app: { ...payload().app, scope: "shared", multiplier: 2, monthly_rp: 1234 } },
+      200,
+      "{}",
+      true,
+      gate,
+    );
+    try {
+      const multiplier = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.multiplier")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, multiplier, "5");
+      // Dispatch the click without awaiting the handler: its PATCH is gated.
+      await act(async () => {
+        view
+          .buttonWith(t(locale, "common.save"))
+          ?.dispatchEvent(new view.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      let pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 5 } }]);
+
+      await typeInto(view.win, multiplier, "7");
+      release();
+      await act(async () => {});
+      expect(view.reloads).toHaveLength(1);
+      expect(String(view.container.textContent)).toContain(t(locale, "settings.changesSaved"));
+      // The newer draft survived the landing and is still the field's text.
+      expect(multiplier.value).toBe("7");
+
+      await view.click(view.buttonWith(t(locale, "common.save")));
+      pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([
+        { path: expect.any(String), method: "PATCH", body: { multiplier: 5 } },
+        { path: expect.any(String), method: "PATCH", body: { multiplier: 7 } },
+      ]);
     } finally {
       await view.cleanup();
     }
