@@ -270,7 +270,7 @@ describe("face selection — the served relation is the authority", () => {
       expect(container.querySelector('[data-slot="installed-chain"]')).toBeNull();
     });
     expect(html).toContain("Stored credentials");
-    expect(html).toContain("Share this app");
+    expect(html).toContain(t("en", "apps.shareAppStop"));
   });
 });
 
@@ -295,69 +295,19 @@ describe("installed face — manager", () => {
     expect(markup).toContain("4803300");
   });
 
-  test("the metric band is 挂载的机器人 / 安装 / 本月已用 with the shared ceiling presentation", () => {
+  test("the metric band is 挂载的机器人 / 安装 / 本月已用, spend as a bare figure", () => {
     expect(markup).toContain("Mounted bots");
     expect(markup).toContain("Installations");
     expect(markup).toContain("Used this month");
     // 620 + 45 + 5 RP at 500 RP/Credit: the archived row's past spend is still
     // this month's spend (archiving stops selection, not accounting).
     expect(markup).toContain("1.34 Credits");
+    // The band states the number only — no ceiling pair, no unlimited suffix.
+    expect(markup).not.toContain("1.34 Credits /");
+    expect(markup).not.toContain("1.34 Credits ·");
   });
 
-  test("the aggregate 本月已用 is the SAME ceiling presentation the Apps list renders", async () => {
-    // Mixed chain + a stated plan ceiling: used/total rides the figure.
-    const ceiling = renderToStaticMarkup(
-      createElement(AppDetailView, {
-        locale: "en",
-        appId: "app-demo",
-        payload: managerPayload(),
-        groups: [],
-        notice: null,
-        search: SEARCH,
-        from: "installed",
-        mountable: MOUNTABLE,
-        planRp: 5000,
-        onReload: async () => true,
-        onSearch: () => {},
-      }),
-    );
-    expect(ceiling).toContain("1.34 Credits / 10.00 Credits");
-
-    // An all-own chain is unbounded whatever the plan says.
-    const own = renderFace(
-      { ...managerPayload(), chain: CHAIN.map((row) => ({ ...row, owned: true })) },
-      "installed",
-    );
-    expect(own).toContain("1.34 Credits · unlimited (own bot)");
-
-    // A non-own chain with no plan ceiling states it; it never reads bare.
-    const none = renderFace(managerPayload(), "installed");
-    expect(none).toContain("1.34 Credits · no ceiling");
-
-    // The F10 unknown state is the error marker, never "no ceiling".
-    const unknown = renderToStaticMarkup(
-      createElement(AppDetailView, {
-        locale: "en",
-        appId: "app-demo",
-        payload: managerPayload(),
-        groups: [],
-        notice: null,
-        search: SEARCH,
-        from: "installed",
-        mountable: MOUNTABLE,
-        quotaError: true,
-        onReload: async () => true,
-        onSearch: () => {},
-      }),
-    );
-    expect(unknown).toContain("ceiling unavailable");
-    // The band itself must not claim a ceiling state it does not know —
-    // per-row cells may legitimately say "no ceiling", so check the band.
-    const bandZone = unknown.slice(unknown.indexOf("Used this month"), unknown.indexOf("Used this month") + 400);
-    expect(bandZone).toContain("ceiling unavailable");
-    expect(bandZone).not.toContain("no ceiling");
-
-    // NO chain mounted is nothing metered — the dash, not 0.00 Credits.
+  test("no chain mounted reads the dash, never 0.00 Credits", () => {
     const empty = renderFace({ ...managerPayload(), chain: [] }, "installed");
     expect(empty).not.toContain("0.00 Credits");
   });
@@ -451,8 +401,9 @@ describe("installed face — manager", () => {
     await withMarkup(markup, (container) => {
       const link = container.querySelector('a[href$="/bots/bot-studio"]');
       expect(link?.textContent).toBe("Studio Reviewer");
-      // The mount identity is name + description + the muted internal id.
-      const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+      // The mount identity is name in the summary, description and the muted
+      // internal id in the row's own disclosure.
+      const row = Array.from(container.querySelectorAll('[data-slot="installed-chain"] li')).find((tr) =>
         tr.textContent?.includes("Studio Reviewer"),
       );
       expect(row?.textContent).toContain("bot-studio");
@@ -506,39 +457,44 @@ describe("installed face — manager", () => {
     expect(markup).toContain("omp-1.4");
     // A bot with no default chain configured reads the dash, not a blank cell.
     await withMarkup(markup, (container) => {
-      const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+      const row = Array.from(container.querySelectorAll('[data-slot="installed-chain"] li')).find((tr) =>
         tr.textContent?.includes("Security Scanner"),
       );
       expect(row?.textContent).toContain("—");
     });
   });
 
-  test("each row's spend states its ceiling: own bot unlimited, capped, no ceiling", () => {
-    // Row 1 is this workspace's own bot — no ceiling applies to it.
-    expect(markup).toContain("1.24 Credits · unlimited (own bot)");
-    // Row 2 is shared with a 1,000 RP cap at 500 RP/Credit: 0.09 / 2.00 Credits.
-    expect(markup).toContain("0.09 Credits / 2.00 Credits");
+  test("each summary row states the spend alone; the ceiling rides its disclosure", () => {
+    // Row 1 is this workspace's own bot: the summary is the bare figure.
+    expect(markup).toContain("1.24 Credits");
+    expect(markup).not.toContain("1.24 Credits · unlimited (own bot)");
+    // Row 2 is shared with a 1,000 RP cap: the cap is its disclosure's fact.
+    expect(markup).toContain("0.09 Credits");
+    expect(markup).not.toContain("0.09 Credits / 2.00 Credits");
+    expect(markup).toContain("2.00 Credits");
     // Row 3 is shared with no cap of its own.
-    expect(markup).toContain("0.01 Credits · no ceiling");
+    expect(markup).toContain(t("en", "credits.unbounded"));
   });
 
   /**
    * The relay enforces the VIEWER's workspace ceiling: its
    * `bot_quota_overrides` row when one exists, else the bot's default
-   * (`readBotCeiling`). The row must state that number, not `monthly_rp`.
-   * Fixture rate: 500 RP/Credit.
+   * (`readBotCeiling`). The disclosure must state that number, not
+   * `monthly_rp`. Fixture rate: 500 RP/Credit.
    */
-  const spendCell = (rows: AppChainEntry[]): Promise<string> =>
-    withMarkup(
-      renderFace({ ...managerPayload(), chain: rows }),
-      (container) =>
-        Array.from(container.querySelectorAll("tbody tr td"))
-          .map((td) => td.textContent ?? "")
-          .find((text) => text.includes("Credits")) ?? "",
-    );
+  const spendAndCeiling = (rows: AppChainEntry[]): Promise<{ spend: string; ceiling: string }> =>
+    withMarkup(renderFace({ ...managerPayload(), chain: rows }), (container) => {
+      const row = container.querySelector('[data-slot="installed-chain"] li')!;
+      const spend =
+        [...row.querySelectorAll("summary span")]
+          .map((node) => node.textContent ?? "")
+          .find((text) => text.includes("Credits")) ?? "";
+      const detail = [...row.querySelectorAll("dl dd")].map((node) => node.textContent ?? "");
+      return { spend, ceiling: detail.at(-1) ?? "" };
+    });
 
-  test("an override replaces the bot's default in the row", async () => {
-    const cell = await spendCell([
+  test("an override replaces the bot's default in the disclosure", async () => {
+    const row = await spendAndCeiling([
       chainRow({
         position: 1,
         bot_id: "bot-overridden",
@@ -548,12 +504,13 @@ describe("installed face — manager", () => {
         effective_monthly_rp: 5000,
       }),
     ]);
-    // 45 RP used / the 5,000 RP override — never the bot's 1,000 default.
-    expect(cell).toBe("0.09 Credits / 10.00 Credits");
+    // 45 RP used in the summary; the 5,000 RP override — never the 1,000 default.
+    expect(row.spend).toBe("0.09 Credits");
+    expect(row.ceiling).toBe("10.00 Credits");
   });
 
   test("an override applies even when the bot itself has no default", async () => {
-    const cell = await spendCell([
+    const row = await spendAndCeiling([
       chainRow({
         position: 1,
         bot_id: "bot-override-only",
@@ -563,11 +520,12 @@ describe("installed face — manager", () => {
         effective_monthly_rp: 5000,
       }),
     ]);
-    expect(cell).toBe("0.09 Credits / 10.00 Credits");
+    expect(row.spend).toBe("0.09 Credits");
+    expect(row.ceiling).toBe("10.00 Credits");
   });
 
   test("no override and no default reads as no ceiling", async () => {
-    const cell = await spendCell([
+    const row = await spendAndCeiling([
       chainRow({
         position: 1,
         bot_id: "bot-uncapped",
@@ -577,7 +535,25 @@ describe("installed face — manager", () => {
         effective_monthly_rp: null,
       }),
     ]);
-    expect(cell).toBe("0.09 Credits · no ceiling");
+    expect(row.spend).toBe("0.09 Credits");
+    expect(row.ceiling).toBe(t("en", "credits.unbounded"));
+  });
+
+  test("an unavailable shared bot reads no ceiling, never own-bot wording", async () => {
+    const row = await spendAndCeiling([
+      chainRow({
+        position: 1,
+        bot_id: "bot-withdrawn",
+        name: "Withdrawn",
+        owned: false,
+        available: false,
+        month_used_rp: 45,
+        effective_monthly_rp: null,
+      }),
+    ]);
+    expect(row.spend).toBe("0.09 Credits");
+    expect(row.ceiling).toBe(t("en", "credits.unbounded"));
+    expect(row.ceiling).not.toBe(t("en", "credits.unboundedOwn"));
   });
 
   test("the App name is stated once, and the install entry survives that", async () => {

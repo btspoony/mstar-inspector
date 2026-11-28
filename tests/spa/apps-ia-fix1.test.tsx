@@ -82,12 +82,14 @@ describe("F1 — installed membership is an installation relation, not visibilit
 
 describe("F2 — URL truth", () => {
   test("an unknown nonempty tab resolves to the real default, and the default is omitted", () => {
-    expect(appsTabOf("?tab=bogus", false)).toBe("created");
-    expect(appsTabOf("?tab=bogus", true)).toBe("installed");
+    expect(appsTabOf("?tab=bogus")).toBe("installed");
+    expect(appsTabOf("?tab=created")).toBe("created");
+    expect(appsTabOf("")).toBe("installed");
     // The retired bots tab is a redirect, not a tab: it resolves to the default here.
-    expect(appsTabOf("?tab=bots", true)).toBe("installed");
+    expect(appsTabOf("?tab=bots")).toBe("installed");
     expect(appsTabQuery("created", "created")).toBe("");
     expect(appsTabQuery("installed", "created")).toBe("?tab=installed");
+    expect(appsTabQuery("installed", "installed")).toBe("");
   });
 });
 

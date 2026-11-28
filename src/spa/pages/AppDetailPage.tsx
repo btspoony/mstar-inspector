@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ChevronRight } from "lucide-react";
 import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
 import { MetricBand, type Metric } from "@/components/MetricBand";
@@ -29,12 +29,10 @@ import {
   postPinnedOutcome,
 } from "./SettingsPage";
 import { AppDeliveryTab } from "./AppDeliveryTab";
-import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
 import { loadUsableBots } from "./AppsPage";
-import { usageCeilingCell } from "./credits";
 import { apiBase } from "../workspace-base";
 import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
@@ -44,6 +42,7 @@ import {
   appDetailSearchQuery,
   appDisplayName,
   appStatusPill,
+  formatCredits,
   hasTargetFacts,
   parseAppDetailFrom,
   parseAppDetailSearch,
@@ -151,11 +150,6 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   // "add" list must exclude what the chain already carries, and the server's
   // ordering (D18) is the order an operator expects.
   const [mountable, setMountable] = useState<Array<{ id: string; name: string; description?: string | null }>>([]);
-  // The workspace's plan ceiling facts ride the same read as the chooser:
-  // the installed face's aggregate month metric pairs its spend with them
-  // exactly like the Apps list does.
-  const [planRp, setPlanRp] = useState<number | null>(null);
-  const [quotaError, setQuotaError] = useState(true);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
@@ -226,8 +220,6 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
               .filter((bot) => !bot.archived)
               .map((bot) => ({ id: bot.id, name: bot.name, description: bot.description })),
           );
-          setPlanRp(payload.plan_monthly_rp);
-          setQuotaError(payload.quota_error === true);
         }
       })
       .catch(() => {
@@ -299,8 +291,6 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           modelsLoading={modelsLoading}
           notice={notice}
           search={search}
-          planRp={planRp}
-          quotaError={quotaError}
           from={from}
           mountable={mountable}
           onReload={load}
@@ -429,125 +419,14 @@ export function InstalledChainSection({
   onReordered: () => Promise<unknown>;
 }) {
   const { busy, notice, move, remove, add } = useChainOrderEditor(locale, appId, chain, onReordered);
-  const columns: DataTableColumn<AppChainEntry>[] = [
-    {
-      header: t(locale, "apps.chain.columnPosition"),
-      cell: (row) => <span className="tabular-nums text-muted-foreground">{row.position}</span>,
-    },
-    {
-      header: t(locale, "apps.chain.columnBot"),
-      cell: (row) => {
-        const href = `${apiBase()}/bots/${encodeURIComponent(row.bot_id)}`;
-        return (
-          <span className="flex flex-wrap items-center gap-2">
-            <a
-              className="font-semibold text-foreground no-underline hover:underline"
-              href={href}
-              onClick={(event) => spaClick(href, event)}
-            >
-              {row.name}
-            </a>
-            <span className="font-mono text-xs text-muted-foreground">{row.bot_id}</span>
-            <span className="text-muted-foreground">
-              {t(locale, row.owned ? "apps.chain.tagMine" : "apps.chain.tagShared")}
-            </span>
-            {/* An archived bot stays mounted and listed; the relay never selects
-                it, so the row says so instead of offering a bot that will not run. */}
-            {row.archived ? (
-              <span className="text-(--tone-warn-fg)">{t(locale, "appDetail.installed.archivedSkipped")}</span>
-            ) : row.available ? null : (
-              <span className="text-(--tone-warn-fg)">{t(locale, "apps.chain.rowUnavailable")}</span>
-            )}
-          </span>
-        );
-      },
-      meta: (row) => (row.description === null || row.description === "" ? null : <span>{row.description}</span>),
-    },
-    {
-      header: t(locale, "apps.chain.columnProvider"),
-      cell: (row) => <span className="text-muted-foreground">{row.provider_workspace}</span>,
-    },
-    {
-      header: t(locale, "settings.defaultChain"),
-      cell: (row) => (
-        <span className="font-mono text-muted-foreground">{row.default_chain ?? "—"}</span>
-      ),
-    },
-    {
-      header: t(locale, "settings.runtimeHarness"),
-      // Withheld once the bot is no longer visible here: the mount stays, its
-      // post-withdrawal configuration does not.
-      cell: (row) => <span className="font-mono text-muted-foreground">{row.runtime ?? "—"}</span>,
-    },
-    {
-      header: t(locale, "apps.chain.columnMultiplier"),
-      cell: (row) => <span className="tabular-nums">×{row.owned || !row.available ? 1 : row.multiplier}</span>,
-    },
-    {
-      header: t(locale, "credits.usedThisMonth"),
-      align: "right",
-      cell: (row) => (
-        <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
-          {/* The ceiling rides the figure (ADR § Units): an own bot is unbounded,
-              a shared bot states the cap the RELAY enforces for this workspace
-              (its override, else the bot's default), and says so when there is
-              none at all. The bot's raw default is never served to a viewer —
-              `effective_monthly_rp` is the only ceiling this face has. */}
-          {usageCeilingCell(locale, { used_rp: row.month_used_rp }, {
-            owned: row.owned,
-            quotaError: false,
-            ceilingRp: row.effective_monthly_rp,
-            rpPerCredit,
-          })}
-        </span>
-      ),
-    },
-  ];
-  if (canEditChain) {
-    columns.push({
-      // No header copy: the buttons carry their own aria-labels.
-      header: "",
-      cell: (row) => {
-        const index = chain.indexOf(row);
-        return (
-          <span className="flex items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={busy || index === 0}
-              aria-label={t(locale, "apps.chain.moveUp", { bot: row.name })}
-              onClick={() => move(index, index - 1)}
-            >
-              ↑
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={busy || index === chain.length - 1}
-              aria-label={t(locale, "apps.chain.moveDown", { bot: row.name })}
-              onClick={() => move(index, index + 1)}
-            >
-              ↓
-            </Button>
-            {/* D27: the LAST bot's row stays visible and cannot be removed — the
-                UI never offers an empty chain, though the store would refuse one. */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={busy || chain.length === 1}
-              aria-label={t(locale, "apps.chain.removeBot", { bot: row.name })}
-              onClick={() => remove(row.bot_id)}
-            >
-              ✕
-            </Button>
-          </span>
-        );
-      },
-    });
-  }
+  // One row states only the facts a reader picks a bot by; every other fact —
+  // order, origin, description, default chain, runtime, multiplier, cap — lives
+  // in that row's own disclosure, so a long chain stays scannable.
+  // The fixed columns need 30rem; below that the container scrolls sideways so
+  // the order controls stay reachable on a phone (they do not wrap).
+  const rowGrid = canEditChain
+    ? "grid min-w-[30rem] grid-cols-[minmax(0,1fr)_9rem_7rem_auto]"
+    : "grid min-w-[30rem] grid-cols-[minmax(0,1fr)_9rem_7rem]";
   return (
     <section
       data-slot="installed-chain"
@@ -584,12 +463,129 @@ export function InstalledChainSection({
       </div>
       <p className="text-sm text-muted-foreground">{t(locale, "apps.chain.copy")}</p>
       <NoticeRegion notice={notice} />
-      <DataTable
-        columns={columns}
-        rows={chain}
-        rowKey={(row) => `${row.position}:${row.bot_id}`}
-        empty={<p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>}
-      />
+      {chain.length === 0 ? (
+        <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>
+      ) : (
+        <div className="overflow-x-auto rounded-md border border-(--border-default)">
+          <div
+            data-slot="installed-chain-header"
+            className={`grid ${rowGrid} items-center gap-3 border-b border-(--border-default) bg-(--surface-raised) px-3 py-2 text-xs text-(--text-muted)`}
+          >
+            <span>{t(locale, "apps.chain.columnBot")}</span>
+            <span>{t(locale, "apps.chain.columnProvider")}</span>
+            <span className="text-right">{t(locale, "credits.usedThisMonth")}</span>
+            {canEditChain ? <span aria-hidden="true" /> : null}
+          </div>
+          <ul>
+            {chain.map((row, index) => {
+              const href = `${apiBase()}/bots/${encodeURIComponent(row.bot_id)}`;
+              const multiplier = row.owned || !row.available ? 1 : row.multiplier;
+              // The store withholds an unavailable row's ceiling
+              // (`effective_monthly_rp` is null: the relay skips it), so that row
+              // reads "no ceiling". Own-bot wording is reserved for `row.owned`.
+              const ceiling = row.owned
+                ? t(locale, "credits.unboundedOwn")
+                : row.effective_monthly_rp === null
+                  ? t(locale, "credits.unbounded")
+                  : formatCredits(row.effective_monthly_rp, rpPerCredit);
+              return (
+                <li key={`${row.position}:${row.bot_id}`} className="min-w-[30rem] border-b border-(--border-subtle) last:border-b-0">
+                  <details className="group">
+                    <summary
+                      className={`grid ${rowGrid} cursor-pointer list-none items-center gap-3 px-3 py-2 hover:bg-(--surface-overlay) [&::-webkit-details-marker]:hidden`}
+                    >
+                      <span className="flex min-w-0 flex-wrap items-center gap-2">
+                        <ChevronRight
+                          aria-hidden="true"
+                          className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90"
+                        />
+                        <a
+                          className="font-semibold text-foreground no-underline hover:underline"
+                          href={href}
+                          onClick={(event) => spaClick(href, event)}
+                        >
+                          {row.name}
+                        </a>
+                        {/* An archived bot stays mounted and listed; the relay never
+                            selects it, so the row says so instead of offering a bot
+                            that will not run. */}
+                        {row.archived ? (
+                          <span className="text-(--tone-warn-fg)">{t(locale, "appDetail.installed.archivedSkipped")}</span>
+                        ) : row.available ? null : (
+                          <span className="text-(--tone-warn-fg)">{t(locale, "apps.chain.rowUnavailable")}</span>
+                        )}
+                      </span>
+                      <span className="truncate text-muted-foreground">{row.provider_workspace}</span>
+                      <span className="text-right tabular-nums">{formatCredits(row.month_used_rp, rpPerCredit)}</span>
+                      {canEditChain ? (
+                        // A summary toggles on any click inside it: cancel the
+                        // default here so an order control never expands the row.
+                        <span className="flex items-center gap-1" onClick={(event) => event.preventDefault()}>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy || index === 0}
+                            aria-label={t(locale, "apps.chain.moveUp", { bot: row.name })}
+                            onClick={() => move(index, index - 1)}
+                          >
+                            ↑
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy || index === chain.length - 1}
+                            aria-label={t(locale, "apps.chain.moveDown", { bot: row.name })}
+                            onClick={() => move(index, index + 1)}
+                          >
+                            ↓
+                          </Button>
+                          {/* D27: the LAST bot's row stays visible and cannot be
+                              removed — the UI never offers an empty chain, though
+                              the store would refuse one. */}
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy || chain.length === 1}
+                            aria-label={t(locale, "apps.chain.removeBot", { bot: row.name })}
+                            onClick={() => remove(row.bot_id)}
+                          >
+                            ✕
+                          </Button>
+                        </span>
+                      ) : null}
+                    </summary>
+                    <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1 px-3 pb-3 pl-9 text-sm">
+                      <dt className="text-muted-foreground">{t(locale, "apps.chain.columnPosition")}</dt>
+                      <dd className="tabular-nums">{row.position}</dd>
+                      <dt className="text-muted-foreground">{t(locale, "apps.chain.detailBotId")}</dt>
+                      <dd className="break-all font-mono text-muted-foreground">{row.bot_id}</dd>
+                      {row.description === null || row.description === "" ? null : (
+                        <>
+                          <dt className="text-muted-foreground">{t(locale, "apps.chain.detailDescription")}</dt>
+                          <dd>{row.description}</dd>
+                        </>
+                      )}
+                      <dt className="text-muted-foreground">{t(locale, "apps.chain.detailOrigin")}</dt>
+                      <dd>{t(locale, row.owned ? "apps.chain.tagMine" : "apps.chain.tagShared")}</dd>
+                      <dt className="text-muted-foreground">{t(locale, "settings.defaultChain")}</dt>
+                      <dd className="font-mono text-muted-foreground">{row.default_chain ?? "—"}</dd>
+                      <dt className="text-muted-foreground">{t(locale, "settings.runtimeHarness")}</dt>
+                      <dd className="font-mono text-muted-foreground">{row.runtime ?? "—"}</dd>
+                      <dt className="text-muted-foreground">{t(locale, "apps.chain.columnMultiplier")}</dt>
+                      <dd className="tabular-nums">×{multiplier}</dd>
+                      <dt className="text-muted-foreground">{t(locale, "apps.chain.detailCeiling")}</dt>
+                      <dd className="tabular-nums">{ceiling}</dd>
+                    </dl>
+                  </details>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
     </section>
   );
 }
@@ -608,8 +604,6 @@ export function InstalledAppFace({
   payload,
   notice,
   mountable = [],
-  planRp = null,
-  quotaError = false,
   onReload,
 }: {
   locale: SpaBoot["locale"];
@@ -618,10 +612,6 @@ export function InstalledAppFace({
   notice: { kind: NoticeKind; message: string } | null;
   /** Bots this workspace may mount, unfiltered — the face subtracts the chain. */
   mountable?: Array<{ id: string; name: string; description?: string | null }>;
-  /** The workspace's plan ceiling; `null` is a KNOWN unlimited plan. */
-  planRp?: number | null;
-  /** F10: the plan ceiling could not be resolved — the aggregate errs, never "no ceiling". */
-  quotaError?: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const pill = appStatusPill(locale, payload.app);
@@ -630,22 +620,12 @@ export function InstalledAppFace({
   // future selection, it does not erase Credits already used this month. The
   // archived row stays listed (marked unavailable) and still counts here.
   const monthSpendRp = chain.reduce((sum, row) => sum + row.month_used_rp, 0);
-  // The SAME ceiling presentation the Apps list uses: an all-own chain is
-  // unbounded (不限（自有机器人）), otherwise the workspace's plan ceiling
-  // rides the figure as 已用 / 上限, its known-unlimited state or the F10
-  // unknown marker — and NO chain is nothing metered, not zero usage.
-  const monthValue = chain.length === 0
-    ? t(locale, "bots.monthNone")
-    : usageCeilingCell(
-        locale,
-        { used_rp: monthSpendRp },
-        {
-          owned: chain.every((row) => row.owned),
-          quotaError,
-          ceilingRp: planRp,
-          rpPerCredit: payload.rp_per_credit,
-        },
-      );
+  // The band states the number only. Ceiling state and budget live on the
+  // chain rows' own disclosures below; NO chain is nothing metered, not zero.
+  const monthValue =
+    chain.length === 0
+      ? t(locale, "bots.monthNone")
+      : formatCredits(monthSpendRp, payload.rp_per_credit);
   const metrics: Metric[] = [
     { key: t(locale, "appDetail.installed.metricMounted"), value: chain.length },
     { key: t(locale, "appDetail.installed.metricInstallations"), value: (payload.installations ?? []).length },
@@ -876,8 +856,6 @@ export function AppDetailView({
   search,
   from = null,
   mountable = [],
-  planRp = null,
-  quotaError = false,
   onReload,
   onSearch,
 }: {
@@ -892,10 +870,6 @@ export function AppDetailView({
   from?: AppDetailFrom | null;
   /** Bots this workspace may mount, unfiltered — the view subtracts the chain. */
   mountable?: Array<{ id: string; name: string; description?: string | null }>;
-  /** The workspace's plan ceiling; `null` is a KNOWN unlimited plan. */
-  planRp?: number | null;
-  /** F10: the plan ceiling could not be resolved — the aggregate errs, never "no ceiling". */
-  quotaError?: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
   onSearch: (next: AppDetailSearch) => void;
 }) {
@@ -910,8 +884,6 @@ export function AppDetailView({
         payload={payload}
         notice={notice}
         mountable={mountable}
-        planRp={planRp}
-        quotaError={quotaError}
         onReload={onReload}
       />
     );
@@ -1079,11 +1051,20 @@ export function AppShareSection({
   return (
     <div className="flex flex-col gap-2 py-3" data-slot="app-share">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm text-muted-foreground">
-          {t(locale, sharing ? "apps.shareAppOn" : "apps.shareAppOff")}
-        </p>
-        <Button type="button" variant={sharing ? "destructive-outline" : "secondary"} onClick={() => setPending(true)}>
-          {t(locale, "apps.shareAppSwitch")}
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <StatusBadge tone={sharing ? "accent" : "neutral"}>
+            {t(locale, sharing ? "apps.shareAppStateOn" : "apps.shareAppStateOff")}
+          </StatusBadge>
+          <span className="text-sm text-muted-foreground">
+            {t(locale, sharing ? "apps.shareAppOnBody" : "apps.shareAppOffBody")}
+          </span>
+        </div>
+        <Button
+          type="button"
+          variant={sharing ? "destructive-outline" : "secondary"}
+          onClick={() => setPending(true)}
+        >
+          {t(locale, sharing ? "apps.shareAppStop" : "apps.shareAppSwitch")}
         </Button>
       </div>
       <NoticeRegion notice={notice} />
@@ -1091,7 +1072,7 @@ export function AppShareSection({
         <Dialog open onOpenChange={(open) => { if (!open) setPending(false); }}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>{t(locale, "apps.shareAppSwitch")}</DialogTitle>
+              <DialogTitle>{t(locale, sharing ? "apps.shareAppStop" : "apps.shareAppSwitch")}</DialogTitle>
               <DialogDescription>
                 {t(locale, sharing ? "apps.shareAppConfirmOff" : "apps.shareAppConfirm")}
               </DialogDescription>
@@ -1108,7 +1089,7 @@ export function AppShareSection({
                 disabled={busy}
                 onClick={() => void submitScope(sharing ? "owned" : "shared")}
               >
-                {t(locale, "apps.shareAppSwitch")}
+                {t(locale, sharing ? "apps.shareAppStop" : "apps.shareAppSwitch")}
               </Button>
             </DialogFooter>
           </DialogContent>

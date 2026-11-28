@@ -657,10 +657,10 @@ describe("5. Credits everywhere, RP nowhere", () => {
       // The rendered label, not the dictionary: 本月 is a prefix of 本月已用, so
       // the bare shorthand can only be caught by an exact key comparison.
       expect(keys).not.toContain(t(locale, "bots.monthLabel"));
-      // The chain's month column carries the same label.
-      expect([...container.querySelectorAll("thead th")].map((th) => th.textContent)).toContain(
-        t(locale, "credits.usedThisMonth"),
-      );
+      // The chain's month label carries the same wording.
+      expect(
+        [...container.querySelectorAll('[data-slot="installed-chain-header"] span')].map((span) => span.textContent),
+      ).toContain(t(locale, "credits.usedThisMonth"));
     });
   });
 
@@ -747,7 +747,7 @@ describe("6. archived is unavailable everywhere and visible to consumers", () =>
     const markup = renderApp(managerInstalledPayload());
     expect(markup).toContain(t("en", "appDetail.installed.archivedSkipped"));
     await withMarkup(markup, (container) => {
-      const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+      const row = Array.from(container.querySelectorAll('[data-slot="installed-chain"] li')).find((tr) =>
         tr.textContent?.includes("Archived Bot"),
       );
       expect(row).toBeDefined();
