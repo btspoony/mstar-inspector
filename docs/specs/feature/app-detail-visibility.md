@@ -51,7 +51,7 @@ Membership bootstrap, invite/remove/role flows, and the per-request membership g
 
 #### Units
 
-RP is the internal accounting unit; every user-facing amount, ceiling and spend figure renders in **Credits** with two decimals (`1,000 RP = 1 Credit`, and the documented fallback rate when the operator profile is unreadable and the payload omits `rp_per_credit`). A figure labelled 本月 is always 本月已用 and states its ceiling (`已用 / 上限`), its known-unlimited state (不限) or its own-bot state (不限（自有机器人）) — never a bare number the reader must guess at. An own bot is never priced by its multiplier, and an unshared bot has no consumer, so both read ×1 wherever an effective multiplier is stated.
+RP is the internal accounting unit; every user-facing amount, ceiling and spend figure renders in **Credits** with two decimals (`1,000 RP = 1 Credit`, and the documented fallback rate when the operator profile is unreadable and the payload omits `rp_per_credit`). A figure labelled 本月 is always 本月已用; a SUMMARY surface (the App installed face's metric band, a bot detail metric, a chain row's spend cell) states the spend figure alone, and the ceiling — `已用 / 上限`, its known-unlimited state (不限) or its own-bot state (不限（自有机器人）) — is stated by the surface that owns the fact (the bot's 使用情况 section, the chain row's disclosure under 每月上限), never dropped. An own bot is never priced by its multiplier, and an unshared bot has no consumer, so both read ×1 wherever an effective multiplier is stated.
 
 #### App identity key
 

@@ -539,6 +539,23 @@ describe("installed face — manager", () => {
     expect(row.ceiling).toBe(t("en", "credits.unbounded"));
   });
 
+  test("an unavailable shared bot states its own ceiling, never own-bot wording", async () => {
+    const row = await spendAndCeiling([
+      chainRow({
+        position: 1,
+        bot_id: "bot-withdrawn",
+        name: "Withdrawn",
+        owned: false,
+        available: false,
+        month_used_rp: 45,
+        effective_monthly_rp: null,
+      }),
+    ]);
+    expect(row.spend).toBe("0.09 Credits");
+    expect(row.ceiling).toBe(t("en", "credits.unbounded"));
+    expect(row.ceiling).not.toBe(t("en", "credits.unboundedOwn"));
+  });
+
   test("the App name is stated once, and the install entry survives that", async () => {
     await withMarkup(markup, (container) => {
       const header = container.querySelector('[data-slot="page-header"] h1');

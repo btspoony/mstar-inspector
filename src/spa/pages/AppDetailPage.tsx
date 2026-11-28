@@ -480,14 +480,14 @@ export function InstalledChainSection({
             {chain.map((row, index) => {
               const href = `${apiBase()}/bots/${encodeURIComponent(row.bot_id)}`;
               const multiplier = row.owned || !row.available ? 1 : row.multiplier;
-              // The cap the relay enforces for THIS workspace: its override, else
-              // the bot's default. It rides the disclosure, not the summary row.
-              const ceiling =
-                row.owned || !row.available
-                  ? t(locale, "credits.unboundedOwn")
-                  : row.effective_monthly_rp === null
-                    ? t(locale, "credits.unbounded")
-                    : formatCredits(row.effective_monthly_rp, rpPerCredit);
+              // Only the workspace's OWN bot is unbounded by ownership. An
+              // unavailable row is still a shared bot the owner withdrew, so it
+              // states its recorded cap (or "no ceiling"), never own-bot wording.
+              const ceiling = row.owned
+                ? t(locale, "credits.unboundedOwn")
+                : row.effective_monthly_rp === null
+                  ? t(locale, "credits.unbounded")
+                  : formatCredits(row.effective_monthly_rp, rpPerCredit);
               return (
                 <li key={`${row.position}:${row.bot_id}`} className="min-w-[30rem] border-b border-(--border-subtle) last:border-b-0">
                   <details className="group">
