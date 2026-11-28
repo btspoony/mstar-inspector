@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { act, createElement } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { t } from "../../src/i18n";
 import { APP_ROUTES } from "../../src/dashboard/index";
@@ -64,6 +64,7 @@ async function mount(
   body = "{}",
   reloadOk = true,
   gate?: Promise<void>,
+  reread?: Partial<BotSettingsPayload>,
 ) {
   const { win, cleanup } = installDom("http://localhost/dashboard/acme/repos");
   const container = win.document.createElement("div");
@@ -82,18 +83,23 @@ async function mount(
     if ((init?.method ?? "GET") === "PATCH") await gate;
     return new Response(body, { status, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
+  // `reread` is the payload a successful re-read would serve, so a landing can
+  // replace the draft exactly as the real page does.
+  function Harness() {
+    const [current, setCurrent] = useState(payload(overrides));
+    return createElement(BotPricingSection, {
+      locale,
+      payload: current,
+      onReload: async () => {
+        reloads.push(1);
+        if (reloadOk && reread !== undefined) setCurrent(payload(reread));
+        return reloadOk;
+      },
+    });
+  }
   try {
     await act(async () => {
-      root.render(
-        createElement(BotPricingSection, {
-          locale,
-          payload: payload(overrides),
-          onReload: async () => {
-            reloads.push(1);
-            return reloadOk;
-          },
-        }),
-      );
+      root.render(createElement(Harness));
     });
     await act(async () => {});
   } catch (err) {
@@ -441,8 +447,8 @@ describe("the bot page's share switch", () => {
 
   test("a field typed into while the save is in flight stays pending, and the next save sends it", async () => {
     // The PATCH carries ×5 and the operator retypes ×7 before it lands. The
-    // landing confirms ×5 only: ×7 is still on screen, so it must stay dirty
-    // and go out on the next save instead of being silently retired.
+    // landing confirms ×5 only: ×7 stays on screen — the re-read serves the
+    // committed ×5 and must not overwrite it — and goes out on the next save.
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -453,6 +459,8 @@ describe("the bot page's share switch", () => {
       "{}",
       true,
       gate,
+      // What the committed write left stored, served by the re-read.
+      { rp_per_credit: 1000, app: { ...payload().app, scope: "shared", multiplier: 5, monthly_rp: 1234 } },
     );
     try {
       const multiplier = view.container.querySelector(
