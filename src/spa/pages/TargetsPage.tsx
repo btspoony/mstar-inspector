@@ -179,12 +179,14 @@ export function TargetsView({
   targets,
   onRetry,
   addControl,
+  onAdd,
 }: {
   locale: SpaBoot["locale"];
   state: "ok" | "error";
   targets: TargetListRow[] | null;
   onRetry: () => void;
   addControl?: ReactNode;
+  onAdd?: () => void;
 }) {
   const all = targets ?? [];
   const base = apiBase();
@@ -331,7 +333,17 @@ export function TargetsView({
             }}
           />
           {all.length === 0 ? (
-            <EmptyState title={t(locale, "targets.emptyTitle")} description={t(locale, "targets.emptyDescription")} />
+            <EmptyState
+              title={t(locale, "targets.emptyTitle")}
+              description={t(locale, "targets.emptyDescription")}
+              action={
+                onAdd === undefined ? undefined : (
+                  <Button type="button" onClick={onAdd}>
+                    {t(locale, "targets.add")}
+                  </Button>
+                )
+              }
+            />
           ) : null}
           {all.length > 0 && rows.length === 0 ? (
             <p className="text-sm text-muted-foreground">
@@ -864,38 +876,44 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
   if (state === "loading") {
     return <PageSkeleton locale={locale} kind="table" />;
   }
+  const canManage = state === "ok" && canManageHere(boot);
   return (
-    <TargetsView
-      locale={locale}
-      state={state}
-      targets={targets}
-      onRetry={() => void load()}
-      addControl={
-        state === "ok" && canManageHere(boot) ? (
-          <div className="flex flex-col items-end gap-2">
-            <Button type="button" onClick={() => setDialogOpen(true)}>
-              {t(locale, "targets.add")}
-            </Button>
-            {appsFailed ? (
-              <div className="flex items-center gap-2">
-                <p className="text-sm text-(--tone-warn-fg)">{t(locale, "targets.appsReadFailed")}</p>
-                <Button type="button" variant="outline" onClick={() => void load({ background: true })}>
-                  {t(locale, "common.retry")}
-                </Button>
-              </div>
-            ) : null}
-            <AddRepositoryDialog
-              locale={locale}
-              open={dialogOpen}
-              onClose={() => setDialogOpen(false)}
-              apps={apps}
-              existingRepoIds={existingRepoIds}
-              onAdded={() => void load({ background: true })}
-            />
-          </div>
-        ) : undefined
-      }
-    />
+    <>
+      <TargetsView
+        locale={locale}
+        state={state}
+        targets={targets}
+        onRetry={() => void load()}
+        onAdd={canManage ? () => setDialogOpen(true) : undefined}
+        addControl={
+          canManage ? (
+            <div className="flex flex-col items-end gap-2">
+              <Button type="button" onClick={() => setDialogOpen(true)}>
+                {t(locale, "targets.add")}
+              </Button>
+              {appsFailed ? (
+                <div className="flex items-center gap-2">
+                  <p className="text-sm text-(--tone-warn-fg)">{t(locale, "targets.appsReadFailed")}</p>
+                  <Button type="button" variant="outline" onClick={() => void load({ background: true })}>
+                    {t(locale, "common.retry")}
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : undefined
+        }
+      />
+      {canManage ? (
+        <AddRepositoryDialog
+          locale={locale}
+          open={dialogOpen}
+          onClose={() => setDialogOpen(false)}
+          apps={apps}
+          existingRepoIds={existingRepoIds}
+          onAdded={() => void load({ background: true })}
+        />
+      ) : null}
+    </>
   );
 }
 
