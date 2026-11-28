@@ -15,14 +15,17 @@ import {
   BOT_MULTIPLIER_MAX,
   BOT_MULTIPLIER_MIN,
   CHAIN_MULTIPLIER_MAX,
+  QUOTA_BASE_MAX,
   RP_CEILING_MAX,
   isBotMultiplier,
   isRpCeiling,
   isServedChainProduct,
   isStoredBotMultiplier,
+  isStoredRpCeiling,
 } from "../../src/contracts/rp-limits";
+import { parseQuotaNumbers } from "../../src/admin/quota-versions";
 import { rpFor, type QuotaProfile } from "../../src/store/quota-store";
-import { parseApps, type AppsPayload } from "../../src/spa/pages/data";
+import { parseApps, parseBotSettings, type AppsPayload } from "../../src/spa/pages/data";
 import { createMigratedTestD1, seedBot, type TestD1 } from "../store/helpers";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 import type { Env } from "../../src/worker/env";
@@ -116,15 +119,31 @@ describe("the shared RP domain", () => {
   });
 
   test("a STORED multiplier keeps the wider read domain, so a legacy row still renders", () => {
-    // Written before the floor existed; its product is still positive on its
-    // own and `rpFor` prices it at 1 RP, so refusing it would be a load error
-    // for data nobody migrated.
+    // Written before either bound existed; its product is still positive on its
+    // own and `rpFor` prices it, so refusing it would be a load error for data
+    // nobody migrated. The WRITE bound is not re-applied to a stored row.
     expect(isStoredBotMultiplier(1e-200)).toBe(true);
     expect(isStoredBotMultiplier(0.001)).toBe(true);
     expect(isStoredBotMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
-    expect(isStoredBotMultiplier(BOT_MULTIPLIER_MAX + 1)).toBe(false);
+    expect(isStoredBotMultiplier(BOT_MULTIPLIER_MAX + 1)).toBe(true);
+    expect(isStoredBotMultiplier(1e300)).toBe(true);
     expect(isStoredBotMultiplier(0)).toBe(false);
     expect(isStoredBotMultiplier(Number.NaN)).toBe(false);
+    expect(isStoredBotMultiplier(Number.POSITIVE_INFINITY)).toBe(false);
+  });
+
+  test("a STORED ceiling is any positive safe integer — the write bound is not re-applied", () => {
+    expect(isStoredRpCeiling(1)).toBe(true);
+    // The value that used to make the whole Bots directory unloadable: legal as a
+    // stored override, one past what a NEW write may carry.
+    expect(isStoredRpCeiling(RP_CEILING_MAX + 1)).toBe(true);
+    expect(isStoredRpCeiling(Number.MAX_SAFE_INTEGER)).toBe(true);
+    // Only what no reader can represent fails.
+    expect(isStoredRpCeiling(0)).toBe(false);
+    expect(isStoredRpCeiling(-1)).toBe(false);
+    expect(isStoredRpCeiling(1.5)).toBe(false);
+    expect(isStoredRpCeiling(Number.MAX_SAFE_INTEGER + 2)).toBe(false);
+    expect(isStoredRpCeiling(Number.POSITIVE_INFINITY)).toBe(false);
   });
 
   // The Apps list serves `month.multiplier` as the PRODUCT of the mounted
@@ -156,6 +175,13 @@ describe("the shared RP domain", () => {
 
 describe("the pricing writer refuses what the reader cannot parse", () => {
   const authority = { workspaceId: OFFICIAL, role: "owner" as const };
+
+  test("a NEW quota version still refuses a base weight past the write bound", () => {
+    const candidate = (deep: number) => ({ base: { quick: 1, default: 2, deep }, rpPerCredit: 1000 });
+    expect(parseQuotaNumbers(candidate(QUOTA_BASE_MAX)).ok).toBe(true);
+    // The charge accepts a legacy 400; publishing a NEW one is still refused.
+    expect(parseQuotaNumbers(candidate(QUOTA_BASE_MAX + 1)).ok).toBe(false);
+  });
 
   test("an unsafe ceiling integer is refused at the write and persists nothing", async () => {
     world();
@@ -276,18 +302,21 @@ describe("the SPA parser applies the same domain", () => {
     pending_installations: [],
   });
 
-  test("an unsafe ceiling row makes the parse fail, which is why the writer refuses it", () => {
+  test("a stored ceiling past the WRITE bound parses; only an unrepresentable one fails", () => {
     const parsed = parseApps(appsPayload(chainRow()));
     expect(parsed).not.toBeNull();
     expect((parsed as AppsPayload).apps[0]?.chain?.[0]?.effective_monthly_rp).toBe(1000);
 
+    // A stored legacy override: the writer refuses this for a NEW row, and the
+    // list must still open on one that already exists.
+    expect(parseApps(appsPayload(chainRow({ effective_monthly_rp: RP_CEILING_MAX + 1 })))).not.toBeNull();
+    // Past 2^53 the value is no longer the number it printed as.
     expect(parseApps(appsPayload(chainRow({ effective_monthly_rp: Number.MAX_SAFE_INTEGER + 2 })))).toBeNull();
-    expect(parseApps(appsPayload(chainRow({ effective_monthly_rp: RP_CEILING_MAX + 1 })))).toBeNull();
   });
 
-  test("a chain row's multiplier above the single-bot bound makes the parse fail", () => {
+  test("a stored multiplier past the single-bot bound parses — the write cap is the writer's", () => {
     expect(parseApps(appsPayload(chainRow()))).not.toBeNull();
-    expect(parseApps(appsPayload(chainRow({ multiplier: BOT_MULTIPLIER_MAX + 1 })))).toBeNull();
+    expect(parseApps(appsPayload(chainRow({ multiplier: BOT_MULTIPLIER_MAX + 1 })))).not.toBeNull();
   });
 
   // A row priced before the writer floor existed is a STORED value, not a
@@ -591,5 +620,62 @@ describe("the SPA parser applies the same domain", () => {
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 0 }))).toBeNull();
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: -1 }))).toBeNull();
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: Number.POSITIVE_INFINITY }))).toBeNull();
+  });
+});
+
+/**
+ * QC (Devin #3): a stored ceiling authored before the write bound existed must
+ * open the owner's page and stay clearable. The READ domain is a positive safe
+ * integer; the WRITE domain still bounds new rows.
+ */
+describe("a stored override past the WRITE bound loads and clears", () => {
+  async function getBotPayload(): Promise<Response> {
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    return worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${BOT_ROW}/bot`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+  }
+
+  async function patchOverride(body: unknown): Promise<Response> {
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    return worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${BOT_ROW}/quota-overrides`, {
+        method: "PATCH",
+        headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      envFor(),
+    );
+  }
+
+  test("the bot page serves and parses it, and the Clear action removes it", async () => {
+    world();
+    db.raw
+      .prepare(
+        `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(BOT_ROW, OTHER, 1_000_000_001, NOW);
+
+    const page = await getBotPayload();
+    expect(page.status).toBe(200);
+    const payload = (await page.json()) as unknown;
+    // The owner's page must OPEN with the legacy row present — a load error here
+    // is what put the Clear action behind an unreachable screen.
+    expect(parseBotSettings(payload)).not.toBeNull();
+
+    const cleared = await patchOverride({ workspaceId: OTHER, monthlyRp: null });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ overrides: [] });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_quota_overrides").get()).toEqual({ n: 0 });
+  });
+
+  test("a NEW above-cap ceiling is still refused at the route", async () => {
+    world();
+    const res = await patchOverride({ workspaceId: OTHER, monthlyRp: RP_CEILING_MAX + 1 });
+    expect(res.status).toBe(400);
   });
 });

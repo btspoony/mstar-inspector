@@ -2,11 +2,10 @@
 import { FREE_SLOT_REFUSAL, WORKSPACE_CREATION_CLOSED_REFUSAL } from "../../dashboard/entitlement";
 import {
   isRpAmount,
-  isRpCeiling,
   isServedChainProduct,
   isStoredBotMultiplier,
+  isStoredRpCeiling,
   isStoredRpPerCredit,
-  RP_CEILING_MAX,
 } from "../../contracts/rp-limits";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 
@@ -251,7 +250,7 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     // renders, and the chain product below is what the list bounds.
     isStoredBotMultiplier(value.multiplier) &&
     isRpAmount(value.month_used_rp) &&
-    (value.effective_ceiling === null || isRpCeiling(value.effective_ceiling)) &&
+    (value.effective_ceiling === null || isStoredRpCeiling(value.effective_ceiling)) &&
     typeof value.archived === "boolean"
   );
 }
@@ -263,7 +262,7 @@ export function parseUsableBots(data: unknown): UsableBotsPayload | null {
   // `null` is a known unlimited plan; a present number must sit in the RP
   // ceiling domain, and an absent field is the unknown state the flag marks —
   // absence WITHOUT the flag would read as unlimited, so it fails the parse.
-  if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && !isRpCeiling(data.plan_monthly_rp)) {
+  if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && !isStoredRpCeiling(data.plan_monthly_rp)) {
     return null;
   }
   if (data.plan_monthly_rp === undefined && data.quota_error !== true) return null;
@@ -678,7 +677,7 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.available === "boolean" &&
     isStoredBotMultiplier(value.multiplier) &&
     isRpAmount(value.month_used_rp) &&
-    (value.effective_monthly_rp === null || isRpCeiling(value.effective_monthly_rp)) &&
+    (value.effective_monthly_rp === null || isStoredRpCeiling(value.effective_monthly_rp)) &&
     typeof value.archived === "boolean" &&
     (value.default_chain === null || typeof value.default_chain === "string") &&
     (value.runtime === null || (typeof value.runtime === "string" && value.runtime.length > 0))
@@ -1017,7 +1016,7 @@ function parseBotOverview(value: unknown): BotOverview | null {
   if (!isRpAmount(value.month_used_rp)) return null;
   // The plan ceiling is genuinely optional: `null` is a known unlimited plan,
   // and the field is absent on a payload whose plan could not be resolved.
-  if (value.plan_monthly_rp !== undefined && value.plan_monthly_rp !== null && !isRpCeiling(value.plan_monthly_rp)) {
+  if (value.plan_monthly_rp !== undefined && value.plan_monthly_rp !== null && !isStoredRpCeiling(value.plan_monthly_rp)) {
     return null;
   }
   // The EFFECTIVE ceiling is REQUIRED: the server computes it on every
@@ -1025,7 +1024,7 @@ function parseBotOverview(value: unknown): BotOverview | null {
   // read as "unlimited" through `?? null`, which is exactly the wrong answer —
   // only an explicit `null` means this bot has no ceiling for this workspace.
   if (value.effective_ceiling === undefined) return null;
-  if (value.effective_ceiling !== null && !isRpCeiling(value.effective_ceiling)) return null;
+  if (value.effective_ceiling !== null && !isStoredRpCeiling(value.effective_ceiling)) return null;
   if (value.default_chain !== null && typeof value.default_chain !== "string") return null;
   if (!Array.isArray(value.mounted_apps)) return null;
   for (const row of value.mounted_apps) {
@@ -2335,7 +2334,7 @@ export function parseApps(data: unknown): AppsPayload | null {
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
   if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
-  if (data.month_plan_rp !== undefined && data.month_plan_rp !== null && !isRpCeiling(data.month_plan_rp)) {
+  if (data.month_plan_rp !== undefined && data.month_plan_rp !== null && !isStoredRpCeiling(data.month_plan_rp)) {
     return null;
   }
   if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
@@ -2935,7 +2934,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
     if (!Array.isArray(data.quota_overrides)) return null;
     quotaOverrides = [];
     for (const row of data.quota_overrides) {
-      if (!isRecord(row) || typeof row.workspaceId !== "string" || !isRpCeiling(row.monthlyRp)) return null;
+      if (!isRecord(row) || typeof row.workspaceId !== "string" || !isStoredRpCeiling(row.monthlyRp)) return null;
       quotaOverrides.push({ workspaceId: row.workspaceId, monthlyRp: row.monthlyRp });
     }
   }
@@ -2950,7 +2949,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   // the NEXT reader, so it fails here too.
   // A STORED factor, so the read domain has no floor; the writers hold the floor.
   if (app.multiplier !== undefined && app.multiplier !== null && !isStoredBotMultiplier(app.multiplier)) return null;
-  if (app.monthly_rp !== undefined && app.monthly_rp !== null && !isRpCeiling(app.monthly_rp)) return null;
+  if (app.monthly_rp !== undefined && app.monthly_rp !== null && !isStoredRpCeiling(app.monthly_rp)) return null;
   if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (
     !isNullableString(app.last_webhook_at) ||

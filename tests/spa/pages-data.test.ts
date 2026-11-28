@@ -1282,4 +1282,15 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
       ).toBeNull();
     }
   });
+
+  // A stored override authored before the write bound existed: the directory
+  // must open on it rather than fail every row of the list.
+  test("a legacy ceiling past the WRITE bound loads", () => {
+    const [first] = PRODUCER_PAYLOAD.bots;
+    expect(
+      parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [{ ...first!, effective_ceiling: 1_000_000_001 }] })?.bots[0]
+        ?.effective_ceiling,
+    ).toBe(1_000_000_001);
+    expect(parseUsableBots({ ...PRODUCER_PAYLOAD, plan_monthly_rp: 1_000_000_001 })).not.toBeNull();
+  });
 });

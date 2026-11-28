@@ -158,7 +158,10 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
 
     const month = quotaMonth(now);
     const profile = await resolveWorkspaceQuotaProfile(db, target.workspace_id, month.month, now.toISOString());
-    const multiplier = await readBotMultiplier(db, bot.botId);
+    // The consumer's price: this walk reaches it only for a SHARED bot, whose
+    // owner is another workspace, so `readBotMultiplier` answers the stored
+    // factor. The own-bot fast path above is the ×1 case and reads no price.
+    const multiplier = await readBotMultiplier(db, bot.botId, target.workspace_id);
     if (multiplier === null) return { kind: "refused", refusal: { kind: "entitlement-unreadable" } };
     const cost = rpFor(level, multiplier, profile);
     // An unrepresentable price is refused, never metered: the writers bound both

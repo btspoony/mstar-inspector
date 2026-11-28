@@ -3254,7 +3254,10 @@ async function preparePhase(
     // the usage row in one batch. The three commit together, so a replay binds
     // nothing (I1), a failed lookup or insert leaves no binding behind, and a
     // concurrent first metering cannot split the pin from its usage row.
-    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
+    // The bot's own workspace pays ×1; a consuming workspace pays the stored
+    // multiplier. `usageWorkspaceId` IS the executing workspace — the one this
+    // review's spend is attributed to — so no extra read decides the owner.
+    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId, usageWorkspaceId);
     if (multiplier === null) {
       throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
     }

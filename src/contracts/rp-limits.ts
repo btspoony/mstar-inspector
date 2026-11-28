@@ -67,6 +67,36 @@ export function isRpCeiling(value: unknown): value is number {
 }
 
 /**
+ * A STORED RP ceiling — a plan allowance, a bot's ceiling or a per-workspace
+ * override: any positive safe integer, with NO write bound.
+ *
+ * Deliberately wider than {@link isRpCeiling}: the ceiling columns only CHECK
+ * `monthly_rp > 0`, so a row authored before this round's bound existed can
+ * hold one past it. Writers keep {@link isRpCeiling}; a reader that refused the
+ * stored row would turn the Bots list or the owner's detail into a load error
+ * for data nobody migrated — and would put the override's own Clear action
+ * behind a page that cannot open. 0, negatives, fractions and non-numbers fail.
+ */
+export function isStoredRpCeiling(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/**
+ * A STORED profile level weight: any positive safe integer, with NO write
+ * bound.
+ *
+ * Deliberately wider than `QUOTA_BASE_MAX`: that bound is what a NEW version
+ * may be published with, and a version bound before it existed still prices
+ * every review through it. The charge accepts such a weight and refuses only a
+ * price no ceiling can bound ({@link isRpPrice}); re-applying the write bound
+ * there would silently lose the spend. 0, negatives, fractions (the INTEGER
+ * column's affinity admits a REAL) and non-numbers fail.
+ */
+export function isStoredQuotaBase(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/**
  * A bot's price factor as a WRITER may enter it: finite, inside
  * [`BOT_MULTIPLIER_MIN`, `BOT_MULTIPLIER_MAX`] — bounded above so its price
  * stays representable, floored so a chain's product of legal factors stays
@@ -95,19 +125,21 @@ export function isServedChainProduct(value: unknown): value is number {
 }
 
 /**
- * The READ domain of a STORED multiplier: finite, > 0 and inside the price
- * bound, with NO floor.
+ * The READ domain of a STORED multiplier: any positive finite number, with NO
+ * write bound and NO floor.
  *
  * Deliberately wider than {@link isBotMultiplier}: the column only CHECKs
- * `multiplier > 0`, so a bot priced before the floor existed can hold a smaller
- * factor. Refusing it would turn the Apps list and the bot page into a load
- * error for data nobody migrated, and such a factor still prices every level at
- * the 1-RP floor `rpFor` applies. What it must NOT do is let two of them
- * multiply into `0` — that is why the chain write refuses a non-positive
- * product. `0`, negatives, `Infinity`, `NaN` and non-numbers fail.
+ * `multiplier > 0`, so a bot priced before either bound existed can hold a
+ * factor outside them. Refusing it would turn the Apps list and the bot page
+ * into a load error for data nobody migrated. What a stored factor may never do
+ * is price an unrepresentable review — that is decided at the CHARGE
+ * (`chargeUsage` and `rpFor`), where a factor this wide still refuses a price
+ * past {@link isRpPrice}'s domain. `0`, negatives, `Infinity`, `NaN` and
+ * non-numbers fail: they are factors no reader can render and no price can
+ * carry.
  */
 export function isStoredBotMultiplier(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= BOT_MULTIPLIER_MAX;
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 /** A computed price: a whole number of RP inside the same domain, at least 1. */

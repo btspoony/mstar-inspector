@@ -167,12 +167,13 @@ function directReadFiles(): string[] {
 // remaining references in any of them. The bot table is read by the store
 // alone — the allowlist is the proof, not a leftover.
 const MAINTENANCE_SITES: Record<string, number> = {
-  // `readBotMultiplier` is the ONE read of `review_bots.multiplier`, shared by
-  // the metering path and the enqueue ceiling. Authorization happened upstream
-  // (the webhook resolved the bot row, the job carries `botRef.botId`), the row
-  // is addressed by its own id, and the projection is that single price column
-  // — no identity, no ownership, no workspace to scope by.
-  "store/quota-store.ts": 1,
+  // `readBotMultiplier` is the ONE bot row the metering path and the enqueue
+  // ceiling price a review from: the stored factor (one price column, addressed
+  // by the bot's own id), and the owner equality that decides whether THIS
+  // workspace pays it. The second read projects one constant flag and compares
+  // the row's workspace against the caller's — no identity or ownership column
+  // is selected, so nothing here can scope another workspace's row.
+  "store/quota-store.ts": 2,
   // The relay's ceiling fallback: `review_bots` by the bot id the chain named,
   // projecting one price column.
   "worker/select-review-bot.ts": 1,

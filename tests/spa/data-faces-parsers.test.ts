@@ -650,7 +650,7 @@ describe("amount guards — the parsers apply the writer's domain", () => {
   });
 
   test("the bot payload's own pricing fields stay inside the shared domains", () => {
-    for (const bad of [0, -1, 5000]) {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(
         parseBotSettings({ ...botPayload, app: { ...botPayload.app, multiplier: bad } }),
         `multiplier ${String(bad)}`,
@@ -662,10 +662,32 @@ describe("amount guards — the parsers apply the writer's domain", () => {
         `monthly_rp ${String(bad)}`,
       ).toBeNull();
     }
+    // A STORED factor and a STORED ceiling are READ here: a value past either
+    // WRITE bound must open the owner's page, not fail it.
+    expect(
+      parseBotSettings({ ...botPayload, app: { ...botPayload.app, multiplier: 5000 } }),
+    ).not.toBeNull();
+    expect(
+      parseBotSettings({ ...botPayload, app: { ...botPayload.app, monthly_rp: 1_000_000_001 } }),
+    ).not.toBeNull();
     // The consumer payload omits both: absence is not a malformed value.
     const app: Record<string, unknown> = { ...botPayload.app };
     delete app.multiplier;
     delete app.monthly_rp;
     expect(parseBotSettings({ ...botPayload, app })).not.toBeNull();
+  });
+
+  // The owner's per-workspace exception layer rides the same page: a legacy
+  // override must not hide the row that carries its own Clear action.
+  test("a legacy override row loads on the owner's bot page", () => {
+    const parsed = parseBotSettings({
+      ...botPayload,
+      quota_overrides: [{ workspaceId: "ws-2", monthlyRp: 1_000_000_001 }],
+    });
+    expect(parsed?.quota_overrides).toEqual([{ workspaceId: "ws-2", monthlyRp: 1_000_000_001 }]);
+    // Only what no reader can represent fails.
+    expect(
+      parseBotSettings({ ...botPayload, quota_overrides: [{ workspaceId: "ws-2", monthlyRp: 0 }] }),
+    ).toBeNull();
   });
 });

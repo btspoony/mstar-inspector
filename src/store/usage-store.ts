@@ -1,6 +1,6 @@
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { isRpCeiling, isRpPrice, isStoredBotMultiplier, QUOTA_BASE_MAX, RP_CEILING_MAX } from "../contracts/rp-limits";
+import { isRpPrice, isStoredBotMultiplier, isStoredQuotaBase, RP_CEILING_MAX } from "../contracts/rp-limits";
 import type { D1Like } from "./types";
 
 /**
@@ -140,17 +140,18 @@ const LEVEL_BASE_COLUMN: Record<ReviewLevel, string> = {
 };
 
 /**
- * The price expression, spelled ONCE: `max(1, ceil(base × multiplier))`, with
- * the multiplier's placeholder named by the caller so each statement numbers
- * its own parameters without a surplus bind (D1 rejects those). The ceiling is
- * written portably as `CAST(x AS INTEGER) + CASE WHEN x > CAST(x AS INTEGER)
- * THEN 1 ELSE 0 END` — `ceil()` exists in this engine, but the spelled-out form
- * is what this repo can rely on if a driver or target lacks it, and it is exact
- * for positive products. `rpFor` states the same rule for callers that price
- * outside a batch.
+ * The price expression, spelled ONCE: `max(1, ceil(base × multiplier))`, over
+ * any base expression (`p.base_deep`, or `chosen.base` for the bind's derived
+ * table) with the multiplier's placeholder named by the caller so each statement
+ * numbers its own parameters without a surplus bind (D1 rejects those). The
+ * ceiling is written portably as `CAST(x AS INTEGER) + CASE WHEN x > CAST(x AS
+ * INTEGER) THEN 1 ELSE 0 END` — `ceil()` exists in this engine, but the
+ * spelled-out form is what this repo can rely on if a driver or target lacks it,
+ * and it is exact for positive products. `rpFor` states the same rule for
+ * callers that price outside a batch.
  */
-function priceOf(baseColumn: string, multiplierParam: string): string {
-  const product = `p.${baseColumn} * ${multiplierParam}`;
+function priceOf(baseExpr: string, multiplierParam: string): string {
+  const product = `${baseExpr} * ${multiplierParam}`;
   return `max(1, CAST(${product} AS INTEGER) + CASE WHEN ${product} > CAST(${product} AS INTEGER) THEN 1 ELSE 0 END)`;
 }
 
@@ -181,18 +182,23 @@ export type ChargeRefusal = "price-out-of-domain";
  * metering cannot leave a binding without its matching usage row.
  *
  * THE RP DOMAIN IS ENFORCED HERE, at the charge — for EVERY path, own-bot and
- * self-hosted included. The relay refuses an out-of-domain bot before a
- * delivery is admitted, but it is not the only way a row reaches this write, and
- * a stored multiplier or profile that some other writer admitted must never
- * produce an out-of-range charge. Statement 2 therefore admits a price only when
- * all three of its factors are inside the shared domain `src/contracts/rp-limits`
- * defines — the multiplier, the profile's base weight for this level, and the
- * computed product — and refuses (appends nothing, reports `price-out-of-domain`)
- * otherwise. The base weight must also be a WHOLE positive number: the column is
- * declared INTEGER, but the engine's affinity stores a REAL in it, and a stored
- * `1.5` would otherwise bind the month and price a charge from a weight no writer
- * admitted. Refusing to record an unrepresentable charge is the only safe
- * answer: a charge no ceiling can bound would be unpayable AND unrefundable.
+ * self-hosted included. The relay refuses an unpriceable bot before a delivery
+ * is admitted, but it is not the only way a row reaches this write, and a stored
+ * multiplier or profile that some other writer admits must never produce an
+ * out-of-range charge. Statements 1 and 2 therefore admit a price only when the
+ * base weight is a WHOLE positive number and the computed product is inside
+ * `src/contracts/rp-limits`'s price domain, and refuse otherwise (appending
+ * nothing, reporting `price-out-of-domain`).
+ *
+ * The base weight is NOT re-checked against `QUOTA_BASE_MAX`: that bound is what
+ * a NEW version may be published with, and a version bound before it existed
+ * still has to record the spend of every review it governs. Re-applying it here
+ * would refuse a legally stored weight and lose the charge silently, which is
+ * the one outcome this write may never produce. What stays refused is a weight
+ * that cannot price a review at all: the column is declared INTEGER, but the
+ * engine's affinity stores a REAL in it, so a stored `1.5` would otherwise bind
+ * the month and price a charge from a weight no writer admitted. A charge no
+ * ceiling can bound would be unpayable AND unrefundable.
  *
  * `seq` is minted inside the same statement, so the attempt ordinal is a
  * property of the write, not of a prior read.
@@ -225,11 +231,13 @@ export async function chargeUsage(
         // profile is still resolvable). Expressed as one statement so the bind
         // and the price below it read one table state.
         //
-        // The resolved profile is then put THROUGH THE DOMAIN before it may be
-        // pinned: a month bound to a profile that cannot price this review would
-        // be a binding with no matching row — the invariant the batch exists to
-        // keep. A governing profile outside the domain therefore binds nothing,
-        // exactly as if no profile covered the instant.
+        // The resolved profile is then put THROUGH THE PRICE DOMAIN before it
+        // may be pinned: a month bound to a profile that cannot price this
+        // review would be a binding with no matching row — the invariant the
+        // batch exists to keep. The write bound `QUOTA_BASE_MAX` is NOT applied:
+        // it is what a new version may be published with, and a version bound
+        // before it existed must still meter. A profile outside the PRICE domain
+        // therefore binds nothing, exactly as if no profile covered the instant.
         `INSERT OR IGNORE INTO workspace_quota_binding (workspace_id, month, profile_id)
          SELECT ?1, ?2, chosen.id
            FROM (SELECT p.id AS id, p.${baseColumn} AS base
@@ -239,13 +247,14 @@ export async function chargeUsage(
                            CASE WHEN p.effective_from <= ?3 THEN p.effective_from END DESC,
                            p.effective_from ASC
                   LIMIT 1) chosen
-          -- A whole, positive RP weight: the column is DECLARED INTEGER but the
-          -- engine's affinity does not reject a REAL, so 1.5 would otherwise bind.
+          -- A whole, positive RP weight (the column is DECLARED INTEGER but the
+          -- engine's affinity does not reject a REAL, so 1.5 would otherwise
+          -- bind) whose price this review's multiplier can represent.
           WHERE chosen.base > 0
             AND chosen.base = CAST(chosen.base AS INTEGER)
-            AND chosen.base <= ${QUOTA_BASE_MAX}`,
+            AND ${priceOf("chosen.base", "?5")} <= ${RP_CEILING_MAX}`,
       )
-      .bind(input.workspaceId, input.month, input.occurredAt, input.executionToken),
+      .bind(input.workspaceId, input.month, input.occurredAt, input.executionToken, input.multiplier),
     db
       .prepare(
         `INSERT INTO usage_events
@@ -253,17 +262,16 @@ export async function chargeUsage(
          SELECT ?5,
                 (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?5),
                 ?4, ?1, ?6,
-                ${priceOf(baseColumn, "?7")},
+                ${priceOf(`p.${baseColumn}`, "?7")},
                 ?8, ?9
            FROM workspace_quota_binding b
            JOIN quota_profiles p ON p.id = b.profile_id
           WHERE b.workspace_id = ?1
             AND b.month = ?2
             AND NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)
-            AND ${priceOf(baseColumn, "?7")} <= ${RP_CEILING_MAX}
+            AND ${priceOf(`p.${baseColumn}`, "?7")} <= ${RP_CEILING_MAX}
             AND p.${baseColumn} > 0
-            AND p.${baseColumn} = CAST(p.${baseColumn} AS INTEGER)
-            AND p.${baseColumn} <= ${QUOTA_BASE_MAX}`,
+            AND p.${baseColumn} = CAST(p.${baseColumn} AS INTEGER)`,
       )
       .bind(
         input.workspaceId,
@@ -284,7 +292,7 @@ export async function chargeUsage(
     // price that belongs to the run that already paid.
     db
       .prepare(
-        `SELECT p.${baseColumn} AS base, ${priceOf(baseColumn, "?3")} AS rp
+        `SELECT p.${baseColumn} AS base, ${priceOf(`p.${baseColumn}`, "?3")} AS rp
            FROM quota_profiles p
           WHERE p.id = COALESCE(
                   (SELECT b.profile_id FROM workspace_quota_binding b
@@ -305,10 +313,12 @@ export async function chargeUsage(
   const [observed] = (results[2]?.results ?? []) as Array<{ base: number; rp: number }>;
   // A profile DID resolve and its price is outside the domain: the charge was
   // refused, not merely absent. Anything else is the caller's to interpret.
-  // `isRpCeiling` is the shared whole-positive-integer test: a stored REAL base
-  // (the INTEGER column's affinity admits one) fails it exactly as a too-large
-  // weight does, and neither may record a row.
-  if (observed !== undefined && (!isRpPrice(observed.rp) || !isRpCeiling(observed.base) || observed.base > QUOTA_BASE_MAX)) {
+  // `isStoredQuotaBase` is the STORED whole-positive-integer test: a stored REAL
+  // base (the INTEGER column's affinity admits one) fails it, and no row may be
+  // recorded from a weight no writer admitted. The weight is NOT re-bounded by
+  // `QUOTA_BASE_MAX` here — a legacy version must still charge — so the price is
+  // the only upper bound.
+  if (observed !== undefined && (!isRpPrice(observed.rp) || !isStoredQuotaBase(observed.base))) {
     return { charged: false, refused: "price-out-of-domain" };
   }
   return { charged: false };
