@@ -3343,6 +3343,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
     if (!canManageApp(gate.scope)) {
       return c.json({
         can_manage: false,
+        // A bot route serves no App chain: the chain write resolves an App
+        // installation row, which this face never has.
+        can_edit_chain: false,
         workspace_id: gate.scope.workspaceId,
         viewer_relation: viewerRelation,
         ...(target === null ? {} : { target_id: target.id }),
@@ -3378,6 +3381,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
       const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(gate.db)).value;
       return c.json({
         can_manage: true,
+        can_edit_chain: false,
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: gate.scope.workspaceId,
@@ -3441,6 +3445,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const base = {
       workspace_id: gate.scope.workspaceId,
       viewer_relation: viewerRelation,
+      can_edit_chain: false,
       targets_many: gate.targets_many,
       app: {
         github_app_id: app.github_app_id,
