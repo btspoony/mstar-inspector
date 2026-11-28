@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { RECONCILE_FIELDS, type ReconcileConfig, type ReconcileLimits, type ReconcileValues } from "../../contracts/reconcile-settings";
 import { SWEEP_FIELDS, type SweepConfig, type SweepField, type SweepLimits, type SweepValues } from "../../contracts/sweep-settings";
 import { REVIEW_ANSWERS, type ReviewsRunAnswer } from "../../contracts/review-answer";
-import { fetchJson } from "../api";
+import { ApiError, fetchJson } from "../api";
 
 const BASE = "/_internal_admin/api";
 
@@ -44,8 +44,21 @@ export type GrantRow = {
 
 export type Loaded<T> =
   | { status: "loading" }
-  | { status: "error" }
+  | { status: "error"; detail: string }
   | { status: "ready"; data: T };
+
+/**
+ * The operator console is the surface that explains a broken deployment, so a
+ * failed read carries the status and the server's own sentence — never a bare
+ * "could not load" beside a retry button.
+ */
+export function errorDetail(error: unknown): string {
+  if (error instanceof ApiError) {
+    const body = error.body.trim();
+    return body === "" ? `HTTP ${error.status}` : `HTTP ${error.status}: ${body.slice(0, 400)}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
 
 type Json = Record<string, unknown>;
 
@@ -1257,8 +1270,8 @@ export function useLoaded<T>(read: () => Promise<T>) {
       (data) => {
         if (live) setState({ status: "ready", data });
       },
-      () => {
-        if (live) setState({ status: "error" });
+      (error: unknown) => {
+        if (live) setState({ status: "error", detail: errorDetail(error) });
       },
     );
     return () => {

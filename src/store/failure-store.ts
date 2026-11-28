@@ -159,7 +159,7 @@ export type ReviewFailureRow = Omit<ReviewFailureInput, "code" | "trackId"> & {
  * `review dropped after <n> refused retries: <reason> (…)` or
  * `review dropped: comment claim restore failed: <detail>; admission refused: <reason> (…)`.
  * It is not a column and never becomes a stage value, so the read below
- * derives it. New drop formats in `handleGuardHeld` must extend the LIKE
+ * derives it. New drop formats in `handleGuardHeld` must extend the
  * predicates below to keep these counts complete.
  */
 export const ADMISSION_DROP_REASONS = Object.freeze([
@@ -197,20 +197,33 @@ export type FailureStoreWithCounts = FailureStore & {
 
 const LIST_RECENT_DEFAULT_LIMIT = 50;
 
-const admissionDropLike = (reason: AdmissionDropReason): string =>
-  `(error LIKE 'review dropped after % refused retries: ${reason} (%'
-    OR error LIKE 'review dropped: comment claim restore failed: %; admission refused: ${reason} (%')`;
+/**
+ * The two sentence shapes an admission drop writes. Matched with a prefix
+ * `substr` plus `instr`, never `LIKE`: D1 answers
+ * `LIKE or GLOB pattern too complex: SQLITE_ERROR` once a stored `error` is
+ * long enough for a wildcard pattern's backtracking to overrun SQLite's step
+ * budget, which turned the operator gauge into a 500 for the whole runtime
+ * read. Keep new drop formats on these predicates.
+ */
+const ADMISSION_DROP_AFTER_PREFIX = "review dropped after ";
+const ADMISSION_DROP_RESTORE_PREFIX = "review dropped: comment claim restore failed: ";
+
+const admissionDropMatch = (reason: AdmissionDropReason): string =>
+  `((substr(error, 1, ${ADMISSION_DROP_AFTER_PREFIX.length}) = '${ADMISSION_DROP_AFTER_PREFIX}'
+     AND instr(error, ' refused retries: ${reason} (') > 0)
+    OR (substr(error, 1, ${ADMISSION_DROP_RESTORE_PREFIX.length}) = '${ADMISSION_DROP_RESTORE_PREFIX}'
+     AND instr(error, '; admission refused: ${reason} (') > 0))`;
 
 const ADMISSION_DROP_SQL = `SELECT CASE
     ${ADMISSION_DROP_REASONS.map(
-      (reason) => `WHEN ${admissionDropLike(reason)} THEN '${reason}'`,
+      (reason) => `WHEN ${admissionDropMatch(reason)} THEN '${reason}'`,
     ).join("\n    ")}
   END AS reason,
   COUNT(*) AS drops
 FROM review_failures
 WHERE stage = 'pipeline'
   AND created_at > datetime('now', '-24 hours')
-  AND (${ADMISSION_DROP_REASONS.map((reason) => admissionDropLike(reason)).join("\n    OR ")})
+  AND (${ADMISSION_DROP_REASONS.map((reason) => admissionDropMatch(reason)).join("\n    OR ")})
 GROUP BY reason`;
 
 const GITHUB_RATE_LIMITED_SQL = `SELECT COUNT(*) AS count
