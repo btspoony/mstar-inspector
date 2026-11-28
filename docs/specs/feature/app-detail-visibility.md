@@ -113,4 +113,4 @@ Keep every authorization matrix row pinned, including field absence rather than 
 Decision history:
 - [remove global insights](../../../.agents/adr/implemented/feature/2026-09-18-per-app-insights-only.md).
 - [GitHub App / Review Bot split](../../../.agents/adr/implemented/architecture/2026-11-25-github-app-review-bot-split.md) — the two entities, their list origins and the bot detail page.
-- [App installed face and bot navigation](../../../.agents/adr/proposed/architecture/2026-11-27-app-installed-face-and-bot-navigation.md) — this section's two faces, the three creator tabs, the `/bots` directory, Credits and the archive state; the authority for every restatement above.
+- [App installed face and bot navigation](../../../.agents/adr/implemented/architecture/2026-11-27-app-installed-face-and-bot-navigation.md) — this section's two faces, the three creator tabs, the `/bots` directory, Credits and the archive state; the authority for every restatement above.
