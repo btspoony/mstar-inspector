@@ -372,6 +372,8 @@ describe("a confirmed archive whose re-read fails", () => {
       // The confirmation must also name what archiving costs other workspaces:
       // the bot becomes unselectable for new chains.
       expect(hint).toMatch(locale === "en" ? /can no longer add it to a bot chain/i : /无法再把它加入机器人链/);
+      // ...and that a workspace already mounting it keeps seeing the badge.
+      expect(hint).toMatch(locale === "en" ? /workspaces using it see/i : /使用它的工作区会看到/);
       // The other consequences stay named: the archived badge and restore.
       expect(hint).toMatch(locale === "en" ? /archived/i : /已归档/);
       expect(hint).toMatch(locale === "en" ? /restore/i : /恢复/);
@@ -445,6 +447,8 @@ describe("a confirmed archive whose re-read fails", () => {
       expect(dialog?.textContent).toContain(hint);
       expect(dialog?.textContent).toMatch(/stops being selected by any review/);
       expect(dialog?.textContent).toMatch(/can no longer add it to a bot chain/);
+      // A workspace already mounting the bot keeps seeing the 已归档 badge.
+      expect(dialog?.textContent).toMatch(/workspaces using it see .Archived/);
       expect(dialog?.textContent).toMatch(/restore it at any time/);
       // Merely OPENING the confirmation issues no write.
       expect(archivePatches).toBe(0);

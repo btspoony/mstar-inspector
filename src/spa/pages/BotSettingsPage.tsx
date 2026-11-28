@@ -106,6 +106,10 @@ export function BotPricingSection({
   // only touches the ceiling — the partial PATCH never carries it.
   const [multEdited, setMultEdited] = useState(false);
   const [busy, setBusy] = useState(false);
+  // A committed pricing write whose re-read failed leaves stored values this
+  // page cannot show, so every further write is refused until a page reload —
+  // a second PATCH would be sent blind against a draft nothing confirmed.
+  const [stale, setStale] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [shareNotice, setShareNotice] = useState<OpNotice | null>(null);
   const [pending, setPending] = useState<PendingAction | null>(null);
@@ -142,7 +146,7 @@ export function BotPricingSection({
   }
 
   async function savePricing(): Promise<void> {
-    if (busy) return;
+    if (busy || stale) return;
     // An untouched CEILING and an untouched MULTIPLIER are both OMITTED, which
     // the route reads as "leave the column alone". The ceiling's field text is
     // a READ rendering, so echoing it back would rewrite `1234 RP` as `1230 RP`
@@ -183,11 +187,21 @@ export function BotPricingSection({
         return;
       }
       const reloaded = await onReload();
-      setNotice(
-        reloaded
-          ? { kind: "success", message: t(locale, "settings.changesSaved") }
-          : { kind: "warn", message: `${t(locale, "settings.changesSaved")} ${t(locale, "bots.staleAfterSave")}` },
-      );
+      // The PATCH is committed: neither field is a pending edit any more, so a
+      // later save must never replay a value this page only remembers. Clearing
+      // here — not in the payload effect — is what survives a failed re-read.
+      setCapEdited(false);
+      setMultEdited(false);
+      if (reloaded) {
+        setNotice({ kind: "success", message: t(locale, "settings.changesSaved") });
+      } else {
+        // The stored values are now unreadable here; refuse further writes
+        // rather than PATCH a draft nothing confirmed.
+        setStale(true);
+        setNotice(
+          { kind: "warn", message: `${t(locale, "settings.changesSaved")} ${t(locale, "bots.staleAfterSave")}` },
+        );
+      }
     } catch {
       setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
     } finally {
@@ -266,7 +280,7 @@ export function BotPricingSection({
             <p className="text-sm text-muted-foreground">{t(locale, "botDetail.share.inactiveHint")}</p>
           )}
           <div className="flex items-center gap-3">
-            <Button type="button" disabled={busy} onClick={() => void savePricing()}>
+            <Button type="button" disabled={busy || stale} onClick={() => void savePricing()}>
               {t(locale, "common.save")}
             </Button>
             <NoticeRegion notice={notice} />

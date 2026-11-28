@@ -58,7 +58,12 @@ function payload(overrides: Partial<BotSettingsPayload> = {}): BotSettingsPayloa
 
 type Sent = { path: string; method: string; body: unknown };
 
-async function mount(overrides: Partial<BotSettingsPayload> = {}, status = 200, body = "{}") {
+async function mount(
+  overrides: Partial<BotSettingsPayload> = {},
+  status = 200,
+  body = "{}",
+  reloadOk = true,
+) {
   const { win, cleanup } = installDom("http://localhost/dashboard/acme/repos");
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
@@ -82,7 +87,7 @@ async function mount(overrides: Partial<BotSettingsPayload> = {}, status = 200, 
           payload: payload(overrides),
           onReload: async () => {
             reloads.push(1);
-            return true;
+            return reloadOk;
           },
         }),
       );
@@ -325,6 +330,46 @@ describe("the bot page's share switch", () => {
       const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
       expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 3 } }]);
       expect(String(view.container.textContent)).not.toContain(t(locale, "bots.overrideInvalid"));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a failed re-read after a committed save refuses the next write instead of replaying the old value", async () => {
+    // The ceiling save landed, the re-read did not. The committed value is no
+    // longer a pending edit, and the page cannot show what the store now holds
+    // — so it must not send a second PATCH built on values it cannot confirm.
+    const view = await mount(
+      { rp_per_credit: 1000, app: { ...payload().app, scope: "shared", multiplier: 2, monthly_rp: 1234 } },
+      200,
+      "{}",
+      false,
+    );
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, capInput, "20");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      let pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { monthly_rp: 20000 } }]);
+      expect(view.reloads).toHaveLength(1);
+      expect(String(view.container.textContent)).toContain(t(locale, "bots.staleAfterSave"));
+
+      // Editing only the multiplier now must not resurrect the ceiling: the
+      // save is refused outright and nothing is sent.
+      const multiplier = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.multiplier")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, multiplier, "5");
+      const save = view.buttonWith(t(locale, "common.save")) as unknown as HTMLButtonElement | null;
+      expect(save?.disabled).toBe(true);
+      await view.click(save);
+
+      pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toHaveLength(1);
+      expect(pricing[0]?.body).not.toHaveProperty("multiplier");
     } finally {
       await view.cleanup();
     }
