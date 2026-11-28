@@ -422,9 +422,11 @@ export function InstalledChainSection({
   // One row states only the facts a reader picks a bot by; every other fact —
   // order, origin, description, default chain, runtime, multiplier, cap — lives
   // in that row's own disclosure, so a long chain stays scannable.
+  // The fixed columns need 30rem; below that the container scrolls sideways so
+  // the order controls stay reachable on a phone (they do not wrap).
   const rowGrid = canEditChain
-    ? "grid-cols-[minmax(0,1fr)_9rem_7rem_auto]"
-    : "grid-cols-[minmax(0,1fr)_9rem_7rem]";
+    ? "grid min-w-[30rem] grid-cols-[minmax(0,1fr)_9rem_7rem_auto]"
+    : "grid min-w-[30rem] grid-cols-[minmax(0,1fr)_9rem_7rem]";
   return (
     <section
       data-slot="installed-chain"
@@ -464,7 +466,7 @@ export function InstalledChainSection({
       {chain.length === 0 ? (
         <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>
       ) : (
-        <div className="overflow-hidden rounded-md border border-(--border-default)">
+        <div className="overflow-x-auto rounded-md border border-(--border-default)">
           <div
             data-slot="installed-chain-header"
             className={`grid ${rowGrid} items-center gap-3 border-b border-(--border-default) bg-(--surface-raised) px-3 py-2 text-xs text-(--text-muted)`}
@@ -487,7 +489,7 @@ export function InstalledChainSection({
                     ? t(locale, "credits.unbounded")
                     : formatCredits(row.effective_monthly_rp, rpPerCredit);
               return (
-                <li key={`${row.position}:${row.bot_id}`} className="border-b border-(--border-subtle) last:border-b-0">
+                <li key={`${row.position}:${row.bot_id}`} className="min-w-[30rem] border-b border-(--border-subtle) last:border-b-0">
                   <details className="group">
                     <summary
                       className={`grid ${rowGrid} cursor-pointer list-none items-center gap-3 px-3 py-2 hover:bg-(--surface-overlay) [&::-webkit-details-marker]:hidden`}
