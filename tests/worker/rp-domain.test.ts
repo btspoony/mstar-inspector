@@ -384,6 +384,98 @@ describe("the SPA parser applies the same domain", () => {
     expect(parseApps(body)).not.toBeNull();
   });
 
+  // A finite product whose factors are ordered badly for a fold: 1000^106 ×
+  // 0.01^5 = 10^308. Every intermediate of a left fold is `Infinity` here, and
+  // the previous mantissa scheme was refused at its FINAL rescale (mantissa
+  // 8.29e-9 × 2^1050), so a representable chain failed the whole list.
+  test("a chain that overflows every intermediate but whose product fits still serves and parses", async () => {
+    world();
+    const factors = [...Array(106).fill(BOT_MULTIPLIER_MAX), ...Array(5).fill(BOT_MULTIPLIER_MIN)];
+    expect(factors.reduce((product, factor) => product * factor, 1)).toBe(Number.POSITIVE_INFINITY);
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    factors.forEach((factor, index) => {
+      const id = `bot-wide-${index}`;
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, factor, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      apps: Array<{ github_app_id: number; month: { multiplier: number } | null }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!;
+    expect(Number.isFinite(row.month?.multiplier)).toBe(true);
+    expect(row.month!.multiplier).toBeGreaterThan(9e307);
+    expect(parseApps(body)).not.toBeNull();
+  });
+
+  // A reorder mounts no new id, so the write guard never runs: the SAME multiset
+  // must serve the SAME bits whichever order the operator left it in. This pair
+  // is where the previous mantissa scheme disagreed with itself across orders.
+  test("a pure reorder of two factors serves the same value bit-for-bit", async () => {
+    world();
+    const factors = [1e-316, 0.1];
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    factors.forEach((factor, index) => {
+      const id = `bot-order-${index}`;
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, factor, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const served = async (): Promise<number> => {
+      const session = await createSessionValue("dana", null, SESSION_SECRET);
+      const res = await worker.fetch(
+        new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+          headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+        }),
+        envFor(),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        apps: Array<{ github_app_id: number; month: { multiplier: number } | null }>;
+      };
+      return body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!.month!.multiplier;
+    };
+    const forward = await served();
+    // Same multiset, opposite order: swap which factor sits at each position.
+    // `position` itself is unique, so the ROWS stay and only their bot changes.
+    db.raw
+      .prepare(
+        `UPDATE app_install_bots
+            SET bot_id = CASE position WHEN 1 THEN 'bot-order-1' ELSE 'bot-order-0' END
+          WHERE github_app_id = ? AND workspace_id = ?`,
+      )
+      .run(BOT_ROW, OFFICIAL);
+    const reversed = await served();
+    expect(Object.is(forward, reversed)).toBe(true);
+    expect(forward).toBeGreaterThan(0);
+  });
+
   // The other end: no double holds the product, so the route names the refusal
   // instead of serving `Infinity` (which every reader rejects).
   test("a chain whose product no double holds answers an explicit refusal", async () => {

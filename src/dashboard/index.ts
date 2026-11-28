@@ -2131,33 +2131,44 @@ async function appsListWithHealth(
 /**
  * The served chain factor: the product of the mounted multipliers.
  *
- * Accumulated as a mantissa rescaled by powers of two, so no INTERMEDIATE value
- * overflows or underflows. A legal chain can put 103 `1000×` factors before its
- * sub-1 ones: a plain left fold reaches `Infinity` midway while the product is
- * `10`. The final rescale is one multiply.
+ * The factors are taken in a canonical order (ascending magnitude), each split
+ * into a mantissa in `[1, 2)` and a power-of-two exponent, so the result depends
+ * only on the multiset of mounted factors and never on the order the operator
+ * mounted them in. The scale is applied ONCE, halved across two multiplies, so
+ * no intermediate value leaves the double range while the product does not:
+ * a legal chain can put 103 `1000×` factors before its sub-1 ones, where a plain
+ * left fold reaches `Infinity` midway while the product is `10`, and 106 `1000×`
+ * factors followed by five `0.01` factors make `1e308`, which one unhalved
+ * `2 ** exponent` scale would overflow.
  *
- * `null` = no double holds the product (the exponent runs past the type's
- * range). The caller refuses that explicitly rather than serving `Infinity`,
- * which every reader rejects as a non-product.
+ * `null` = no double holds the product (it is `0` or `Infinity`, i.e. outside
+ * the double range). The caller refuses that explicitly rather than serving a
+ * value every reader rejects as a non-product.
  */
 function servedChainProduct(factors: readonly number[]): number | null {
-  const SPLIT = 2 ** 30;
-  let mantissa = 1;
-  let exponent = 0;
   for (const factor of factors) {
     if (!Number.isFinite(factor) || factor <= 0) return null;
-    mantissa *= factor;
-    while (mantissa >= SPLIT) {
-      mantissa /= SPLIT;
-      exponent += 30;
-    }
-    while (mantissa > 0 && mantissa < 1 / SPLIT) {
-      mantissa *= SPLIT;
-      exponent -= 30;
-    }
-    if (!Number.isFinite(mantissa) || mantissa === 0) return null;
   }
-  const product = mantissa * 2 ** exponent;
+  let mantissa = 1;
+  let exponent = 0;
+  for (const factor of [...factors].sort((a, b) => a - b)) {
+    let scaled = factor;
+    while (scaled >= 2) {
+      scaled /= 2;
+      exponent += 1;
+    }
+    while (scaled < 1) {
+      scaled *= 2;
+      exponent -= 1;
+    }
+    mantissa *= scaled;
+    while (mantissa >= 2) {
+      mantissa /= 2;
+      exponent += 1;
+    }
+  }
+  const whole = Math.trunc(exponent / 2);
+  const product = mantissa * 2 ** whole * 2 ** (exponent - whole);
   return Number.isFinite(product) && product > 0 ? product : null;
 }
 
