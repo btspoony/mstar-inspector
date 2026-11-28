@@ -3,19 +3,16 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
-import type {
-  AppChainEntry,
-  SettingsBlockedPayload,
-  SettingsManagePayload,
-  SettingsPayload,
-  SettingsReadOnlyPayload,
-} from "../../src/spa/pages/data";
 import {
-  AppDetailView,
   appDetailFace,
-  InstalledChainSection,
   parseAppDetailFrom,
-} from "../../src/spa/pages/AppDetailPage";
+  type AppChainEntry,
+  type SettingsBlockedPayload,
+  type SettingsManagePayload,
+  type SettingsPayload,
+  type SettingsReadOnlyPayload,
+} from "../../src/spa/pages/data";
+import { AppDetailView, InstalledChainSection } from "../../src/spa/pages/AppDetailPage";
 import { installDom, withMarkup } from "./dom";
 
 const WORKSPACE_ID = "ws_0123456789abcdefghijkl";

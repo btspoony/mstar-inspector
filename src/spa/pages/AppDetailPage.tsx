@@ -40,20 +40,22 @@ import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./Page
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
+  appDetailFace,
   appDetailSearchQuery,
   appDisplayName,
   appStatusPill,
   hasTargetFacts,
+  parseAppDetailFrom,
   parseAppDetailSearch,
   parseModels,
   parseSettings,
+  type AppDetailFrom,
   type AppDetailSearch,
   type AppChainEntry,
   type BlockedReason,
   type ModelOptionGroup,
   type SettingsPayload,
   type TargetSettingsPayload,
-  type ViewerRelation,
 } from "./data";
 import type { PendingAction } from "./SettingsPage";
 
@@ -114,33 +116,6 @@ async function loadModelGroups(base: string, appId: string): Promise<ModelOption
   } catch {
     return [];
   }
-}
-
-/**
- * The `from` wayfinding param: the list the App was opened from picks the
- * face. It rides beside the shared `AppDetailSearch` state because
- * `parseAppDetailSearch` owns only the tab grammar.
- */
-export type AppDetailFrom = "installed" | "created";
-
-/** The two App detail faces: a mount this workspace installed, or the owner's creation. */
-export type AppDetailFace = "installed" | "creator";
-
-/** Only the two valid `from` values win; anything else reads as absent. */
-export function parseAppDetailFrom(search: string): AppDetailFrom | null {
-  const from = new URLSearchParams(search).get("from");
-  return from === "installed" || from === "created" ? from : null;
-}
-
-/**
- * Face selection. The served relation is the authority: an installed-only App
- * is a mount and a created-only App is its owner's creation, whatever the URL
- * says. `from` only picks between faces when BOTH relations hold, and without
- * it that case opens as the owner's creation (the creator face is the default).
- */
-export function appDetailFace(relation: ViewerRelation, from: AppDetailFrom | null): AppDetailFace {
-  if (relation === "both" && from !== null) return from === "installed" ? "installed" : "creator";
-  return relation === "installed" ? "installed" : "creator";
 }
 
 /**

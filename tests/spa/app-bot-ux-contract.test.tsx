@@ -23,6 +23,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import type {
   AppChainEntry,
+  AppDetailFrom,
   BotConfigSections,
   SettingsManagePayload,
   SettingsReadOnlyPayload,
@@ -30,8 +31,8 @@ import type {
   UsableBotRow,
   UsableBotsPayload,
 } from "../../src/spa/pages/data";
-import { formatCredits } from "../../src/spa/pages/data";
-import { AppDetailView, appDetailFace, type AppDetailFrom } from "../../src/spa/pages/AppDetailPage";
+import { appDetailFace, formatCredits } from "../../src/spa/pages/data";
+import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import { BotsView } from "../../src/spa/pages/BotsPage";
 import { BotDetailPage } from "../../src/spa/pages/BotDetailPage";
 import type { SpaBoot } from "../../src/spa/boot";

@@ -10,8 +10,9 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
-import { AppDetailView, appDetailFace } from "../../src/spa/pages/AppDetailPage";
+import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import {
+  appDetailFace,
   parseSettings,
   type AppChainEntry,
   type SettingsBlockedInstallPayload,
