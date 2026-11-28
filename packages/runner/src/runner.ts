@@ -374,7 +374,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
     // invariant: (AL-23-1): shape validation ONLY here — the id
     // pattern/baseUrl/api-enum/model bounds live dashboard-side
     // (assertCustomProvider). The declarations carry NO keys: each key rides
-    // the STDIN credential payload under its provider id (packages/shared/src/credential-payload)
+    // the STDIN credential payload under its provider id (packages/shared/src/credential-payload.ts)
     // and the runner loads it into the run's in-memory credential store (zero
     // key literals in any file).
     const list = record.customProviders;
@@ -526,7 +526,7 @@ export function createInMemoryAuthStorage(): Promise<AuthStorage> {
  * no `apiKey` (a tier-2 config override would suppress this pool entirely).
  *
  * Fail-closed, and BEFORE anything is written: the stdin payload is validated
- * (packages/shared/src/credential-payload) as the first statement, so an unreadable payload, a
+ * (packages/shared/src/credential-payload.ts) as the first statement, so an unreadable payload, a
  * missing/empty pool array or a non-string/empty entry aborts the run before
  * any credential exists and before the runtime starts — never a partial pool.
  * Diagnostics carry provider id + pool size only; key VALUES are never logged
@@ -727,12 +727,6 @@ export async function main(
       return 1;
     }
   }
-  // why: Unlike the paths above, the token-usage document is analysis-only —
-  // its startup clear degrades to a logged fault and the run still reaches
-  // runReview. Rule: an unremovable stale document is a capture fault for
-  // this run — the write below is suppressed so this run's own write path
-  // cannot replace the survivor; the consumer's nonce check then provably
-  // rejects whatever old document is still readable there.
   const tokenUsageClearFailed = !clearTokenUsageDoc(tokenUsagePath);
   let tokenUsageNonce: string | undefined;
   let agentDir: string | undefined;
@@ -825,13 +819,6 @@ export async function main(
           );
         }
       }
-      // why: Same side-document discipline as appliedModel — the document is
-      // stamped with THIS run's consumer-issued nonce, so a stale document a
-      // failed clear left readable is rejected consumer-side instead of being
-      // read as this run's usage. A missing input nonce or a failed clear
-      // suppresses the write (a nonce-less document is never consumable); a
-      // capture or write fault is logged, never thrown: usage is analysis
-      // data, not a gate.
       if (tokenUsageClearFailed || tokenUsageNonce === undefined || tokenUsage === undefined || tokenUsage.length === 0) {
         clearTokenUsageDoc(tokenUsagePath);
       } else {
@@ -874,10 +861,6 @@ export async function main(
       if (recheckOutPath !== undefined && recheckStatus !== undefined) {
         writeRecheckStatus(recheckStatus, statusPath);
       }
-      // why: `coverage` rides BESIDE the engine envelope, never inside it —
-      // `mstar.review/v1` is closed and the consumer keys off its shape. The
-      // block is runner-owned, so a malformed one is refused here instead of
-      // being published as a claim the round cannot support.
       if (coverage !== undefined && !isReviewCoverage(coverage)) {
         console.error(
           `review: coverage block failed its own shape: ${JSON.stringify(coverage).slice(0, 300)}`,
@@ -919,9 +902,6 @@ export async function main(
         console.log(JSON.stringify(signal));
         return 0;
       }
-      // why: A no-output failure is still a FAILURE (exit 1, worker records it),
-      // but the recheck document it managed to settle is real evidence and is
-      // written exactly as the budget-stop path writes it.
       if (error instanceof ReviewNoOutputFailure) {
         if (recheckOutPath !== undefined && error.recheck !== null) {
           try {

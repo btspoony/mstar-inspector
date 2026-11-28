@@ -21,9 +21,6 @@ const limit = RECONCILE_DEFAULTS.lifecycleSelectLimit;
 const IN_THREADS = "p.id IN (SELECT t.publication_id FROM review_threads t WHERE t.review_id IS NULL)";
 const EXISTS_THREADS = "EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)";
 
-// The after arm times the exact statement listLineBatchRecovery prepares; the
-// before arm is that statement with the thread predicate put back in its
-// previous EXISTS form, so neither arm is a hand-kept copy of production SQL.
 async function statements(): Promise<{ before: string; after: string }> {
   const handle = createMigratedTestD1();
   let after = "";
