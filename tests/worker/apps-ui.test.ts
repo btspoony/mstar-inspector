@@ -669,6 +669,19 @@ describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
     expect(body.shared_bots).toEqual([]);
   });
 
+  test("the viewer role is the workspace role, agreeing with /api/members", async () => {
+    const db = await seededWorld();
+    const env = makeEnv(db);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
+    // octocat holds users.role = 'admin' but workspace_members.role = 'owner'.
+    const apps = (await (await get("/dashboard/default/api/apps", cookie, env)).json()) as ListBody;
+    const members = (await (await get("/dashboard/default/api/members", cookie, env)).json()) as {
+      viewer: { login: string; role: string };
+    };
+    expect(apps.viewer).toEqual({ login: "octocat", role: "owner" });
+    expect(members.viewer).toEqual(apps.viewer);
+  });
+
   test("a shared bot is offered with this workspace's count and never joins the apps list", async () => {
     const db = await seededWorld();
     db.raw
