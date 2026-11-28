@@ -29,6 +29,7 @@ import {
   DASHBOARD_ROOT_PATHS,
   isSpaAssetPath,
   matchSpaRoute,
+  legacyBotsTabRedirect,
   settingsTabRedirect,
   targetsFamilyRedirect,
   wantsHtml,
@@ -215,6 +216,8 @@ export function spaDispatch(): MiddlewareHandler<{ Bindings: Env }> {
     if (settingsTarget !== null) return c.redirect(settingsTarget, 302);
     const renamedTargets = targetsFamilyRedirect(pathname);
     if (renamedTargets !== null) return c.redirect(renamedTargets, 302);
+    const legacyBots = legacyBotsTabRedirect(pathname, url.search);
+    if (legacyBots !== null) return c.redirect(legacyBots, 302);
     const assets = c.env.ASSETS;
     if (!assets) return next();
     const accept = c.req.header("Accept") ?? null;

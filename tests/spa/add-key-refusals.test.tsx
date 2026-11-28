@@ -11,6 +11,7 @@ const locale = "en" as const;
 function payload(): BotSettingsPayload {
   return {
     can_manage: true,
+    archived: false,
     app: {
       github_app_id: 1,
       id: "app-demo",

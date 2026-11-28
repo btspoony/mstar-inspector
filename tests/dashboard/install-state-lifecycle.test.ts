@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedWorkspaceMember, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 
 // The install-state lifecycle: the two writers (`createApp`, `bindInstallation`)
@@ -32,10 +32,18 @@ function seedApp(
     .prepare(
       `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
-          status, created_at, updated_at)
-       VALUES (?, ?, ?, 'enc', 'enc', 'fixture', 'active', ?, ?)`,
+          status, scope, shared_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'enc', 'enc', 'fixture', 'active', ?, ?, ?, ?)`,
     )
-    .run(id, nextGithubAppId, opts.name ?? id, TS, TS);
+    .run(
+      id,
+      nextGithubAppId,
+      opts.name ?? id,
+      opts.scope ?? "owned",
+      opts.scope === "shared" ? TS : null,
+      TS,
+      TS,
+    );
   db.raw
     .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
     .run(id, workspaceId);
@@ -81,6 +89,15 @@ function chain(db: TestD1): Array<{ github_app_id: string; workspace_id: string;
         ORDER BY github_app_id, workspace_id, position`,
     )
     .all() as Array<{ github_app_id: string; workspace_id: string; position: number; bot_id: string }>;
+}
+
+/**
+ * The verified actor a bind requires. The write re-checks this user's CURRENT
+ * owner/admin membership inside its own statement, so every direct store call
+ * here names a real manager of the workspace it binds into.
+ */
+function binder(db: TestD1, workspaceId: string, role: "owner" | "admin" | "member" = "owner"): string {
+  return seedWorkspaceMember(db, workspaceId, `binder-${workspaceId}`, role);
 }
 
 function count(db: TestD1, table: string, where = ""): number {
@@ -177,7 +194,7 @@ describe("bindInstallation writes the install state and copies the owner's chain
   test("a first bind creates exactly one state and copies the rows the consumer may mount", async () => {
     const db = bindWorld();
 
-    expect(await createReviewBotsStore(db).bindInstallation("app-shared", 501, CONSUMER)).toBe("bound");
+    expect(await createReviewBotsStore(db).bindInstallation("app-shared", 501, CONSUMER, binder(db, CONSUMER))).toBe("bound");
 
     expect(states(db)).toEqual([
       { github_app_id: "app-shared", workspace_id: OWNER },
@@ -198,9 +215,9 @@ describe("bindInstallation writes the install state and copies the owner's chain
     const store = createReviewBotsStore(db);
     seedInstallation(db, { appId: "app-shared", installationId: 502, bound: null });
 
-    await store.bindInstallation("app-shared", 501, CONSUMER);
+    await store.bindInstallation("app-shared", 501, CONSUMER, binder(db, CONSUMER));
     const afterFirst = { states: states(db), chain: chain(db) };
-    expect(await store.bindInstallation("app-shared", 502, CONSUMER)).toBe("bound");
+    expect(await store.bindInstallation("app-shared", 502, CONSUMER, binder(db, CONSUMER))).toBe("bound");
 
     // The fixed point: the state row is the same one, and the chain is
     // byte-identical — in particular no SECOND row at position 1.
@@ -233,7 +250,7 @@ describe("bindInstallation writes the install state and copies the owner's chain
     );
     seedInstallation(db, { appId: "app-bare", installationId: 601, bound: null });
 
-    await createReviewBotsStore(db).bindInstallation("app-bare", 601, CONSUMER);
+    await createReviewBotsStore(db).bindInstallation("app-bare", 601, CONSUMER, binder(db, CONSUMER));
 
     expect(states(db)).toContainEqual({ github_app_id: "app-bare", workspace_id: CONSUMER });
     expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([]);
@@ -245,7 +262,7 @@ describe("bindInstallation writes the install state and copies the owner's chain
     const db = bindWorld();
     seedInstallation(db, { appId: "app-shared", installationId: 502, bound: OTHER });
 
-    expect(await createReviewBotsStore(db).bindInstallation("app-shared", 502, CONSUMER)).toBe("bound_elsewhere");
+    expect(await createReviewBotsStore(db).bindInstallation("app-shared", 502, CONSUMER, binder(db, CONSUMER))).toBe("bound_elsewhere");
 
     expect(states(db)).toEqual([{ github_app_id: "app-shared", workspace_id: OWNER }]);
     db.raw.close();
@@ -351,7 +368,7 @@ describe("uninstall removes the aggregate only when the App is no longer install
     await store.markInstallationRemoved("app-shared", 702);
     seedInstallation(db, { appId: "app-shared", installationId: 703, bound: null });
 
-    expect(await store.bindInstallation("app-shared", 703, CONSUMER)).toBe("bound");
+    expect(await store.bindInstallation("app-shared", 703, CONSUMER, binder(db, CONSUMER))).toBe("bound");
     expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
       { github_app_id: "app-shared", workspace_id: CONSUMER },
     ]);
@@ -434,7 +451,10 @@ describe("the chain read batches its spend", () => {
         owned: false,
         available: true,
         multiplier: 2.5,
-        monthlyRp: null,
+        effectiveMonthlyRp: null,
+        archived: false,
+        defaultChain: null,
+        runtime: "omp",
       },
     ]);
 
@@ -442,6 +462,67 @@ describe("the chain read batches its spend", () => {
     db.raw.run("UPDATE review_bots SET scope = 'owned' WHERE id = 'app-a'");
     const revoked = (await createReviewBotsStore(db).listInstallChainBots(OWNER)).get("app-a")!;
     expect(revoked[0]!.available).toBe(false);
+    db.raw.close();
+  });
+
+  /**
+   * A retained chain row keeps the MOUNT and its history; it does not keep the
+   * configuration the owner wrote after this workspace's relation ended. The
+   * default selector and the runtime harness are owner configuration, so they
+   * are withheld once the bot is unshared or archived.
+   */
+  test("a retained row withholds the default chain and the runtime once its bot is not available", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER);
+    seedApp(db, "app-a", { workspaceId: OTHER, scope: "shared" });
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-a', '${OWNER}', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-a', '${OWNER}', 1, 'app-a');
+       INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
+         VALUES ('app-a', 'default', 'anthropic/claude', 1, '${TS}', '${TS}');`,
+    );
+
+    const live = (await createReviewBotsStore(db).listInstallChainBots(OWNER)).get("app-a")!;
+    expect(live[0]).toMatchObject({ available: true, defaultChain: "anthropic/claude", runtime: "omp" });
+
+    // Unshared: the mount stays, its configuration does not.
+    db.raw.run("UPDATE review_bots SET scope = 'owned', sandbox_image_id = 'omp-2' WHERE id = 'app-a'");
+    const unshared = (await createReviewBotsStore(db).listInstallChainBots(OWNER)).get("app-a")!;
+    expect(unshared[0]).toMatchObject({
+      position: 1,
+      botId: "app-a",
+      available: false,
+      archived: false,
+      // Availability and history survive; the new configuration does not.
+      multiplier: 1,
+      defaultChain: null,
+      runtime: null,
+    });
+    db.raw.close();
+  });
+
+  test("an archived row lists its mount but never its configuration", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-a");
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-a', '${OWNER}', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-a', '${OWNER}', 1, 'app-a');
+       INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
+         VALUES ('app-a', 'default', 'anthropic/claude', 1, '${TS}', '${TS}');
+       UPDATE review_bots SET archived_at = '${TS}' WHERE id = 'app-a';`,
+    );
+
+    const chain = (await createReviewBotsStore(db).listInstallChainBots(OWNER)).get("app-a")!;
+    expect(chain[0]).toMatchObject({
+      available: true,
+      archived: true,
+      defaultChain: null,
+      runtime: null,
+    });
     db.raw.close();
   });
 });
@@ -721,7 +802,7 @@ describe("F2 R2 — the revival decision lives inside the batch", () => {
   test("reconcile that clears nothing restores nothing and sweeps nothing", async () => {
     const db = await sweptByRemoval();
     const store = createReviewBotsStore(db);
-    await store.bindInstallation("app-shared", 1701, CONSUMER);
+    await store.bindInstallation("app-shared", 1701, CONSUMER, binder(db, CONSUMER));
     await Bun.sleep(2);
     const observedAt = await store.currentTimestamp();
     const before = { states: states(db), chain: chain(db) };

@@ -49,7 +49,7 @@ const CHAIN_SQL = `
   SELECT ib.bot_id AS bot_id, ib.position AS position, r.workspace_id AS workspace_id,
          r.scope AS scope, r.monthly_rp AS monthly_rp
     FROM app_install_bots ib
-    JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
+    JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL AND r.archived_at IS NULL
    WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2
    ORDER BY ib.position ASC`;
 
@@ -128,14 +128,17 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
     }
     if (bot.workspaceId === target.workspace_id) {
       // ZERO quota reads from here to the return: an own bot is admitted by
-      // ownership alone (D15).
+      // ownership alone (D15). Its stored price is enforced at the CHARGE
+      // (`chargeUsage` refuses an out-of-domain multiplier for every path), so
+      // selection here needs no read and cannot admit an unpriceable charge.
       return { kind: "selected", botId: bot.botId };
     }
     if (mode === "self-hosted") {
       // Self-hosted has no plan and no quota: the plan is unlimited by
       // definition, so a shared bot is selected without touching a profile or a
       // ceiling. Resolving one there would refuse on an absent profile row for a
-      // deployment that never needed quota at all.
+      // deployment that never needed quota at all. The price domain is enforced
+      // at the charge for this path too.
       return { kind: "selected", botId: bot.botId };
     }
 
@@ -155,9 +158,15 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
 
     const month = quotaMonth(now);
     const profile = await resolveWorkspaceQuotaProfile(db, target.workspace_id, month.month, now.toISOString());
-    const multiplier = await readBotMultiplier(db, bot.botId);
+    // The consumer's price: this walk reaches it only for a SHARED bot, whose
+    // owner is another workspace, so `readBotMultiplier` answers the stored
+    // factor. The own-bot fast path above is the ×1 case and reads no price.
+    const multiplier = await readBotMultiplier(db, bot.botId, target.workspace_id);
     if (multiplier === null) return { kind: "refused", refusal: { kind: "entitlement-unreadable" } };
     const cost = rpFor(level, multiplier, profile);
+    // An unrepresentable price is refused, never metered: the writers bound both
+    // factors, so only a row from elsewhere reaches this.
+    if (cost === null) return { kind: "refused", refusal: { kind: "entitlement-unreadable" } };
 
     // Plan month: SHARED RP ONLY — an own bot's spend never counts here.
     const sharedUsed = await sharedMonthlyRp(db, target.workspace_id, month);

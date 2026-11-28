@@ -3254,11 +3254,14 @@ async function preparePhase(
     // the usage row in one batch. The three commit together, so a replay binds
     // nothing (I1), a failed lookup or insert leaves no binding behind, and a
     // concurrent first metering cannot split the pin from its usage row.
-    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
+    // The bot's own workspace pays ×1; a consuming workspace pays the stored
+    // multiplier. `usageWorkspaceId` IS the executing workspace — the one this
+    // review's spend is attributed to — so no extra read decides the owner.
+    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId, usageWorkspaceId);
     if (multiplier === null) {
       throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
     }
-    const { charged } = await chargeUsage(deps.env.DB, {
+    const { charged, refused } = await chargeUsage(deps.env.DB, {
       reviewId,
       executionToken,
       workspaceId: usageWorkspaceId,
@@ -3270,11 +3273,19 @@ async function preparePhase(
       botId: payload.botRef.botId,
     });
     if (!charged) {
-      // The batch appended nothing. Two causes, and only one is benign:
+      // The batch appended nothing. Three causes, only one benign:
       //  * the token was already charged — a replay, nothing to do;
+      //  * the stored factors price outside the RP domain — the charge was
+      //    REFUSED at the write, and a bot or profile that only a stale row
+      //    could produce must reach the failure row, never be metered;
       //  * no profile covers the instant, so the review ran unbilled. That is a
       //    LOST CHARGE and must reach the failure row the backfill lane reads,
       //    never be swallowed — so it throws into the catch below.
+      if (refused === "price-out-of-domain") {
+        throw new Error(
+          `charge refused: bot '${payload.botRef.botId}' prices this ${level} review outside the RP domain`,
+        );
+      }
       if (!(await hasUsageEventForExecutionToken(deps.env.DB, executionToken))) {
         throw new Error(QUOTA_PROFILES_EMPTY_ERROR);
       }

@@ -1,5 +1,6 @@
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
+import { isRpPrice } from "../contracts/rp-limits";
 import type { D1Like } from "./types";
 
 /** One resolved profile, in the vocabulary the faces and the form use. */
@@ -125,21 +126,41 @@ export async function resolveWorkspaceQuotaProfile(
 }
 
 /**
- * The executing bot's price multiplier (D11). One statement, one column: the
- * metering path and the enqueue ceiling both read it here rather than each
- * carrying their own copy of the SQL.
+ * The price factor a review through this bot costs `workspaceId` (D11, D15): the
+ * bot's OWNER pays ×1 — a stored multiplier is a CONSUMER price, and the owner
+ * never pays its own — while any other workspace pays the stored factor. This is
+ * the same rule the Credits faces state (`effectiveMultiplier` in
+ * `spa/pages/credits`), applied where the price is actually charged.
+ *
+ * One statement, one row: the metering path and the enqueue ceiling both read it
+ * here rather than each carrying their own copy of the SQL.
  *
  * A bot row that is missing or soft-deleted answers `null`; the callers treat
  * that as unreadable and refuse, never as a free (1×) price.
  */
-export async function readBotMultiplier(db: D1Like, botId: string): Promise<number | null> {
+export async function readBotMultiplier(
+  db: D1Like,
+  botId: string,
+  workspaceId: string,
+): Promise<number | null> {
   const row = await db
     // shortcut: tenant-bypass — addressed by the bot's own id, and the
-    // projection is one price column; no identity or ownership is read.
+    // projection is that single price column: no identity, no ownership.
     .prepare(`SELECT multiplier FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
     .bind(botId)
     .first<{ multiplier: number }>();
-  return row?.multiplier ?? null;
+  if (row === null || row === undefined) return null;
+  // The owner equality on its own: it projects one flag and compares the row's
+  // workspace with the CALLER's, so no ownership column is ever selected — the
+  // maintenance-read allowlist (`tests/store/tenant-read-face.test.ts`) keeps
+  // that true for every read of this table.
+  const own = await db
+    // shortcut: tenant-bypass — by the bot's own id, plus the caller's own
+    // workspace; the projection is one constant flag.
+    .prepare(`SELECT 1 AS owned FROM review_bots WHERE id = ?1 AND workspace_id = ?2 AND deleted_at IS NULL`)
+    .bind(botId, workspaceId)
+    .first<{ owned: number }>();
+  return own === null || own === undefined ? row.multiplier : 1;
 }
 
 /**
@@ -181,9 +202,17 @@ export async function resolveWorkspaceMonthlyQuota(
  * The multiplier belongs to the executing bot, not the profile (D37): a bot's
  * own key source no longer scales its price, and the profile keeps only the
  * level weights and the credit denominator.
+ *
+ * FAIL CLOSED (`null`): a product outside {@link isRpPrice}'s domain is not a
+ * price — `Infinity` from a runaway multiplier, or a value past the shared
+ * ceiling domain that no reader could compare against a stored ceiling. The
+ * writers refuse those inputs ({@link isBotMultiplier}), so reaching this means
+ * the row was written by something else; the caller refuses the delivery rather
+ * than metering an unrepresentable amount.
  */
-export function rpFor(level: ReviewLevel, multiplier: number, profile: QuotaProfile): number {
-  return Math.max(1, Math.ceil(profile.base[level] * multiplier));
+export function rpFor(level: ReviewLevel, multiplier: number, profile: QuotaProfile): number | null {
+  const rp = Math.max(1, Math.ceil(profile.base[level] * multiplier));
+  return isRpPrice(rp) ? rp : null;
 }
 
 /**

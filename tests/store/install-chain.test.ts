@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
+import { isServedChainProduct } from "../../src/contracts/rp-limits";
 
 const TS = "2026-10-24T00:00:00.000Z";
 
@@ -141,6 +142,64 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
     // The previous chain (empty here) is what the install still has — never the
     // half-written one this call would otherwise have left.
     expect(chainOf(db, "app-1", "default")).toEqual([]);
+    db.raw.close();
+  });
+
+  /**
+   * Archive stops the relay from selecting a bot, so an ARCHIVED bot is never a
+   * NEW mount. A row the chain already holds is different: it stays mounted
+   * (reorderable and removable) until an operator takes it out.
+   */
+  test("an archived bot is refused as a NEW mount, atomically", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-archived", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a"] });
+
+    db.raw.prepare("UPDATE review_bots SET archived_at = '2026-02-01T00:00:00.000Z' WHERE id = 'bot-archived'").run();
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-archived", "bot-a"],
+      }),
+    ).toBe("bot_unavailable");
+    // The guard rolled the DELETE back with the rest: the previous chain stands.
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-a" }]);
+    db.raw.close();
+  });
+
+  test("a RETAINED archived row survives a reorder", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-archived", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({
+      appId: "app-1",
+      workspaceId: "default",
+      botIds: ["bot-a", "bot-archived"],
+    });
+
+    // Archiving a bot an install ALREADY mounts must not silently unmount it.
+    db.raw.prepare("UPDATE review_bots SET archived_at = '2026-02-01T00:00:00.000Z' WHERE id = 'bot-archived'").run();
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-archived", "bot-a"],
+      }),
+    ).toBe("ok");
+    expect(chainOf(db, "app-1", "default")).toEqual([
+      { position: 1, bot_id: "bot-archived" },
+      { position: 2, bot_id: "bot-a" },
+    ]);
     db.raw.close();
   });
 
@@ -294,6 +353,243 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
   });
 });
 
+/**
+ * A NEW mount may not push the chain's product past `CHAIN_MULTIPLIER_MAX` — the
+ * most a storable ceiling can cover. That is a WRITE bound: the reader accepts
+ * any positive finite product, because a legal price edit or a sub-1 removal
+ * creates one without any write this guard sees. The refusal must leave the
+ * previous chain byte-identical.
+ */
+describe("replaceInstallChain — a new mount stays inside the write bound", () => {
+  function seedBotWithMultiplier(db: TestD1, id: string, multiplier: number): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots (id, workspace_id, name, scope, multiplier, created_at, updated_at)
+         VALUES (?, 'provider', ?, 'shared', ?, ?, ?)`,
+      )
+      .run(id, id, multiplier, TS, TS);
+  }
+
+  test("a chain whose product exceeds the bound is refused, and the old chain stands", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBotWithMultiplier(db, "bot-1000a", 1000);
+    seedBotWithMultiplier(db, "bot-1000b", 1000);
+    seedBotWithMultiplier(db, "bot-4", 4);
+    seedBot(db, "bot-solo", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-solo"] });
+
+    // Every factor is inside the single-bot write bound (1000).
+    // 1000 × 1000 × 4 = 4,000,000 > CHAIN_MULTIPLIER_MAX (3,333,333).
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-1000a", "bot-1000b", "bot-4"],
+      }),
+    ).toBe("chain_too_large");
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-solo" }]);
+    db.raw.close();
+  });
+
+  test("a chain of legally-writable bots near the bound is accepted, and the served product parses", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    // 1000 × 1000 × 3 = 3,000,000 < CHAIN_MULTIPLIER_MAX, and each factor is a
+    // value `isBotMultiplier` admits, so a real operator can write this chain.
+    seedBotWithMultiplier(db, "bot-1000a", 1000);
+    seedBotWithMultiplier(db, "bot-1000b", 1000);
+    seedBotWithMultiplier(db, "bot-3", 3);
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-1000a", "bot-1000b", "bot-3"],
+      }),
+    ).toBe("ok");
+    const chain = (await store.listInstallChainBots("default")).get("app-1") ?? [];
+    const product = chain.reduce((total, bot) => total * bot.multiplier, 1);
+    expect(product).toBe(3_000_000);
+    expect(isServedChainProduct(product)).toBe(true);
+    db.raw.close();
+  });
+
+  /**
+   * A chain written before this bound existed can already be past it. The
+   * operator's only repair is to REMOVE from it, and that rewrite mounts no new
+   * id, so it is admitted — refusing it would strand the oversize chain on a
+   * page no parser accepts.
+   */
+  test("an oversize chain is still repairable by removing from it", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBotWithMultiplier(db, "bot-1000a", 1000);
+    seedBotWithMultiplier(db, "bot-1000b", 1000);
+    seedBotWithMultiplier(db, "bot-4", 4);
+    seedInstall(db, "app-1", "default");
+    // A legacy chain written before the write bound: 4,000,000.
+    const legacy = ["bot-1000a", "bot-1000b", "bot-4"];
+    legacy.forEach((botId, index) => {
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES ('app-1', 'default', ?, ?)")
+        .run(index + 1, botId);
+    });
+    const store = createReviewBotsStore(db);
+
+    expect(
+      await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-4"] }),
+    ).toBe("ok");
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-4" }]);
+    db.raw.close();
+  });
+
+  /**
+   * The floor's other half: each factor was writable under the OLD predicate
+   * (`> 0`, no floor), and two of them multiply to `0` in a double. The served
+   * `month.multiplier` would be `0`, which `isServedChainProduct` refuses, so the
+   * store must refuse the mount — and, like the ceiling case, leave the old
+   * chain standing.
+   */
+  test("a chain whose product underflows to zero is refused, and the old chain stands", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    // Below today's floor, so refused at the writer now — but reachable from a
+    // row written before it existed, which is exactly the state to repair.
+    seedBotWithMultiplier(db, "bot-tiny-a", 1e-200);
+    seedBotWithMultiplier(db, "bot-tiny-b", 1e-200);
+    seedBot(db, "bot-solo", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-solo"] });
+
+    // 1e-200 × 1e-200 === 0 in IEEE-754 doubles.
+    expect(1e-200 * 1e-200).toBe(0);
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-tiny-a", "bot-tiny-b"],
+      }),
+    ).toBe("chain_too_large");
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-solo" }]);
+    db.raw.close();
+  });
+
+  /**
+   * A single below-floor row is NOT a broken chain: its product is still
+   * positive, so the list parses and `rpFor` prices it at its 1-RP floor. This
+   * is why the floor lives on the writers and not on the chain reader.
+   */
+  test("one legacy below-floor bot mounts alone, and its product is the served value", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBotWithMultiplier(db, "bot-tiny", 1e-200);
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+
+    expect(
+      await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-tiny"] }),
+    ).toBe("ok");
+    const chain = (await store.listInstallChainBots("default")).get("app-1") ?? [];
+    expect(isServedChainProduct(chain.reduce((product, bot) => product * bot.multiplier, 1))).toBe(true);
+    db.raw.close();
+  });
+
+  /**
+   * A retained row whose bot the reader may no longer price must count as `1`
+   * in the guard, exactly as the read projection serves it. Otherwise the
+   * foreign owner's private multiplier decides whether THIS workspace's mount is
+   * admitted — a refusal that changes with a number the row masks is that number
+   * disclosed.
+   */
+  test("a hidden foreign multiplier does not change the mount decision", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBotWithMultiplier(db, "bot-1000a", 1000);
+    seedBotWithMultiplier(db, "bot-1000b", 1000);
+    seedBot(db, "bot-solo", "provider", "shared");
+    seedBot(db, "bot-foreign", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    // Mount the foreign bot while it is still shared, then have its owner stop
+    // sharing it: the row is RETAINED, and from here its price is invisible here.
+    const baseline = ["bot-solo", "bot-foreign"];
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: baseline });
+    db.raw.run("UPDATE review_bots SET scope = 'owned' WHERE id = 'bot-foreign'");
+    const candidate = [...baseline, "bot-1000a", "bot-1000b"];
+
+    // Both scenarios start from the SAME chain and each mounts the two 1000×
+    // factors once — the candidate ids are NEW in both runs, so the price guard
+    // actually evaluates the product. Reusing the first run's chain would leave
+    // no new id and skip the guard entirely, which is not the rule under test.
+    // The visible product is 1,000,000, inside the bound; the foreign row is a
+    // `1`. Reading its hidden price would give 10^9 (refused) at one value and
+    // 11,000 (admitted) at the other, so a matching pair of decisions is proof.
+    const decisions: string[] = [];
+    for (const hidden of [1000, 0.01]) {
+      db.raw.prepare("UPDATE review_bots SET multiplier = ? WHERE id = 'bot-foreign'").run(hidden);
+      // A removal mounts no new id, so it is always admitted — the reset itself
+      // never depends on the number the case is about.
+      await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: baseline });
+      decisions.push(
+        await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: candidate }),
+      );
+    }
+    expect(decisions).toEqual(["ok", "ok"]);
+    db.raw.close();
+  });
+
+  /**
+   * The served factor counts what the relay RUNS, so an archived row is a `1`
+   * there — and must be a `1` in the guard too, or a retired bot's price vetoes a
+   * mount the reader never prices it in.
+   */
+  test("an archived row does not gate a new mount", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-x", "provider", "shared");
+    seedBot(db, "bot-y", "provider", "shared");
+    seedBot(db, "bot-w", "provider", "shared");
+    seedBot(db, "bot-z", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    // Retire `bot-z` WHILE it is live (a new mount may not be archived), then
+    // price it high: a retained ARCHIVED row, exactly the state served as ×1.
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-z"] });
+    db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-z'").run(TS);
+    db.raw.run("UPDATE review_bots SET multiplier = 1000 WHERE id IN ('bot-z', 'bot-x', 'bot-y')");
+    db.raw.run("UPDATE review_bots SET multiplier = 3 WHERE id = 'bot-w'");
+    await store.replaceInstallChain({
+      appId: "app-1",
+      workspaceId: "default",
+      botIds: ["bot-z", "bot-x", "bot-y"],
+    });
+
+    // The visible product is 1000 × 1000 × 3 = 3,000,000, inside the bound.
+    // Counting the archived 1000 as well would make 3 × 10^9 and refuse.
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-z", "bot-x", "bot-y", "bot-w"],
+      }),
+    ).toBe("ok");
+    db.raw.close();
+  });
+});
+
 describe("setBotQuotaOverride — the writer bot_quota_overrides was missing", () => {
   function world() {
     const db = createMigratedTestD1();
@@ -388,6 +684,249 @@ describe("setBotQuotaOverride — the writer bot_quota_overrides was missing", (
       ).toBe("invalid");
     }
     expect(overrides(db, "bot-shared")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("an archive between the read and the write changes zero rows and reports archived", async () => {
+    const db = world();
+    let fired = false;
+    // The seam: this request already read the bot as live. The archive lands
+    // immediately before the mutation statement executes.
+    const racing = {
+      ...db,
+      prepare(query: string) {
+        if (!fired && /(INSERT INTO|DELETE FROM) bot_quota_overrides/.test(query)) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-shared'").run(TS);
+        }
+        return db.prepare(query);
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(racing).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("archived");
+    expect(fired).toBe(true);
+    expect(overrides(db, "bot-shared")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("an archive the write's own batch saw reports archived even if the bot is restored before the call returns", async () => {
+    const db = world();
+    let fired = false;
+    // The archive lands INSIDE the batch and the restore lands before it
+    // returns: a read after the write would find a LIVE bot and report `ok`
+    // for an override that was never written.
+    const racing = {
+      ...db,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements: Parameters<TestD1["batch"]>[0]) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-shared'").run(TS);
+        }
+        const results = await db.batch(statements);
+        db.raw.prepare("UPDATE review_bots SET archived_at = NULL WHERE id = 'bot-shared'").run();
+        return results;
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(racing).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("archived");
+    expect(fired).toBe(true);
+    expect(overrides(db, "bot-shared")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("a clear between the read and an archive writes nothing and reports archived", async () => {
+    const db = world();
+    const store = createReviewBotsStore(db);
+    await store.setBotQuotaOverride({
+      botId: "bot-shared",
+      workspaceId: "tenant",
+      ownerWorkspaceId: "provider",
+      monthlyRp: 500,
+      now: TS,
+    });
+    let fired = false;
+    const racing = {
+      ...db,
+      prepare(query: string) {
+        if (!fired && /DELETE FROM bot_quota_overrides/.test(query)) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-shared'").run(TS);
+        }
+        return db.prepare(query);
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(racing).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: null,
+        now: TS,
+      }),
+    ).toBe("archived");
+    expect(overrides(db, "bot-shared")).toEqual([{ workspaceId: "tenant", monthlyRp: 500 }]);
+    db.raw.close();
+  });
+
+  test("a bot deleted inside the batch reports not_owner, not archived", async () => {
+    const db = world();
+    let fired = false;
+    const racing = {
+      ...db,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements: Parameters<TestD1["batch"]>[0]) => {
+        if (!fired) {
+          fired = true;
+          // Deleted after the owner read: the probe's `present` column is the
+          // only witness that this is an absent target, not a locked one.
+          db.raw.prepare("UPDATE review_bots SET deleted_at = ? WHERE id = 'bot-shared'").run(TS);
+        }
+        return db.batch(statements);
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(racing).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("not_owner");
+    expect(fired).toBe(true);
+    expect(overrides(db, "bot-shared")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("an archive restored before the batch runs lets the write succeed", async () => {
+    const db = world();
+    let fired = false;
+    // Archive and restore both land before the statements run: the probe and
+    // the write see one live target, so the override IS stored.
+    const restoredFirst = {
+      ...db,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements: Parameters<TestD1["batch"]>[0]) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-shared'").run(TS);
+          db.raw.prepare("UPDATE review_bots SET archived_at = NULL WHERE id = 'bot-shared'").run();
+        }
+        return db.batch(statements);
+      },
+    } as TestD1;
+
+    expect(
+      await createReviewBotsStore(restoredFirst).setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("ok");
+    expect(fired).toBe(true);
+    expect(overrides(db, "bot-shared")).toEqual([{ workspaceId: "tenant", monthlyRp: 500 }]);
+    db.raw.close();
+  });
+});
+
+describe("replaceInstallChain — an archive between the request and the batch", () => {
+  /**
+   * The retained set is decided INSIDE the batch, so a bot another request
+   * removed and archived in the same window is neither retained nor mountable:
+   * it is a NEW id by then, the admission guard refuses it, and the whole batch
+   * — including the DELETE — rolls back.
+   */
+  test("a bot removed and archived before the batch cannot be re-mounted from a stale payload", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-kept", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({
+      appId: "app-1",
+      workspaceId: "default",
+      botIds: ["bot-a", "bot-kept"],
+    });
+    const before = chainOf(db, "app-1", "default");
+
+    // The competing request: unmount bot-a and archive it, both landing after
+    // this call read the chain and before its batch runs.
+    const racing = {
+      ...db,
+      async batch(statements: Parameters<TestD1["batch"]>[0]) {
+        db.raw.prepare("DELETE FROM app_install_bots WHERE bot_id = 'bot-a'").run();
+        db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-a'").run(TS);
+        return db.batch(statements);
+      },
+    } as TestD1;
+
+    // This request still names bot-a FIRST: its payload says it was retained.
+    expect(
+      await createReviewBotsStore(racing).replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-a", "bot-kept"],
+      }),
+    ).toBe("bot_unavailable");
+    // The competitor's chain stands, exactly as it left it — no archived bot was
+    // mounted back, and this refused batch restored nothing over it.
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 2, bot_id: "bot-kept" }]);
+    expect(before).toEqual([
+      { position: 1, bot_id: "bot-a" },
+      { position: 2, bot_id: "bot-kept" },
+    ]);
+    db.raw.close();
+  });
+
+  test("a bot archived but STILL mounted stays retained through the same batch", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a"] });
+
+    const racing = {
+      ...db,
+      async batch(statements: Parameters<TestD1["batch"]>[0]) {
+        db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-a'").run(TS);
+        return db.batch(statements);
+      },
+    } as TestD1;
+
+    // Still in the OLD chain when the guard statement reads it: retained.
+    expect(
+      await createReviewBotsStore(racing).replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-a"],
+      }),
+    ).toBe("ok");
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-a" }]);
     db.raw.close();
   });
 });

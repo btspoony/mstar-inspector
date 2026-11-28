@@ -1,5 +1,6 @@
 import { FREE_PLAN_ID } from "../dashboard/entitlement";
 import type { DashboardD1 } from "../dashboard/users";
+import { isRpCeiling, isRpPerCredit, QUOTA_BASE_MAX, RP_PER_CREDIT_MAX } from "../contracts/rp-limits";
 import {
   decodeQuotaProfiles,
   pickQuotaProfile,
@@ -261,8 +262,9 @@ function utcDate(date: string): string | null {
   return at.toISOString().slice(0, 10) === date ? iso : null;
 }
 
-function positiveInt(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+/** A positive whole number no larger than `max` — the shared domain's own test. */
+function positiveIntWithin(value: unknown, max: number): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= max ? value : null;
 }
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -308,9 +310,9 @@ export function parseQuotaCandidate(body: unknown, planIds: readonly string[]): 
       ceilings[planId] = null;
       continue;
     }
-    const rp = positiveInt(value);
+    const rp = isRpCeiling(value) ? value : null;
     if (rp === null) {
-      return { ok: false, error: `monthlyRp.${planId} must be a positive whole number of RP, or null for no limit` };
+      return { ok: false, error: `monthlyRp.${planId} must be a positive whole number of RP within the supported domain, or null for no limit` };
     }
     ceilings[planId] = rp;
   }
@@ -335,15 +337,24 @@ export function parseQuotaNumbers(
   if (base === null) {
     return { ok: false, error: "base must be an object of positive whole numbers" };
   }
-  const quick = positiveInt(base.quick);
-  const standard = positiveInt(base.default);
-  const deep = positiveInt(base.deep);
+  const quick = positiveIntWithin(base.quick, QUOTA_BASE_MAX);
+  const standard = positiveIntWithin(base.default, QUOTA_BASE_MAX);
+  const deep = positiveIntWithin(base.deep, QUOTA_BASE_MAX);
   if (quick === null || standard === null || deep === null) {
-    return { ok: false, error: "base.quick, base.default and base.deep must each be a positive whole number of RP" };
+    return {
+      ok: false,
+      error: `base.quick, base.default and base.deep must each be a positive whole number of RP no larger than ${QUOTA_BASE_MAX}`,
+    };
   }
-  const rpPerCredit = positiveInt(fields.rpPerCredit);
+  // The rate divides every amount on every face, so the writer applies the
+  // bounded WRITE domain: a version carrying an unrenderable rate would be a
+  // page that cannot open.
+  const rpPerCredit = isRpPerCredit(fields.rpPerCredit) ? fields.rpPerCredit : null;
   if (rpPerCredit === null) {
-    return { ok: false, error: "rpPerCredit must be a positive whole number of RP" };
+    return {
+      ok: false,
+      error: `rpPerCredit must be a positive whole number of RP no larger than ${RP_PER_CREDIT_MAX}`,
+    };
   }
   if (fields.notes !== null && fields.notes !== undefined && typeof fields.notes !== "string") {
     return { ok: false, error: "notes must be a string, or null to record none" };

@@ -179,6 +179,8 @@ const APPS_PAYLOAD: AppsPayload = {
 
 const SETTINGS_PAYLOAD: SettingsManagePayload = {
   can_manage: true,
+  can_edit_chain: false,
+  viewer_relation: "created",
   installation: null,
   pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",

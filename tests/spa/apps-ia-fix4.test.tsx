@@ -18,8 +18,8 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
-import { UsableBotsList, type BotsReadState } from "../../src/spa/pages/AppsPage";
 import { BotDetailPage } from "../../src/spa/pages/BotDetailPage";
+import { BotsView, type BotsReadState } from "../../src/spa/pages/BotsPage";
 import type { UsableBotsPayload } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
 
@@ -42,15 +42,20 @@ const botsPayload = (quota: { plan_monthly_rp: number | null; quota_error?: bool
       scope: "shared",
       multiplier: 1,
       month_used_rp: 42,
+      effective_ceiling: null,
+      archived: false,
     },
   ],
 });
 
 const renderBots = (payload: UsableBotsPayload): string =>
   renderToStaticMarkup(
-    createElement(UsableBotsList, {
+    createElement(BotsView, {
       locale: "en",
-      bots: { kind: "ok", payload } as BotsReadState,
+      base: "/dashboard/acme",
+      state: { kind: "ok", payload } as BotsReadState,
+      canCreate: false,
+      onCreated: () => {},
     }),
   );
 
@@ -58,12 +63,12 @@ describe("F10 — the bots table branches on quota_error", () => {
   test("an UNKNOWN ceiling renders the unknown marker, never 'no ceiling'", () => {
     const html = renderBots(botsPayload({ plan_monthly_rp: null, quota_error: true }));
     expect(html).toContain(t("en", "bots.monthUnknown"));
-    expect(html).not.toContain(t("en", "bots.monthNoCeiling", { used: 42 }));
+    expect(html).not.toContain(t("en", "credits.noCeiling", { used: "0.04" }));
   });
 
   test("a KNOWN unlimited plan still reads 'no ceiling'", () => {
     const html = renderBots(botsPayload({ plan_monthly_rp: null }));
-    expect(html).toContain(t("en", "bots.monthNoCeiling", { used: 42 }));
+    expect(html).toContain(t("en", "credits.noCeiling", { used: "0.04" }));
     expect(html).not.toContain(t("en", "bots.monthUnknown"));
   });
 });
@@ -73,6 +78,7 @@ describe("F10 — the bots table branches on quota_error", () => {
 const BOT_PAYLOAD = {
   can_manage: true,
   owned: false,
+  archived: false,
   app: {
     github_app_id: null,
     id: "bot-shared",
@@ -105,6 +111,7 @@ const BOT_PAYLOAD = {
     provider_workspace: "Other",
     month_used_rp: 42,
     plan_monthly_rp: null,
+    effective_ceiling: null,
     default_chain: null,
     mounted_apps: [],
   },
@@ -116,7 +123,7 @@ async function mountBot(payload: Record<string, unknown>): Promise<{ text: strin
   globalThis.fetch = (async (input: unknown) => {
     const url = String(input);
     if (url.includes("/api/review-bots/")) return Response.json(payload);
-    if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+    if (url.endsWith("/api/review-bots/bot-shared/models")) return Response.json({ groups: [] });
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;
   const container = win.document.createElement("div");
@@ -139,7 +146,7 @@ describe("F10 — the bot detail branches on quota_error", () => {
     const page = await mountBot({ ...BOT_PAYLOAD, quota_error: true });
     try {
       expect(page.text).toContain(t("en", "bots.monthUnknown"));
-      expect(page.text).not.toContain(t("en", "bots.monthNoCeiling", { used: 42 }));
+      expect(page.text).not.toContain(t("en", "credits.noCeiling", { used: "0.04" }));
     } finally {
       await page.cleanup();
     }
@@ -148,7 +155,7 @@ describe("F10 — the bot detail branches on quota_error", () => {
   test("a KNOWN unlimited plan still reads 'no ceiling'", async () => {
     const page = await mountBot(BOT_PAYLOAD);
     try {
-      expect(page.text).toContain(t("en", "bots.monthNoCeiling", { used: 42 }));
+      expect(page.text).toContain(t("en", "credits.noCeiling", { used: "0.04" }));
       expect(page.text).not.toContain(t("en", "bots.monthUnknown"));
     } finally {
       await page.cleanup();
@@ -161,8 +168,8 @@ describe("F10 — the bot detail branches on quota_error", () => {
 /**
  * A successful `save-sandbox-image` write whose FOLLOW-UP read fails must
  * report success (plus a stale notice) — and must not start a second full
- * load. The full load is counted by the models read, which only `load()`
- * issues.
+ * load. The full load's own options read is counted here: only `load()` (and
+ * its retry) issues `/api/models`, and neither may run for a section re-read.
  */
 describe("reload race — a landed write survives a failed follow-up read", () => {
   test("success message + stale notice, and no second full load", async () => {
@@ -188,7 +195,7 @@ describe("reload race — a landed write survives a failed follow-up read", () =
         if (writeLanded) return new Response("unavailable", { status: 503 });
         return Response.json({ ...BOT_PAYLOAD, can_manage: true, owned: true, app: { ...BOT_PAYLOAD.app, scope: "owned" } });
       }
-      if (url.endsWith("/api/models")) {
+      if (url.endsWith("/api/review-bots/bot-shared/models")) {
         modelsReads += 1;
         return Response.json({
           groups: [{ provider: "anthropic", source: "verified", selectors: ["anthropic/m"] }],

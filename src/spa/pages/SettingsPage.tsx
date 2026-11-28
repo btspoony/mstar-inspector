@@ -347,10 +347,10 @@ export function githubAppSettingsUrl(githubHtmlUrl: string): string | null {
  * description, and the numeric App id, fed by the cached GitHub profile the
  * settings route serves (migration 0019 columns). Rendered outside the
  * can_manage conditional, so managers and members alike see it (AC3).
- * (AD-623): `canManage` switches the name link's destination —
+ * (AD-623): `canManage` switches the GitHub action link's destination —
  * managers reach the App's GitHub settings page (githubAppSettingsUrl over
- * the cached html_url), members keep the public page; the label names the
- * destination it actually carries.
+ * the cached html_url), members keep the public page. The synced name itself
+ * is not repeated: the identity lives in the page header, once.
  * Degradation is strictly per-field (global constraint): a null field
  * simply does not render — a never-synced App shows the placeholder mark and
  * its local App id with no link, no error state, no layout collapse
@@ -362,12 +362,15 @@ export function AppInfoSection({
   workspaceId,
   canManage,
   onReload,
+  credentialsSlot,
 }: {
   locale: SpaBoot["locale"];
   app: SettingsIdentityAppMeta | SettingsAppMeta | AppIdentityCardApp | BotSettingsAppMeta;
   workspaceId: string;
   canManage: boolean;
   onReload?: () => Promise<unknown>;
+  /** The creator face's credential state, folded into this section as one sub-row. */
+  credentialsSlot?: ReactNode;
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
@@ -405,25 +408,19 @@ export function AppInfoSection({
           className="h-12 w-12 shrink-0 rounded-full border border-(--border-default) object-cover"
         />
         <div className="flex min-w-0 flex-col gap-1">
-          {app.github_name ? (
-            app.github_html_url ? (
-              <a
-                href={settingsHref ?? app.github_html_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
-                aria-label={t(
-                  locale,
-                  settingsHref ? "settings.appInfoManageOnGithub" : "settings.appInfoViewOnGithub",
-                  { name: app.github_name },
-                )}
-              >
-                {app.github_name}
-                <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              </a>
-            ) : (
-              <span className="font-semibold">{app.github_name}</span>
-            )
+          {/* The name already rides the page header — the identity is stated
+              once. The block's GitHub entry is an ACTION link, labelled by
+              where it goes (manage for a manager, view otherwise). */}
+          {app.github_html_url ? (
+            <a
+              href={settingsHref ?? app.github_html_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+            >
+              {t(locale, settingsHref ? "settings.appInfoManageOnGithub" : "settings.appInfoViewOnGithub")}
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            </a>
           ) : null}
           {app.github_description ? <p className="text-sm">{app.github_description}</p> : null}
           {app.github_app_id === null ? null : (
@@ -449,6 +446,7 @@ export function AppInfoSection({
               })}
             </p>
           ) : null}
+          {credentialsSlot}
         </div>
       </div>
       {canManage && onReload ? (
@@ -463,6 +461,45 @@ export function AppInfoSection({
       ) : null}
     </FlowSection>
   );
+}
+
+/**
+ * THE pending-installation bind flow, shared by the Apps list and the App
+ * detail's install block: POST the bind, follow GitHub's authorize redirect
+ * when the route asks for the account proof, else report that the bind landed
+ * and let the caller reload what it shows.
+ *
+ * `appGithubAppId` is the numeric GitHub App id the route parses — never the
+ * local App row id — and the path carries `/api`, which is where the route is
+ * registered.
+ */
+export async function postInstallationBind(
+  base: string,
+  appGithubAppId: number,
+  installationId: number,
+): Promise<"authorize" | "bound" | "failed"> {
+  let status: number;
+  let body: string;
+  try {
+    ({ status, body } = await postForm(`${base}/api/apps/${appGithubAppId}/bind-installation`, {
+      installationId: String(installationId),
+    }));
+  } catch {
+    return "failed";
+  }
+  if (status !== 200) return "failed";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return "failed";
+  }
+  const authorizeUrl = (parsed as { authorize_url?: unknown } | null)?.authorize_url;
+  if (typeof authorizeUrl === "string") {
+    window.location.assign(authorizeUrl);
+    return "authorize";
+  }
+  return "bound";
 }
 
 /**
@@ -483,6 +520,7 @@ export function AppInstallSection({
   installation,
   pendingInstallations,
   blocked,
+  showIdentity = true,
   onReload,
 }: {
   locale: SpaBoot["locale"];
@@ -491,6 +529,12 @@ export function AppInstallSection({
   installation: SettingsManagePayload["installation"];
   pendingInstallations: SettingsManagePayload["pending_installations"];
   blocked: boolean;
+  /**
+   * False on a face that already stated the App's identity (the installed
+   * face): the name/avatar row disappears, the install entry and the bind
+   * state do not.
+   */
+  showIdentity?: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const slug = app.github_slug;
@@ -503,52 +547,60 @@ export function AppInstallSection({
     setBinding(installationId);
     setBindFailed(false);
     try {
-      const res = await postForm(`${apiBase()}/apps/${encodeURIComponent(appId)}/bind-installation`, {
-        installationId: String(installationId),
-      });
-      if (res.status !== 200) {
+      const outcome = await postInstallationBind(apiBase(), app.github_app_id ?? Number.NaN, installationId);
+      if (outcome === "failed") {
         setBindFailed(true);
         return;
       }
-      const body = JSON.parse(res.body) as { authorize_url?: unknown };
-      if (typeof body.authorize_url === "string") {
-        window.location.assign(body.authorize_url);
-        return;
-      }
+      if (outcome === "authorize") return;
       await onReload({ background: true });
-    } catch {
-      setBindFailed(true);
     } finally {
       setBinding(null);
     }
   }
 
-  return (
-    <FlowSection title={t(locale, "settings.install")} subtitle={href === null ? undefined : t(locale, "settings.installCopy")}>
-      <AppInstallIdentity
-        locale={locale}
-        name={name}
-        avatarSrc={app.github_avatar_url}
-        appId={app.github_app_id}
-        href={blocked ? null : href}
-      >
-        {blocked ? null : href === null ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
-        ) : app.scope === "shared" && installation === null ? (
-          <>
-            {pendingInstallations.length === 0 ? null : (
-              <div className="flex flex-col gap-2">
-                <p className="text-sm font-medium">{t(locale, "settings.installPending")}</p>
-                <ul className="flex flex-col gap-2">
-                  {pendingInstallations.map((row) => (
-                    <li key={row.installation_id} className="flex items-center gap-2 text-sm">
-                      <span>
-                        {row.account_login === null
-                          ? t(locale, "settings.installPendingUnknownAccount", {
-                              id: String(row.installation_id),
-                            })
-                          : row.account_login}
-                      </span>
+  // The state-specific content, independent of whether the identity row renders:
+  // a face that already stated the App's name still needs its bind state.
+  //
+  // The install entry is NOT part of the identity row: a face that states the
+  // App's name once still owes the manager GitHub's install page, including
+  // when nothing is bound yet. `AppInstallIdentity` therefore gets no href
+  // here and this section renders the one link, so exactly one copy exists.
+  const body = (
+    <>
+      {blocked || href === null ? null : (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex w-fit items-center gap-1.5 text-sm text-primary hover:underline"
+          aria-label={t(locale, "settings.installLinkAria", {
+            link: t(locale, "settings.installLink"),
+            name,
+          })}
+        >
+          {t(locale, "settings.installLink")}
+          <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        </a>
+      )}
+      {blocked ? null : href === null ? (
+        <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
+      ) : app.scope === "shared" && installation === null ? (
+        <>
+          {pendingInstallations.length === 0 ? null : (
+            <div className="flex flex-col gap-2">
+              <p className="text-sm font-medium">{t(locale, "settings.installPending")}</p>
+              <ul className="flex flex-col gap-2">
+                {pendingInstallations.map((row) => (
+                  <li key={row.installation_id} className="flex items-center gap-2 text-sm">
+                    <span>
+                      {row.account_login === null
+                        ? t(locale, "settings.installPendingUnknownAccount", {
+                            id: String(row.installation_id),
+                          })
+                        : row.account_login}
+                    </span>
+                    {row.can_bind ? (
                       <Button
                         type="button"
                         variant="secondary"
@@ -558,29 +610,49 @@ export function AppInstallSection({
                       >
                         {t(locale, "settings.installPendingBind")}
                       </Button>
-                    </li>
-                  ))}
-                </ul>
-                {bindFailed ? (
-                  <p role="status" className="text-sm text-(--tone-warn-fg)">
-                    {t(locale, "settings.installBindFailed")}
-                  </p>
-                ) : null}
-              </div>
-            )}
-          </>
-        ) : null}
-        {installation === null ? null : (
-          <p className="text-sm text-muted-foreground">
-            {installation.account_login === null
-              ? t(locale, "settings.installBoundNoAccount", { id: String(installation.id) })
-              : t(locale, "settings.installBoundAccount", { account: installation.account_login })}
-          </p>
-        )}
-        {installation !== null && installation.removed ? (
-          <p className="text-sm text-(--tone-warn-fg)">{t(locale, "settings.installRemoved")}</p>
-        ) : null}
-      </AppInstallIdentity>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+              {bindFailed ? (
+                <p role="status" className="text-sm text-(--tone-warn-fg)">
+                  {t(locale, "settings.installBindFailed")}
+                </p>
+              ) : null}
+            </div>
+          )}
+        </>
+      ) : null}
+      {installation === null ? null : (
+        <p className="text-sm text-muted-foreground">
+          {installation.account_login === null
+            ? t(locale, "settings.installBoundNoAccount", { id: String(installation.id) })
+            : t(locale, "settings.installBoundAccount", { account: installation.account_login })}
+        </p>
+      )}
+      {installation !== null && installation.removed ? (
+        <p className="text-sm text-(--tone-warn-fg)">{t(locale, "settings.installRemoved")}</p>
+      ) : null}
+    </>
+  );
+
+  return (
+    <FlowSection title={t(locale, "settings.install")} subtitle={href === null ? undefined : t(locale, "settings.installCopy")}>
+      {showIdentity ? (
+        <AppInstallIdentity
+          locale={locale}
+          name={name}
+          avatarSrc={app.github_avatar_url}
+          appId={app.github_app_id}
+          // The section's body renders the one install link; the identity row
+          // carries identity only, so either face yields exactly one entry.
+          href={null}
+        >
+          {body}
+        </AppInstallIdentity>
+      ) : (
+        <div className="flex min-w-0 flex-col gap-1">{body}</div>
+      )}
     </FlowSection>
   );
 }

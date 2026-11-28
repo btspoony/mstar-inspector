@@ -219,7 +219,7 @@ describe("members/apps/settings parsers", () => {
   });
 
   test("parseApps requires viewer + apps", () => {
-    const ok = parseApps({ viewer: { login: "mallory", role: "member" }, apps: [] });
+    const ok = parseApps({ month_plan_rp: null, viewer: { login: "mallory", role: "member" }, apps: [] });
     expect(ok?.viewer.login).toBe("mallory");
     expect(parseApps({ apps: [] })).toBeNull();
   });
@@ -234,15 +234,13 @@ describe("members/apps/settings parsers", () => {
   });
 
   test("parseApps normalizes the shared-bot block: absent or malformed reads as none", () => {
-    expect(parseApps({ viewer: { login: "mallory", role: "member" }, apps: [] })?.shared_bots).toEqual([]);
-    const malformed = parseApps({
-      viewer: { login: "mallory", role: "member" },
+    expect(parseApps({ month_plan_rp: null, viewer: { login: "mallory", role: "member" }, apps: [] })?.shared_bots).toEqual([]);
+    const malformed = parseApps({ month_plan_rp: null, viewer: { login: "mallory", role: "member" },
       apps: [],
       shared_bots: [{ id: 7 }],
     });
     expect(malformed?.shared_bots).toEqual([]);
-    const ok = parseApps({
-      viewer: { login: "mallory", role: "member" },
+    const ok = parseApps({ month_plan_rp: null, viewer: { login: "mallory", role: "member" },
       apps: [],
       shared_bots: [{ id: "bot-1", github_slug: null, name: "Platform", target_count: 1 }],
     });
@@ -250,8 +248,7 @@ describe("members/apps/settings parsers", () => {
   });
 
   test("parseApps rows carry the D6 GitHub identity fields (github_name / github_slug / github_avatar_url)", () => {
-    const ok = parseApps({
-      viewer: { login: "mallory", role: "member" },
+    const ok = parseApps({ month_plan_rp: null, viewer: { login: "mallory", role: "member" },
       apps: [
         {
           github_app_id: 1,
@@ -275,6 +272,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,
+      can_edit_chain: false,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -331,6 +330,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the sandbox image selection + selector choices", () => {
     const manageBase = {
       can_manage: true,
+      can_edit_chain: false,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -386,6 +387,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review trigger mode and review depth on the manage face; off-vocabulary fails the parse", () => {
     const base = {
       can_manage: true,
+      can_edit_chain: false,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -447,6 +450,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review gate and visibility on the manage face; malformed values fail the parse", () => {
     const base = {
       can_manage: true,
+      can_edit_chain: false,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -512,6 +517,8 @@ describe("members/apps/settings parsers", () => {
 
   const MANAGER_PAYLOAD = {
     can_manage: true,
+    can_edit_chain: false,
+    viewer_relation: "created",
     official_workspace: true,
     can_configure_bot: true,
     workspace_id: "ws_0123456789abcdefghijkl",
@@ -598,6 +605,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings (identity-only face) requires the D4 identity set — created_at joins the required keys", () => {
     const identityBase = {
       can_manage: false,
+      can_edit_chain: false,
+      viewer_relation: "installed",
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
       blocked: false as const,
@@ -630,6 +639,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings separates configured state from the catalog", () => {
     const manageBase = {
       can_manage: true,
+      can_edit_chain: false,
+      viewer_relation: "created",
       official_workspace: true,
       can_configure_bot: true,
       installation: null,
@@ -760,6 +771,8 @@ describe("members/apps/settings parsers", () => {
       blocked: false as const,
       blocked_reason: null,
       can_manage: false,
+      can_edit_chain: false,
+      viewer_relation: "installed",
       app: identityApp,
     });
     expect(readOnly?.can_manage).toBe(false);
@@ -774,11 +787,15 @@ describe("members/apps/settings parsers", () => {
       blocked: false as const,
       blocked_reason: null,
       can_manage: false,
+      can_edit_chain: false,
+      viewer_relation: "installed",
       app: withoutCreated,
     })).toBeNull();
     expect(
       parseSettings({
         can_manage: true,
+        can_edit_chain: false,
+        viewer_relation: "created",
         official_workspace: true,
         can_configure_bot: true,
         installation: null,
@@ -858,6 +875,8 @@ describe("model chain tab model", () => {
 describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
+    can_edit_chain: false,
+    viewer_relation: "created",
     official_workspace: true,
     can_configure_bot: true,
     installation: null,
@@ -1182,9 +1201,9 @@ describe("review gate verdict mirror", () => {
 
 describe("R2 — the usable-bot parser accepts the producer's own payload", () => {
   /**
-   * The EXACT shape `usableBotsRead` (`src/dashboard/index.ts:2277-2288`) has
-   * always sent — no `monthly_rp` on a usable bot, because that row's ceiling
-   * comes from the plan, not from the bot. A nonempty list must parse.
+   * The EXACT shape `usableBotsRead` (`src/dashboard/index.ts`) sends — no
+   * `monthly_rp` on a usable bot (that column is the owner's stored default),
+   * only the viewer's `effective_ceiling`. A nonempty list must parse.
    */
   const PRODUCER_PAYLOAD = {
     workspace_id: "ws_0123456789abcdefghijkl",
@@ -1201,6 +1220,8 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
         scope: "owned",
         multiplier: 1,
         month_used_rp: 40,
+        effective_ceiling: null,
+        archived: false,
       },
       {
         id: "app-b",
@@ -1213,6 +1234,8 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
         scope: "shared",
         multiplier: 1.5,
         month_used_rp: 1240,
+        effective_ceiling: 20000,
+        archived: false,
       },
     ],
   };
@@ -1228,5 +1251,46 @@ describe("R2 — the usable-bot parser accepts the producer's own payload", () =
     const parsed = parseUsableBots({ ...PRODUCER_PAYLOAD, plan_monthly_rp: null, quota_error: true });
     expect(parsed?.quota_error).toBe(true);
     expect(parsed?.plan_monthly_rp).toBeNull();
+  });
+
+  // `archived` decides whether a row is offered for selection, so an absent or
+  // malformed value must fail the parse — never read as "live".
+  test("a row with NO archived field rejects the whole payload", () => {
+    const { archived: _omitted, ...first } = PRODUCER_PAYLOAD.bots[0]!;
+    expect(parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [first] })).toBeNull();
+  });
+
+  test("a row whose archived is not a boolean rejects the whole payload", () => {
+    const [first] = PRODUCER_PAYLOAD.bots;
+    for (const bogus of ["false", 0, null, undefined]) {
+      expect(
+        parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [{ ...first!, archived: bogus }] }),
+        String(bogus),
+      ).toBeNull();
+    }
+  });
+
+  // The row's ceiling is a served RP amount: it must sit in the same domain the
+  // writer accepts, and an ABSENT one is a payload the producer never sends.
+  test("the row's effective ceiling must be a real ceiling or explicit null", () => {
+    const [first] = PRODUCER_PAYLOAD.bots;
+    expect(parseUsableBots(PRODUCER_PAYLOAD)?.bots[1]?.effective_ceiling).toBe(20000);
+    for (const bogus of [0, -1, 1.5, "3000", undefined, Number.MAX_SAFE_INTEGER + 2]) {
+      expect(
+        parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [{ ...first!, effective_ceiling: bogus }] }),
+        String(bogus),
+      ).toBeNull();
+    }
+  });
+
+  // A stored override authored before the write bound existed: the directory
+  // must open on it rather than fail every row of the list.
+  test("a legacy ceiling past the WRITE bound loads", () => {
+    const [first] = PRODUCER_PAYLOAD.bots;
+    expect(
+      parseUsableBots({ ...PRODUCER_PAYLOAD, bots: [{ ...first!, effective_ceiling: 1_000_000_001 }] })?.bots[0]
+        ?.effective_ceiling,
+    ).toBe(1_000_000_001);
+    expect(parseUsableBots({ ...PRODUCER_PAYLOAD, plan_monthly_rp: 1_000_000_001 })).not.toBeNull();
   });
 });

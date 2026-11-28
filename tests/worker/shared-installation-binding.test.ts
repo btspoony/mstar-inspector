@@ -16,6 +16,7 @@ import { syncSplitPair,
   migrationsAfter,
   seedDefaultMemberships,
   seedTarget,
+  seedWorkspaceMember,
   type TestD1,
 } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
@@ -341,9 +342,10 @@ describe("shared bot installations are bound to one workspace", () => {
     stubGithub(world());
     const bound = await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A);
     expect(bound.status).toBe(302);
-    // F4: a successful bind lands on the chain it created.
+    // A successful bind lands on the App's installed face — the mount whose new
+    // chain the bind just created.
     expect(bound.headers.get("location")).toBe(
-      `/dashboard/${WS_A}/apps/9501?tab=bots`,
+      `/dashboard/${WS_A}/apps/9501?from=installed`,
     );
     expect(boundTo(db, INSTALLATION_A)).toBe(WS_A);
   });
@@ -456,6 +458,7 @@ describe("shared bot installations are bound to one workspace", () => {
         SHARED_BOT,
         INSTALLATION_A,
         WS_B,
+        seedWorkspaceMember(db, WS_B, "bob", "owner"),
       ),
     ).toBe("bound_elsewhere");
     expect(boundTo(db, INSTALLATION_A)).toBe(WS_A);
@@ -464,9 +467,14 @@ describe("shared bot installations are bound to one workspace", () => {
   test("a webhook upsert never binds or unbinds an installation", async () => {
     const db = await twoTenantWorld();
     const apps = createReviewBotsStore(db);
-    expect(await apps.bindInstallation(SHARED_BOT, INSTALLATION_A, WS_A)).toBe(
-      "bound",
-    );
+    expect(
+      await apps.bindInstallation(
+        SHARED_BOT,
+        INSTALLATION_A,
+        WS_A,
+        seedWorkspaceMember(db, WS_A, "alice", "owner"),
+      ),
+    ).toBe("bound");
     await apps.upsertInstallation({
       appId: SHARED_BOT,
       installationId: INSTALLATION_A,
@@ -491,7 +499,7 @@ describe("shared bot installations are bound to one workspace", () => {
     ).toBe(302);
     const pending = await createReviewBotsStore(db).listPendingInstallations(
       SHARED_BOT,
-      WS_A,
+      true,
     );
     expect(pending.map((row) => row.installation_id)).toEqual([INSTALLATION_B]);
     const again = await postBind(db, WS_A, "alice", INSTALLATION_A);
@@ -506,16 +514,21 @@ describe("shared bot installations are bound to one workspace", () => {
   test("a binding whose workspace was deleted no longer holds the installation", async () => {
     const db = await twoTenantWorld();
     const apps = createReviewBotsStore(db);
-    expect(await apps.bindInstallation(SHARED_BOT, INSTALLATION_A, WS_A)).toBe(
-      "bound",
-    );
+    expect(
+      await apps.bindInstallation(
+        SHARED_BOT,
+        INSTALLATION_A,
+        WS_A,
+        seedWorkspaceMember(db, WS_A, "alice", "owner"),
+      ),
+    ).toBe("bound");
     db.raw
       .prepare(
         "UPDATE workspaces SET deleted_at = datetime('now') WHERE id = ?",
       )
       .run(WS_A);
     expect(
-      (await apps.listPendingInstallations(SHARED_BOT, WS_B)).map(
+      (await apps.listPendingInstallations(SHARED_BOT, true)).map(
         (r) => r.installation_id,
       ),
     ).toContain(INSTALLATION_A);
@@ -533,6 +546,7 @@ describe("shared bot installations are bound to one workspace", () => {
         SHARED_BOT,
         INSTALLATION_A,
         WS_A,
+        seedWorkspaceMember(db, WS_A, "alice", "owner"),
       ),
     ).toBe("bound");
     expect(await deleteWorkspace(db, WS_A, new Date().toISOString())).toBe(

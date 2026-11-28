@@ -579,6 +579,167 @@ describe("bot scope transitions (contract § 7.1)", () => {
     ]);
   });
 
+  test("an archive between the read and the batch refuses the share, and audits nothing", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-archive-race", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          // The archive lands after this request read the bot as live and before
+          // its share batch runs.
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-archive-race'").run(NOW);
+        }
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setReviewBotScope(racingDb, {
+        botId: "bot-archive-race",
+        scope: "shared",
+        actor: "operator",
+        now: LATER,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
+    ).toEqual({ outcome: "archived" });
+    expect(fired).toBe(true);
+    expect(storedScope(db, "bot-archive-race")).toEqual({ scope: "owned", shared_at: null });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("an archive between the read and the batch refuses the revoke, keeping the share", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-archive-revoke", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-archive-revoke'").run(NOW);
+        }
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setReviewBotScope(racingDb, {
+        botId: "bot-archive-revoke",
+        scope: "owned",
+        confirm: true,
+        actor: "operator",
+        now: LATER,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
+    ).toEqual({ outcome: "archived" });
+    expect(storedScope(db, "bot-archive-revoke")).toEqual({ scope: "shared", shared_at: NOW });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("an already-archived bot is refused before the batch, with zero writes", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-archived-read", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+    db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-archived-read'").run(NOW);
+
+    let batched = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        batched = true;
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setReviewBotScope(racingDb, {
+        botId: "bot-archived-read",
+        scope: "shared",
+        actor: "operator",
+        now: LATER,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
+    ).toEqual({ outcome: "archived" });
+    expect(batched).toBe(false);
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("a bot deleted inside the batch is bot_not_found, not archived or ok", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-deleted-in-batch", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET deleted_at = ? WHERE id = 'bot-deleted-in-batch'").run(NOW);
+        }
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setReviewBotScope(racingDb, {
+        botId: "bot-deleted-in-batch",
+        scope: "shared",
+        actor: "operator",
+        now: LATER,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
+    ).toEqual({ outcome: "bot_not_found" });
+    expect(fired).toBe(true);
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("a bot deleted for the batch and restored before the read is bot_not_found, not ok", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-deleted-restored", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+    seedOfficialWorkspace(db, WS);
+
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          // Deleted for the batch, restored before the call's later read: a
+          // post-batch read would call the refused write `ok`.
+          db.raw.prepare("UPDATE review_bots SET deleted_at = ? WHERE id = 'bot-deleted-restored'").run(NOW);
+        }
+        const results = await db.batch(statements);
+        db.raw.prepare("UPDATE review_bots SET deleted_at = NULL WHERE id = 'bot-deleted-restored'").run();
+        return results;
+      },
+    };
+
+    expect(
+      await setReviewBotScope(racingDb, {
+        botId: "bot-deleted-restored",
+        scope: "owned",
+        confirm: true,
+        actor: "operator",
+        now: LATER,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
+    ).toEqual({ outcome: "bot_not_found" });
+    expect(storedScope(db, "bot-deleted-restored")).toEqual({ scope: "shared", shared_at: NOW });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
   test("a shared bot survives a designation clear: no revocation, no new share, still revocable", async () => {
     const db = createMigratedTestD1();
     seedScopedBot(db, "bot-orphan-share", { workspaceId: WS, scope: "shared", sharedAt: NOW });
@@ -744,17 +905,18 @@ function seedInstallation(db: TestD1, botId: string, installationId: number, rem
 }
 
 describe("pending installations of a bot", () => {
-  test("lists the bot's live installations, newest seen first", async () => {
+  test("lists a bindable App's live installations, newest seen first", async () => {
     const db = createMigratedTestD1();
-    seedScopedBot(db, "bot-pending", { workspaceId: WS });
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-pending", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
     seedInstallation(db, "bot-pending", 100);
     seedInstallation(db, "bot-pending", 200, true);
 
-    const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", WS);
+    const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", true);
     expect(rows.map((row) => row.installation_id)).toEqual([100]);
   });
 
-  test("answers nothing for a bot the addressed workspace may not use", async () => {
+  test("answers nothing for an App that is not bindable — an owned App never is", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-other");
     seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
@@ -763,10 +925,26 @@ describe("pending installations of a bot", () => {
     seedInstallation(db, "bot-shared", 502);
 
     const store = createReviewBotsStore(db);
-    expect(await store.listPendingInstallations("bot-foreign", WS)).toEqual([]);
-    expect(
-      (await store.listPendingInstallations("bot-shared", WS)).map((row) => row.installation_id),
-    ).toEqual([502]);
+    // Not shared: the bind route refuses it outright, so it has no pending row.
+    expect(await store.listPendingInstallations("bot-foreign", true)).toEqual([]);
+    // Shared: bindable by App, and the row states bindability rather than hiding.
+    expect((await store.listPendingInstallations("bot-shared", true)).map((row) => row.installation_id)).toEqual([
+      502,
+    ]);
+  });
+
+  test("an App whose associated workspaces are all deleted is not bindable", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
+    seedInstallation(db, "bot-shared", 601);
+    const store = createReviewBotsStore(db);
+    expect((await store.listPendingInstallations("bot-shared", true)).map((r) => r.installation_id)).toEqual([601]);
+
+    // The App's ONLY association goes away: nothing is left to bind through, so
+    // the row the route can no longer honour disappears here too.
+    db.raw.run("UPDATE workspaces SET deleted_at = datetime('now') WHERE id = 'ws-other'");
+    expect(await store.listPendingInstallations("bot-shared", true)).toEqual([]);
   });
 });
 

@@ -3,6 +3,7 @@ import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 
 const SESSION_SECRET = ["test", "bot", "write", "scope", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -210,5 +211,145 @@ describe("the bot settings payload's share facts", () => {
     expect(body.can_manage).toBe(false);
     expect(body).not.toHaveProperty("official_workspace");
     expect(body).not.toHaveProperty("can_configure_bot");
+  });
+});
+
+/**
+ * F1-2: the EDITOR reads are the owner's. A manager of a workspace that only
+ * consumes a shared bot must not receive provider ids, declared custom
+ * providers (with live key ids), previews or key-usage probes — those read the
+ * owner's credentials. The narrow `/bot` summary remains the consumer's face.
+ */
+describe("the bot editor's reads require the owning workspace", () => {
+  type Read = { name: string; path: string; method: "GET" | "POST"; form?: Record<string, string> };
+
+  const READS: Read[] = [
+    { name: "model options", path: "/api/review-bots/" + HOME_BOT_ROW + "/models", method: "GET" },
+    {
+      name: "provider preview",
+      path: "/api/review-bots/" + HOME_BOT_ROW + "/provider-models/preview?provider=anthropic",
+      method: "GET",
+    },
+    {
+      name: "key usage",
+      path: "/api/review-bots/" + HOME_BOT_ROW + "/keys/usage",
+      method: "POST",
+      form: { provider: "zai", keyId: "0".repeat(16) },
+    },
+  ];
+
+  async function read(ref: string, login: string, entry: Read): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://worker.local/dashboard/${ref}${entry.path}`, {
+        method: entry.method,
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
+        ...(entry.form === undefined ? {} : { body: new URLSearchParams(entry.form) }),
+      }),
+      envFor(),
+    );
+  }
+
+  test("a consumer workspace's admin gets the read-only refusal from every editor read", async () => {
+    world();
+    for (const entry of READS) {
+      const res = await read(OTHER, "erin", entry);
+      expect(res.status, entry.name).toBe(403);
+      expect(await res.json(), entry.name).toMatchObject({ key: READ_ONLY_KEY });
+    }
+  });
+
+  test("the owning workspace's admin still gets the full shape", async () => {
+    world();
+    const models = await read(OFFICIAL, "dana", READS[0]!);
+    expect(models.status).toBe(200);
+    const body = (await models.json()) as { groups: unknown };
+    expect(Array.isArray(body.groups)).toBe(true);
+  });
+
+  test("the owner preview answers 200 with the vocabulary it fetched for a declared provider", async () => {
+    world();
+    // A declaration with one stored key: the preview's own precondition.
+    const store = createAppConfigStore(db, TEST_ENCRYPTION_KEY);
+    await store.upsertCustomProvider(
+      { botId: HOME_BOT_ROW, workspaceId: OFFICIAL, role: "owner" },
+      HOME_BOT_ROW,
+      {
+        provider_id: "acme-proxy",
+        base_url: "https://api.acme.test/v1",
+        api: "openai-completions",
+        model_ids: ["model-one"],
+      },
+      "sk-acme-owner-preview",
+    );
+    // The probe data is the route's ONE outbound read: the declared endpoint's
+    // own model list, which keeps model-one and adds model-two.
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ data: [{ id: "model-one" }, { id: "model-two" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof fetch,
+    );
+    try {
+      const preview = await worker.fetch(
+        new Request(
+          `https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${HOME_BOT_ROW}/provider-models/preview?provider=acme-proxy`,
+          { headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("dana", null, SESSION_SECRET)}` } },
+        ),
+        envFor(),
+      );
+      expect(preview.status).toBe(200);
+      expect(await preview.json()).toEqual({
+        ok: true,
+        provider: "acme-proxy",
+        current: 1,
+        fetched: 2,
+        kept: 1,
+        added: 1,
+        dropped: 0,
+      });
+      expect(fetchSpy.mock.calls[0]![0]).toBe("https://api.acme.test/v1/models");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("the owner's key-usage read answers 200 with the provider's snapshot", async () => {
+    world();
+    const store = createAppConfigStore(db, TEST_ENCRYPTION_KEY);
+    const plainKey = "sk-zai-owner-usage";
+    await store.addProviderKey(
+      { botId: HOME_BOT_ROW, workspaceId: OFFICIAL, role: "owner" },
+      HOME_BOT_ROW,
+      "zai",
+      plainKey,
+    );
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plainKey));
+    const keyId = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0"))
+      .join("")
+      .slice(0, 16);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            data: { limits: [{ type: "TOKENS_LIMIT", unit: 6, number: 1, currentValue: 25, usage: 200, remaining: 175 }] },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )) as unknown as typeof fetch,
+    );
+    try {
+      const usage = await read(OFFICIAL, "dana", {
+        name: "key usage",
+        path: "/api/review-bots/" + HOME_BOT_ROW + "/keys/usage",
+        method: "POST",
+        form: { provider: "zai", keyId },
+      });
+      expect(usage.status).toBe(200);
+      expect(await usage.json()).toMatchObject({ ok: true, status: "ok" });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

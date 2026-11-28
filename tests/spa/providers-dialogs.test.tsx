@@ -50,6 +50,8 @@ const CATALOG: CatalogProvider[] = [
 function managePayload(overrides: Partial<SettingsManagePayload & ProviderManagementPayload> = {}): SettingsManagePayload & ProviderManagementPayload {
   return {
     can_manage: true,
+    can_edit_chain: false,
+    viewer_relation: "created",
     installation: null,
     pending_installations: [],
     workspace_id: "ws_test",

@@ -35,10 +35,11 @@ const EMPTY_FILTERS: DeliveryFilters = { repo: "", since: "", type: "" };
 
 const ALL = "all";
 
-/** The last-verified line the credentials panel used to carry, now this tab's. */
+/** The last-verified line the credentials panel used to carry, now this tab's.
+ * The ADR bans a 24h rejection figure on every surface, so the line is the
+ * webhook stamp alone. */
 export type DeliverySummaryLine = {
   last_webhook_at: string | null;
-  rejected24h: number;
 };
 
 export function AppDeliveryTab({
@@ -185,14 +186,6 @@ export function DeliveryStatusView({
           {t(locale, "settings.lastWebhook", {
             time: formatRelativeTime(summary.last_webhook_at, locale),
           })}
-          {summary.rejected24h > 0 ? (
-            <>
-              {" · "}
-              <span className="text-(--tone-danger-fg)">
-                {t(locale, "apps.health.rejected24h", { count: summary.rejected24h })}
-              </span>
-            </>
-          ) : null}
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-3">

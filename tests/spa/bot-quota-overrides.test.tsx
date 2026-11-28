@@ -2,12 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { t } from "../../src/i18n";
-import { BotQuotaOverridesEditor } from "../../src/spa/pages/BotDetailPage";
+import { formatCredits } from "../../src/spa/pages/data";
+import { BotQuotaOverridesEditor } from "../../src/spa/pages/BotSettingsPage";
 import { installDom } from "./dom";
 
 const realFetch = globalThis.fetch;
 
 type Sent = { method: string; body: unknown };
+
+// Ceilings enter and list in Credits; the store keeps RP, so the editor
+// converts at the rate (the ADR 1,000 fallback when the payload omits it).
+const CEILING_LABEL = `${t("en", "botDetail.share.monthlyCap")} (${t("en", "credits.unit")})`;
 
 async function mount(initial: Array<{ workspaceId: string; monthlyRp: number }>) {
   const { win, cleanup } = installDom("http://localhost/dashboard/ws/bots/bot-1");
@@ -65,10 +70,10 @@ async function mount(initial: Array<{ workspaceId: string; monthlyRp: number }>)
 }
 
 describe("the per-workspace ceiling editor", () => {
-  test("lists existing overrides and clears one", async () => {
+  test("lists existing overrides in Credits and clears one", async () => {
     const surface = await mount([{ workspaceId: "ws-a", monthlyRp: 500 }]);
     expect(surface.text()).toContain("ws-a");
-    expect(surface.text()).toContain(t("en", "bots.overrideValue", { rp: 500 }));
+    expect(surface.text()).toContain(formatCredits(500));
 
     surface.setReply([]);
     await surface.click(surface.button(t("en", "bots.overrideClear", { workspace: "ws-a" }))!);
@@ -78,18 +83,19 @@ describe("the per-workspace ceiling editor", () => {
     await surface.close();
   });
 
-  test("saves a new ceiling for a workspace", async () => {
+  test("saves a new ceiling for a workspace, converting Credits to RP", async () => {
     const surface = await mount([]);
     surface.setReply([{ workspaceId: "ws-b", monthlyRp: 900 }]);
     await surface.type(t("en", "bots.overrideWorkspace"), "ws -b".replace(" ", ""));
-    await surface.type(t("en", "bots.overrideCeiling"), "900");
+    await surface.type(CEILING_LABEL, "0.9");
     await surface.click(surface.button(t("en", "bots.overrideSave"))!);
     expect(surface.sent.at(-1)).toEqual({ method: "PATCH", body: { workspaceId: "ws-b", monthlyRp: 900 } });
     expect(surface.text()).toContain("ws-b");
+    expect(surface.text()).toContain(formatCredits(900));
     await surface.close();
   });
 
-  test("a blank ceiling clears, and a fractional one is refused before any request", async () => {
+  test("a blank ceiling clears, and a zero or non-numeric one is refused before any request", async () => {
     const surface = await mount([{ workspaceId: "ws-c", monthlyRp: 100 }]);
     await surface.type(t("en", "bots.overrideWorkspace"), "ws-c");
     await surface.click(surface.button(t("en", "bots.overrideSave"))!);
@@ -97,7 +103,12 @@ describe("the per-workspace ceiling editor", () => {
 
     const before = surface.sent.length;
     await surface.type(t("en", "bots.overrideWorkspace"), "ws-d");
-    await surface.type(t("en", "bots.overrideCeiling"), "1.5");
+    await surface.type(CEILING_LABEL, "0");
+    await surface.click(surface.button(t("en", "bots.overrideSave"))!);
+    expect(surface.sent.length).toBe(before);
+    expect(surface.text()).toContain(t("en", "bots.overrideInvalid"));
+
+    await surface.type(CEILING_LABEL, "not-a-number");
     await surface.click(surface.button(t("en", "bots.overrideSave"))!);
     expect(surface.sent.length).toBe(before);
     expect(surface.text()).toContain(t("en", "bots.overrideInvalid"));

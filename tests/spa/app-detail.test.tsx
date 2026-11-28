@@ -45,6 +45,8 @@ const IDENTITY_APP = {
 
 const identityPayload = {
   can_manage: false as const,
+  can_edit_chain: false as const,
+  viewer_relation: "created" as const,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-1",
   blocked: false as const,
@@ -56,8 +58,10 @@ const identityPayload = {
 function blockedPayload(): SettingsBlockedPayload {
   return {
     can_manage: true,
+    can_edit_chain: false,
     blocked: true,
     blocked_reason: "bot_not_shared",
+    viewer_relation: "created",
     workspace_id: managePayload.workspace_id,
     target_id: managePayload.target_id,
     app: {
@@ -94,13 +98,18 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
     available: true,
     multiplier: 1,
     month_used_rp: 0,
-    monthly_rp: null,
+    effective_monthly_rp: null,
+    archived: false,
+    default_chain: null,
+    runtime: "omp",
     ...overrides,
   };
 }
 
 const managePayload = {
   can_manage: true as const,
+  can_edit_chain: false as const,
+  viewer_relation: "created" as const,
   official_workspace: true as const,
   can_configure_bot: true as const,
   installation: null,
@@ -136,6 +145,8 @@ const managePayload = {
 
 const untargetedPayload: SettingsUntargetedPayload = {
   can_manage: true,
+  can_edit_chain: false,
+  viewer_relation: "created",
   official_workspace: true,
   can_configure_bot: true,
   installation: null,
@@ -300,11 +311,10 @@ describe("tab shell rendering (static SSR)", () => {
       (tab) => tab.textContent ?? "",
     );
 
-  test("the manager's tab bar is the App's own four faces, settings first", async () => {
+  test("the manager's tab bar is the App's own three faces, settings first", async () => {
     const manage = renderDetail(managePayload);
     expect(await withMarkup(manage, pageTabs)).toEqual([
       t("en", "appDetail.tabSettings"),
-      t("en", "appDetail.tabBots"),
       t("en", "appDetail.tabDelivery"),
       t("en", "appDetail.tabInstallations"),
     ]);
@@ -352,13 +362,17 @@ describe("tab shell rendering (static SSR)", () => {
     expect(installed).toContain('href="https://github.com/apps/demo/installations/new"');
   });
 
-  test("an App with no repository yet states it, with no reverse link to the repository surface", () => {
+  test("an App with no repository renders no repository block but keeps the App ops", () => {
     expect(parseSettings(untargetedPayload)).not.toBeNull();
     expect(parseSettings(untargetedPayload)?.target_id).toBeUndefined();
 
     const markup = renderDetail(untargetedPayload);
-    expect(markup).toContain(t("en", "appDetail.noRepository"));
-    expect(markup).not.toContain(t("en", "settings.ops"));
+    expect(markup).not.toContain(t("en", "appDetail.noRepository"));
+    expect(markup).not.toContain(t("en", "appDetail.targetsMany"));
+    // The ops block is an App fact: enable/disable/delete render with no target.
+    expect(markup).toContain(t("en", "settings.ops"));
+    expect(markup).toContain(t("en", "apps.actions.disable"));
+    expect(markup).toContain(t("en", "apps.actions.delete"));
     for (const key of ["settings.reviewTrigger", "settings.reviewDepth", "settings.reviewGate"] as const) {
       expect(markup).not.toContain(t("en", key));
     }
@@ -366,33 +380,18 @@ describe("tab shell rendering (static SSR)", () => {
     expect(markup).toContain(t("en", "apps.shareAppSwitch"));
   });
 
-  test("an App with several repositories says so, not the zero-repository state", () => {
+  test("an App with several repositories renders no repository block but keeps the App ops", () => {
     const many = { ...untargetedPayload, targets_many: true };
     expect(parseSettings(many)?.targets_many).toBe(true);
     const markup = renderDetail(many);
-    expect(markup).toContain(t("en", "appDetail.targetsMany"));
+    expect(markup).not.toContain(t("en", "appDetail.targetsMany"));
     expect(markup).not.toContain(t("en", "appDetail.noRepository"));
-    expect(markup).not.toContain(t("en", "settings.ops"));
+    expect(markup).toContain(t("en", "settings.ops"));
+    expect(markup).toContain(t("en", "apps.actions.disable"));
+    expect(markup).toContain(t("en", "apps.actions.delete"));
     expect(markup).not.toContain(t("en", "settings.providers.title"));
     expect(markup).toContain(t("en", "apps.shareAppSwitch"));
     expect(parseSettings({ ...untargetedPayload, targets_many: "yes" })).toBeNull();
-  });
-
-  test("the detail links to REAL bots — the mounted chain, or the usable-bot list, never an inferred App id", () => {
-    // F7: with no chain row the link is the workspace's usable-bot list.
-    const chainless = renderDetail(managePayload);
-    expect(chainless).toContain(`href="${apiBase()}/apps?tab=bots"`);
-    expect(chainless).toContain(t("en", "appDetail.botSettingsLink"));
-    expect(chainless).not.toContain(`href="${apiBase()}/apps/1/bot"`);
-
-    // F7: a mounted chain links each mounted BOT id, never the App id.
-    const mounted = renderDetail({
-      ...managePayload,
-      chain: [chainRow({ position: 1, bot_id: "bot-a" }), chainRow({ position: 2, bot_id: "bot-b" })],
-    });
-    expect(mounted).toContain(`href="${apiBase()}/bots/bot-a"`);
-    expect(mounted).toContain(`href="${apiBase()}/bots/bot-b"`);
-    expect(mounted).not.toContain(`href="${apiBase()}/apps/1/bot"`);
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
@@ -422,7 +421,7 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(manage).toContain(t("en", "settings.installCopy"));
   });
 
-  test("the install block renders the App's avatar image", () => {
+  test("the install block carries no second identity — no avatar, no name (item 12)", () => {
     const manage = renderDetail(
       {
         ...managePayload,
@@ -431,8 +430,13 @@ describe("installed tab configuration surface (static SSR)", () => {
       "installations",
     );
     expect(manage).toContain(t("en", "settings.installCopy"));
-    const avatar = manage.slice(manage.indexOf(t("en", "settings.installCopy")));
-    expect(avatar).toContain('<img src="https://avatars.example/demo.png"');
+    const block = manage.slice(manage.indexOf(t("en", "settings.installCopy")));
+    expect(block).not.toContain('<img src="https://avatars.example/demo.png"');
+    // The one avatar render left is the GitHub App block on the settings tab —
+    // hidden but forceMounted — which uses the avatar URL.
+    expect(manage.indexOf('<img src="https://avatars.example/demo.png"')).toBeLessThan(
+      manage.indexOf(t("en", "settings.installCopy")),
+    );
   });
 
   test("a null slug keeps the block with explanations and offers no dead link", () => {
@@ -719,7 +723,7 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     }
   });
 
-  test("a null cached avatar renders AppAvatar's bg-muted fallback in the install block once the derived icon misses", async () => {
+  test("a null cached avatar renders AppAvatar's bg-muted fallback in the GitHub App block once the derived icon misses", async () => {
     const payload = {
       ...managePayload,
       app: { ...managePayload.app, github_avatar_url: null },
@@ -743,15 +747,17 @@ describe("tab shell mounted behaviour (forceMount)", () => {
           }),
         ),
       );
-      const img = container.querySelector('img[class*="h-10 w-10"]');
+      // The identity row left the install block; the GitHub App block's avatar
+      // is the h-12 one.
+      const img = container.querySelector('img[class*="h-12 w-12"]');
       expect(img?.getAttribute("src")).toBe("https://avatars.githubusercontent.com/in/1?s=120&v=4");
 
       await act(async () => {
         img!.dispatchEvent(new win.Event("error"));
       });
       const fallback = container.querySelector(".bg-muted.rounded-full");
-      expect(fallback?.getAttribute("class")).toContain("h-10 w-10");
-      expect(container.querySelector('img[class*="h-10 w-10"]')).toBeNull();
+      expect(fallback?.getAttribute("class")).toContain("h-12 w-12");
+      expect(container.querySelector('img[class*="h-12 w-12"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -817,7 +823,8 @@ describe("header metric band on the manage face (static SSR)", () => {
 
   // F11: the band is App-scoped. `keys` and `model_chains` were BOT
   // configuration reached through an equal id, so the counts that remain are
-  // installations, mounted bots (the chain), and the delivery refusals.
+  // installations and mounted bots (the chain). The 24h refusal count is the
+  // delivery tab's own figure and never rides this band.
   const payloadWith = (counts: {
     mounted: number;
     installations: number;
@@ -831,12 +838,11 @@ describe("header metric band on the manage face (static SSR)", () => {
     delivery_summary: counts.rejected === null ? undefined : summary(counts.rejected),
   });
 
-  test("the three figures render in band order, each wired to its own source count", () => {
+  test("the two figures render in band order, each wired to its own source count", () => {
     const pairs = band(payloadWith({ installations: 2, mounted: 5, rejected: 7 }));
     expect(pairs.map(({ key, value }) => [key, value])).toEqual([
       ["Installations", "2"],
       ["Mounted bots", "5"],
-      ["24h rejected", "7"],
     ]);
   });
 
@@ -847,13 +853,12 @@ describe("header metric band on the manage face (static SSR)", () => {
     expect(keys).not.toContain("Model chains");
   });
 
-  test("a zero rejected count renders without the danger tone; non-zero wears it", () => {
-    const zero = band(payloadWith({ installations: 1, mounted: 1, rejected: 0 }));
-    expect(zero[2]!).toEqual({ key: "24h rejected", value: "0", danger: false });
-    const absent = band(payloadWith({ installations: 1, mounted: 1, rejected: null }));
-    expect(absent[2]!).toEqual({ key: "24h rejected", value: "0", danger: false });
-    const refused = band(payloadWith({ installations: 1, mounted: 1, rejected: 4 }));
-    expect(refused[2]!).toEqual({ key: "24h rejected", value: "4", danger: true });
+  test("the 24h refusal count never rides the band, however many refusals", () => {
+    for (const rejected of [0, 4, null] as const) {
+      const pairs = band(payloadWith({ installations: 1, mounted: 1, rejected }));
+      expect(pairs.map(({ key }) => key)).not.toContain("24h rejected");
+      expect(pairs.every(({ danger }) => !danger)).toBe(true);
+    }
   });
 });
 
@@ -927,7 +932,6 @@ describe("Blocked and pending installations (static SSR)", () => {
   test("the Blocked banner names the reason on both faces", () => {
     const manager = renderDetail(blockedPayload());
     expect(manager).toContain(t("en", "appDetail.blockedBotNotShared"));
-    expect(manager).not.toContain(t("en", "appDetail.botSettingsLink"));
     expect(manager).not.toContain(t("en", "settings.installations"));
     expect(manager).not.toContain(t("en", "settings.metricKeys"));
     expect(manager).not.toContain(t("en", "settings.reviewGate"));
@@ -972,8 +976,8 @@ describe("Blocked and pending installations (static SSR)", () => {
     const pending: SettingsManagePayload = {
       ...sharedPayload(),
       pending_installations: [
-        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-        { installation_id: 501, account_login: null, seen_at: "2026-01-01 00:00:00" },
+        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00", can_bind: true },
+        { installation_id: 501, account_login: null, seen_at: "2026-01-01 00:00:00", can_bind: true },
       ],
     };
     const markup = renderDetail(pending, "installations");
@@ -993,7 +997,7 @@ describe("Blocked and pending installations (static SSR)", () => {
       ...sharedPayload(),
       app: { ...sharedPayload().app, scope: "owned" },
       pending_installations: [
-        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00", can_bind: true },
       ],
     };
     const markup = renderDetail(ownedPending, "installations");
@@ -1037,11 +1041,18 @@ describe("Blocked and pending installations (static SSR)", () => {
     expect(parseSettings(blockedMany)).not.toBeNull();
     expect(parseSettings(blockedMany)?.target_id).toBeNull();
     expect(parseSettings(blockedMany)?.targets_many).toBe(true);
+    // Zero targets is the OTHER fact the same null target can mean: an
+    // installation-only manager whose bot stopped being shared. It parses as
+    // its own face, and it is not the several-targets one.
+    const blockedInstall = { ...blockedMany, targets_many: false };
+    expect(parseSettings(blockedInstall)).not.toBeNull();
+    expect(parseSettings(blockedInstall)?.targets_many).toBe(false);
     for (const broken of [
-      { ...blockedMany, targets_many: false },
+      // A blocked null target must SAY which fact it is — neither flag is refused.
       { ...blockedMany, targets_many: undefined },
       { ...blockedMany, app: { ...blockedMany.app, review_enabled: true } },
       { ...managePayload, target_id: null, targets_many: true },
+      { ...managePayload, target_id: null, targets_many: false },
     ]) {
       expect(parseSettings(broken)).toBeNull();
     }
@@ -1196,106 +1207,16 @@ describe("投递状态 tab", () => {
   });
 });
 
-describe("the bots tab renders the ordered chain read-only (D29, D35)", () => {
-  const chainRows = async (markup: string): Promise<string[][]> =>
-    withMarkup(markup, (container) => {
-      const table = [...container.querySelectorAll("table")].find((node) =>
-        (node.querySelector("thead")?.textContent ?? "").includes(t("en", "apps.chain.columnPosition")),
-      );
-      if (table === undefined) return [];
-      return [...table.querySelectorAll("tbody tr")].map((row) =>
-        [...row.querySelectorAll("td")].map((cell) => (cell.textContent ?? "").trim()),
-      );
-    });
-
-  test("?tab=bots opens the tab and its inverse round-trips; unknown values still fall back", () => {
-    expect(parseAppDetailSearch("?tab=bots").tab).toBe("bots");
-    expect(appDetailSearchQuery({ tab: "bots", window: "30", repo: "", pr: "" })).toBe("?tab=bots");
+describe("the retired bots tab (Task 7)", () => {
+  test("?tab=bots falls back to settings — the tab grammar is settings/delivery/installations only", () => {
+    expect(parseAppDetailSearch("?tab=bots").tab).toBe("settings");
     expect(parseAppDetailSearch("?tab=chain").tab).toBe("settings");
-  });
-
-  test("position, bot name, provider, multiplier and the month cell render in chain order", async () => {
-    const markup = renderDetail(
-      {
-        ...managePayload,
-        chain: [
-          chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5, month_used_rp: 1240 }),
-          chainRow({ position: 2, bot_id: "bot-b", name: "acme-own", month_used_rp: 0 }),
-        ],
-      },
-      "bots",
-    );
-    const rows = await chainRows(markup);
-
-    expect(rows.map((cells) => cells[0])).toEqual(["1", "2"]);
-    expect(rows[0]![1]).toContain("Mstar Standard");
-    expect(rows[0]![1]).toContain(t("en", "apps.chain.tagShared"));
-    expect(rows[1]![1]).toContain(t("en", "apps.chain.tagMine"));
-    expect(rows.map((cells) => cells[3])).toEqual(["×1.5", "×1"]);
-    expect(rows[0]![4]).toContain("1240");
-  });
-
-  test("a manager gets reorder controls; a reader gets none", async () => {
-    const row = chainRow({ position: 1, bot_id: "bot-a" });
-    const managed = await withMarkup(renderDetail({ ...managePayload, chain: [row] }, "bots"), (container) =>
-      [...container.querySelectorAll("[data-slot='app-chain-reorder'] button")].map((node) => node.textContent ?? ""),
-    );
-    // The order is editable now that `selectReviewBot` reads it (D29): the
-    // editor and the code that reads the order ship in the same release. One
-    // row, so both arrows are disabled and the remove control is present (D27
-    // keeps the LAST row visible).
-    expect(managed).toEqual(["↑", "↓", "✕"]);
-
-    const readOnly = await withMarkup(
-      renderDetail({ ...managePayload, can_manage: false, chain: [row] }, "bots"),
-      (container) => container.querySelectorAll("[data-slot='app-chain-reorder']").length,
-    );
-    expect(readOnly).toBe(0);
-  });
-
-  test("an empty chain names the next step instead of rendering a blank table", async () => {
-    // F4: with no PENDING bind, an empty chain is the honest "nothing mounted"
-    // answer — not the pending-bind copy, which says no chain can exist yet.
-    const markup = renderDetail({ ...managePayload, chain: [], pending_installations: [] }, "bots");
-    expect(markup).toContain(t("en", "apps.chain.empty"));
-    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
-    expect(await chainRows(markup)).toEqual([]);
-  });
-
-  test("an unbound shared installation yields the pending-bind copy, not the generic empty answer", async () => {
-    // F4: pending is a REAL bind state (an unbound installation of a shared App),
-    // never `blocked` and never the raw installation array — an owned App's
-    // unbound rows are not binds at all.
-    const pending = renderDetail(
-      {
-        ...managePayload,
-        chain: [],
-        pending_installations: [{ installation_id: 77, account_login: "acme", seen_at: new Date().toISOString() }],
-      },
-      "bots",
-    );
-    expect(pending).toContain(t("en", "apps.chain.pendingBind"));
-    expect(pending).not.toContain(t("en", "apps.chain.empty"));
-  });
-
-  test("a bot its owner stopped sharing renders as a skipped row", async () => {
-    const markup = renderDetail(
-      { ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a", owned: false, available: false })] },
-      "bots",
-    );
-    expect(markup).toContain(t("en", "apps.chain.rowUnavailable"));
-  });
-
-  test("the App band and the bot link read the chain, not a same-id bot", async () => {
-    const markup = renderDetail(
-      { ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a" })] },
-    );
-    expect(markup).toContain(`href="${apiBase()}/bots/bot-a"`);
-    expect(markup).toContain(t("en", "appDetail.metricMountedBots"));
+    expect(parseAppDetailSearch("?tab=delivery").tab).toBe("delivery");
+    expect(parseAppDetailSearch("?tab=installations").tab).toBe("installations");
   });
 });
 
-describe("F3/F5 — the chain reaches members, blocked managers, and states its ceiling", () => {
+describe("the creator face carries no chain (ADR)", () => {
   const chainRows = async (markup: string): Promise<string[][]> =>
     withMarkup(markup, (container) => {
       const table = [...container.querySelectorAll("table")].find((node) =>
@@ -1307,59 +1228,99 @@ describe("F3/F5 — the chain reaches members, blocked managers, and states its 
       );
     });
 
-  test("a member's identity-only face renders the read-only chain", async () => {
+  test("a creator member's face renders no chain table, no 添加机器人, no move controls", async () => {
     const markup = renderDetail(
       {
         ...identityPayload,
         chain: [chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5 })],
       },
     );
-    expect(markup).toContain(t("en", "apps.chain.title"));
-    expect((await chainRows(markup)).map((cells) => cells[0])).toEqual(["1"]);
+    expect(markup).not.toContain('data-slot="app-chain"');
+    expect(markup).not.toContain(t("en", "apps.chain.title"));
+    expect(markup).not.toContain(t("en", "apps.chain.addBot"));
+    expect(markup).not.toContain(t("en", "apps.chain.moveUp", { bot: "Mstar Standard" }));
+    expect(await chainRows(markup)).toEqual([]);
   });
 
-  test("a blocked manager keeps the chain and its unavailable row", async () => {
-    const markup = renderDetail(
-      {
-        ...blockedPayload(),
-        chain: [chainRow({ position: 1, bot_id: "bot-a", owned: false, available: false })],
-      } as SettingsBlockedPayload,
-      "bots",
-    );
-    expect(markup).toContain(t("en", "apps.chain.rowUnavailable"));
-    // The blocked face renders the skipped row, never the pending-bind sentence.
-    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
-  });
-
-  test("a blocked manager with no chain at all gets the empty-chain answer", async () => {
-    const markup = renderDetail(
-      {
-        ...blockedPayload(),
-        chain: [],
-        installations: [{ installation_id: 1, account_login: "acme", seen_at: new Date().toISOString() }],
-      } as SettingsBlockedPayload,
-      "bots",
-    );
-    expect(markup).toContain(t("en", "apps.chain.empty"));
-    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
-  });
-
-  test("each row states its real ceiling: owned unlimited, shared cap, shared uncapped", async () => {
+  test("a creator manager's face renders no chain table, no 添加机器人, no move controls", async () => {
     const markup = renderDetail(
       {
         ...managePayload,
-        chain: [
-          chainRow({ position: 1, bot_id: "bot-own", owned: true, month_used_rp: 40, monthly_rp: 500 }),
-          chainRow({ position: 2, bot_id: "bot-capped", owned: false, month_used_rp: 1240, monthly_rp: 2000 }),
-          chainRow({ position: 3, bot_id: "bot-free", owned: false, month_used_rp: 10, monthly_rp: null }),
-        ],
+        chain: [chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5 })],
       },
-      "bots",
     );
-    const rows = await chainRows(markup);
+    expect(markup).not.toContain('data-slot="app-chain"');
+    expect(markup).not.toContain(t("en", "apps.chain.title"));
+    expect(markup).not.toContain(t("en", "apps.chain.addBot"));
+    expect(markup).not.toContain(t("en", "apps.chain.moveUp", { bot: "Mstar Standard" }));
+    expect(await chainRows(markup)).toEqual([]);
+  });
+});
 
-    expect(rows[0]![4]).toContain(t("en", "bots.monthOwn", { used: 40 }));
-    expect(rows[1]![4]).toContain(t("en", "bots.monthLimit", { used: 1240, limit: 2000 }));
-    expect(rows[2]![4]).toContain(t("en", "bots.monthNoCeiling", { used: 10 }));
+/**
+ * F1-4: archive stops a bot from being NEWLY mounted. The chooser is a read of
+ * every usable bot, so it must drop the archived ones; a row the chain already
+ * carries is rendered from the chain itself and stays reorderable/removable.
+ */
+describe("the mount chooser never offers an archived bot (mounted behaviour)", () => {
+  const usableBot = (id: string, name: string, archived: boolean) => ({
+    id,
+    name,
+    description: null,
+    workspace_id: "ws_0123456789abcdefghijkl",
+    workspace_name: "Default",
+    owned: true,
+    can_manage: true,
+    scope: "owned" as const,
+    multiplier: 1,
+    month_used_rp: 0,
+    effective_ceiling: null,
+    archived,
+  });
+
+  test("an archived bot is absent from the add list; a live one is present", async () => {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/default/apps/1");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("/api/apps/1")) {
+        return Response.json({
+          ...managePayload,
+          viewer_relation: "installed",
+          can_manage: true,
+          can_edit_chain: true,
+          installation: { id: 88123456, account_login: "btspoony", removed: false },
+          pending_installations: [],
+          chain: [],
+        });
+      }
+      if (url.endsWith("/api/review-bots")) {
+        return Response.json({
+          workspace_id: "ws_0123456789abcdefghijkl",
+          plan_monthly_rp: null,
+          bots: [usableBot("bot-live", "Live Bot", false), usableBot("bot-old", "Archived Bot", true)],
+        });
+      }
+      if (url.endsWith("/models")) return Response.json({ groups: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
+      // The chooser renders only once its add disclosure is opened.
+      const summary = container.querySelector('[data-slot="installed-chain"] summary');
+      expect(summary?.textContent?.trim()).toBe(t("en", "appDetail.installed.addBot"));
+      await act(async () => {
+        summary?.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+      });
+      expect(container.querySelector('[aria-label="Add Live Bot"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Add Archived Bot"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 });

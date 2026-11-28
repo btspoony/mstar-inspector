@@ -12,6 +12,7 @@ import { loadProviderCatalog } from "../../src/spa/provider-catalog";
 const botPayload = {
   can_manage: true,
   owned: true,
+  archived: false,
   app: {
     github_app_id: null,
     id: "bot-1",
@@ -43,6 +44,7 @@ const botPayload = {
     provider_workspace: "Acme",
     month_used_rp: 0,
     plan_monthly_rp: null,
+    effective_ceiling: null,
     default_chain: "anthropic/claude",
     mounted_apps: [],
   },

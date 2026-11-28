@@ -160,7 +160,7 @@
  *     bot_id is a caller bug, never a silent no-op.
  */
 import { createSecretbox } from "./secretbox";
-import { readBotOwnerWorkspace } from "./apps-store";
+import { readBotWriteTarget, targetStateOf, type TargetState } from "./apps-store";
 import type { WorkspaceRole } from "./workspace-store";
 import { builtinProbeCanRejectKey, customProbeCanRejectKey } from "./provider-verify";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
@@ -966,6 +966,17 @@ export class BotWriteForbiddenError extends Error {
   }
 }
 
+/**
+ * F1: the bot is archived. A subclass so a caller that only knows the forbidden
+ * refusal keeps working; routes map it to 409 (`settings.error.botArchived`).
+ */
+export class BotArchivedError extends BotWriteForbiddenError {
+  constructor(botId: string) {
+    super(botId);
+    this.name = "BotArchivedError";
+  }
+}
+
 export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | undefined) {
   const box = createSecretbox(encryptionKey);
 
@@ -989,11 +1000,68 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       throw new BotWriteForbiddenError(targetId);
     }
     // `review_bots` has ONE reader module (apps-store); the guard asks it
-    // rather than opening a second read site.
-    const owner = await readBotOwnerWorkspace(db, targetId);
-    if (owner === null || owner !== authority.workspaceId) {
+    // rather than opening a second read site. An archived bot is refused like
+    // another workspace's: its only transition is archive/restore.
+    const owner = await readBotWriteTarget(db, targetId);
+    if (owner === null || owner.workspaceId !== authority.workspaceId) {
       throw new BotWriteForbiddenError(targetId);
     }
+    if (owner.archived) throw new BotArchivedError(targetId);
+  }
+
+  /**
+   * The archive guard every configuration mutation carries INSIDE its own
+   * statement: an archive that lands between `requireBotWrite`'s read and this
+   * write changes zero rows instead of configuring a locked bot. Correlated on
+   * the target table's own `bot_id`, so no caller threads an extra bind.
+   */
+  function liveBot(table: string): string {
+    return `EXISTS (SELECT 1 FROM review_bots b
+                     WHERE b.id = ${table}.bot_id
+                       AND b.deleted_at IS NULL AND b.archived_at IS NULL)`;
+  }
+
+  /** The same guard for `INSERT ... SELECT`, whose target has no alias. */
+  const LIVE_BOT_BY_PARAM = `EXISTS (SELECT 1 FROM review_bots b
+                                      WHERE b.id = ? AND b.deleted_at IS NULL AND b.archived_at IS NULL)`;
+
+  /**
+   * The state proof a mutation's own batch carries as its FIRST statement.
+   * Each guarded statement also carries the predicate, but a statement that
+   * wrote nothing cannot say WHY — and reading that afterwards is unsound: an
+   * archive followed by a restore between the write and the read would report
+   * success for a write that never happened. Inside the batch the probe and the
+   * write see one transaction, so the outcome is the state the write saw.
+   * `present` separates a DELETED bot (a forbidden target) from an ARCHIVED one.
+   */
+  function liveProbeStatement(appId: string): AppConfigStatement {
+    return db
+      // shortcut: tenant-bypass — addressed by the bot id the caller already
+      // passed ownership + role on; projects two EXISTS flags only.
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM review_bots b
+                         WHERE b.id = ? AND b.deleted_at IS NULL AND b.archived_at IS NULL) AS live,
+                EXISTS (SELECT 1 FROM review_bots b WHERE b.id = ? AND b.deleted_at IS NULL) AS present`,
+      )
+      .bind(appId, appId);
+  }
+
+  /** One mutation as ONE batch behind that probe; `results` are the write's own. */
+  async function guardedBatch(
+    appId: string,
+    statements: AppConfigStatement[],
+  ): Promise<{ results: AppConfigBatchResult[]; state: TargetState }> {
+    const [probe, ...results] = await db.batch([liveProbeStatement(appId), ...statements]);
+    return { results, state: targetStateOf(probe) };
+  }
+
+  /**
+   * What a write that changed nothing means, from the state the WRITE saw: an
+   * archived bot is the archive refusal, a DELETED (or absent) one is the same
+   * forbidden refusal `requireBotWrite` gives. Never one reported as the other.
+   */
+  function refuseTarget(appId: string, state: TargetState): never {
+    throw state === "archived" ? new BotArchivedError(appId) : new BotWriteForbiddenError(appId);
   }
 
   type KeyTable = {
@@ -1019,20 +1087,32 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     return left < right ? -1 : 1;
   }
 
+  /**
+   * The 0024 sentinel row's repair, run on first touch. It rewrites credential
+   * material and changes the externally visible `key_id`, so both statements
+   * carry the archive predicate: an archived bot's row is never rewritten, and
+   * a caller that read it live still sees the promoted shape in memory — the
+   * stored envelope stays decryptable under the legacy AAD either way.
+   */
   async function promoteLegacyKeyRow(spec: KeyTable, row: AppProviderKeyRow): Promise<AppProviderKeyRow> {
     const plain = await box.decryptSecret(row.key_enc, spec.legacyAad(row.bot_id, row.provider));
     const keyId = await providerKeyId(plain);
     const keyEnc = await box.encryptSecret(plain, spec.aad(row.bot_id, row.provider, keyId));
+    const live = `EXISTS (SELECT 1 FROM review_bots b
+                           WHERE b.id = ${spec.table}.bot_id
+                             AND b.deleted_at IS NULL AND b.archived_at IS NULL)`;
     await db.batch([
       db
         .prepare(
-          `DELETE FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ? AND EXISTS (
+          `DELETE FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ? AND ${live} AND EXISTS (
              SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?
            )`,
         )
         .bind(row.bot_id, row.provider, LEGACY_KEY_ID, row.bot_id, row.provider, keyId),
       db
-        .prepare(`UPDATE ${spec.table} SET key_id = ?, key_enc = ? WHERE bot_id = ? AND provider = ? AND key_id = ?`)
+        .prepare(
+          `UPDATE ${spec.table} SET key_id = ?, key_enc = ? WHERE bot_id = ? AND provider = ? AND key_id = ? AND ${live}`,
+        )
         .bind(keyId, keyEnc, row.bot_id, row.provider, LEGACY_KEY_ID),
     ]);
     return { ...row, key_id: keyId, key_enc: keyEnc };
@@ -1098,12 +1178,15 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       if (opts.endpoint !== undefined) bind.push(opts.endpoint.base_url, opts.endpoint.api);
     }
     if (opts.newDeclaration === true) bind.push(appId, appId, provider);
+    // The archive guard rides the INSERT: a bot archived after the authority
+    // read inserts nothing, and the caller's refusal path names the reason.
+    bind.push(appId);
     return db
       .prepare(
         `WITH now AS (SELECT datetime('now') AS ts)
          INSERT INTO ${spec.table} (bot_id, provider, key_id, key_enc, created_at, updated_at, verified_at, verified_status)
          SELECT ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), ${verifiedAt}, ${verifiedStatus}
-         WHERE ${poolAdmission(spec)}${ownership}${growth}
+         WHERE ${poolAdmission(spec)}${ownership}${growth} AND ${LIVE_BOT_BY_PARAM}
          ON CONFLICT (bot_id, provider, key_id) DO UPDATE SET
            key_enc = excluded.key_enc,
            updated_at = excluded.updated_at,
@@ -1192,35 +1275,42 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     await readKeyRows(spec, appId, provider);
     const keyId = await providerKeyId(plainKey);
     const keyEnc = await box.encryptSecret(plainKey, spec.aad(appId, provider, keyId));
-    const keyStatement = keyInsertStatement(spec, appId, provider, keyId, keyEnc, opts);
-    if (opts.models === undefined) {
-      const res = await keyStatement.run();
-      if (res.meta.changes === 0) await throwKeyRefusal(spec, appId, provider, opts.endpoint);
-      return;
+    const statements = [keyInsertStatement(spec, appId, provider, keyId, keyEnc, opts)];
+    if (opts.models !== undefined) {
+      // The evidence row is written only for the key row THIS batch just wrote:
+      // `changes() > 0` is the key statement's own result, so a refused key write
+      // (an archive between the authority read and the batch) leaves the model
+      // evidence of an already-stored key untouched.
+      statements.push(
+        db
+          .prepare(
+            `WITH now AS (SELECT datetime('now') AS ts)
+             INSERT INTO bot_provider_models (bot_id, provider, key_id, models_json, fetched_at)
+             SELECT ?, ?, ?, ?, (SELECT ts FROM now)
+             WHERE changes() > 0
+               AND EXISTS (SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?)
+               AND ${LIVE_BOT_BY_PARAM}
+             ON CONFLICT (bot_id, provider, key_id) DO UPDATE SET
+               models_json = excluded.models_json,
+               fetched_at = excluded.fetched_at`,
+          )
+          .bind(
+            appId,
+            provider,
+            keyId,
+            JSON.stringify(opts.models),
+            appId,
+            provider,
+            keyId,
+            appId,
+          ),
+      );
     }
-    const res = await db.batch([
-      keyStatement,
-      db
-        .prepare(
-          `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO bot_provider_models (bot_id, provider, key_id, models_json, fetched_at)
-           SELECT ?, ?, ?, ?, (SELECT ts FROM now)
-           WHERE EXISTS (SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?)
-           ON CONFLICT (bot_id, provider, key_id) DO UPDATE SET
-             models_json = excluded.models_json,
-             fetched_at = excluded.fetched_at`,
-        )
-        .bind(
-          appId,
-          provider,
-          keyId,
-          JSON.stringify(opts.models),
-          appId,
-          provider,
-          keyId,
-        ),
-    ]);
-    if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider, opts.endpoint);
+    const { results, state } = await guardedBatch(appId, statements);
+    if (results[0]!.meta.changes === 0) {
+      if (state !== "live") refuseTarget(appId, state);
+      await throwKeyRefusal(spec, appId, provider, opts.endpoint);
+    }
   }
 
   async function summarizeKeyRow(spec: KeyTable, row: AppProviderKeyRow): Promise<ProviderKeySummary> {
@@ -1281,26 +1371,32 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   function deleteModelChainSeatStatement(appId: string, role: string): AppConfigStatement {
-    return db.prepare(`DELETE FROM bot_model_chain_seats WHERE bot_id = ? AND role = ?`).bind(appId, role);
+    return db
+      .prepare(
+        `DELETE FROM bot_model_chain_seats WHERE bot_id = ? AND role = ? AND ${liveBot("bot_model_chain_seats")}`,
+      )
+      .bind(appId, role);
   }
 
   function upsertModelChainSeatStatement(appId: string, role: string, chainName: string): AppConfigStatement {
     return db
       .prepare(
         `INSERT INTO bot_model_chain_seats (bot_id, role, chain_name)
-         VALUES (?, ?, ?)
+         SELECT ?, ?, ? WHERE ${LIVE_BOT_BY_PARAM}
          ON CONFLICT (bot_id, role) DO UPDATE SET
            chain_name = excluded.chain_name`,
       )
-      .bind(appId, role, chainName);
+      .bind(appId, role, chainName, appId);
   }
 
   async function deleteModelChainSeat(appId: string, role: string): Promise<void> {
-    await deleteModelChainSeatStatement(appId, role).run();
+    const { results, state } = await guardedBatch(appId, [deleteModelChainSeatStatement(appId, role)]);
+    if (results[0]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
   }
 
   async function upsertModelChainSeat(appId: string, role: string, chainName: string): Promise<void> {
-    await upsertModelChainSeatStatement(appId, role, chainName).run();
+    const { results, state } = await guardedBatch(appId, [upsertModelChainSeatStatement(appId, role, chainName)]);
+    if (results[0]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
   }
 
   async function assertChainExists(appId: string, chainName: string): Promise<void> {
@@ -1344,9 +1440,12 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     ): Promise<boolean> {
       await requireBotWrite(authority, appId);
       await readKeyRows(PROVIDER_KEY_TABLE, appId, provider);
-      const res = await db.batch([
+      const { results, state } = await guardedBatch(appId, [
         db
-          .prepare(`DELETE FROM bot_provider_keys WHERE bot_id = ? AND provider = ? AND key_id = ?`)
+          .prepare(
+            `DELETE FROM bot_provider_keys
+              WHERE bot_id = ? AND provider = ? AND key_id = ? AND ${liveBot("bot_provider_keys")}`,
+          )
           .bind(appId, provider, keyId),
         db
           .prepare(
@@ -1354,7 +1453,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           )
           .bind(appId, provider, keyId),
       ]);
-      return res[0]!.meta.changes > 0;
+      if (results[0]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
+      return results[0]!.meta.changes > 0;
     },
 
     async listProviderKeys(appId: string, provider?: string): Promise<ProviderKeySummary[]> {
@@ -1388,27 +1488,33 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     async setModelChain(authority: BotWriteAuthority, appId: string, chain: string | null): Promise<void> {
       await requireBotWrite(authority, appId);
       if (chain === null || chain.trim() === "") {
-        await db
-          .prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ?`)
-          .bind(appId, DEFAULT_CHAIN_NAME)
-          .run();
+        const { results, state } = await guardedBatch(appId, [
+          db
+            .prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ? AND ${liveBot("bot_model_chains")}`)
+            .bind(appId, DEFAULT_CHAIN_NAME),
+        ]);
+        if (results[0]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
         return;
       }
-      await db.batch([
+      const { results, state } = await guardedBatch(appId, [
         db
-          .prepare(`UPDATE bot_model_chains SET is_default = 0 WHERE bot_id = ? AND is_default = 1`)
+          .prepare(
+            `UPDATE bot_model_chains SET is_default = 0
+              WHERE bot_id = ? AND is_default = 1 AND ${liveBot("bot_model_chains")}`,
+          )
           .bind(appId),
         db
           .prepare(
             `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
-             VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+             SELECT ?, ?, ?, 1, datetime('now'), datetime('now') WHERE ${LIVE_BOT_BY_PARAM}
              ON CONFLICT (bot_id, name) DO UPDATE SET
                chain = excluded.chain,
                is_default = 1,
                updated_at = datetime('now')`,
           )
-          .bind(appId, DEFAULT_CHAIN_NAME, chain),
+          .bind(appId, DEFAULT_CHAIN_NAME, chain, appId),
       ]);
+      if (results[1]!.meta.changes === 0 && results[0]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
     },
 
     getModelChain(appId: string): Promise<string | null> {
@@ -1486,27 +1592,37 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       if (chain.trim() === "") {
         throw new InvalidModelSelectorError(chain);
       }
-      await db
-        .prepare(
-          `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
-           VALUES (?, ?, ?, 0, datetime('now'), datetime('now'))
-           ON CONFLICT (bot_id, name) DO UPDATE SET
-             chain = excluded.chain,
-             is_default = excluded.is_default,
-             updated_at = datetime('now')`,
-        )
-        .bind(appId, name, chain)
-        .run();
+      const { results, state } = await guardedBatch(appId, [
+        db
+          .prepare(
+            `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
+             SELECT ?, ?, ?, 0, datetime('now'), datetime('now') WHERE ${LIVE_BOT_BY_PARAM}
+             ON CONFLICT (bot_id, name) DO UPDATE SET
+               chain = excluded.chain,
+               is_default = excluded.is_default,
+               updated_at = datetime('now')`,
+          )
+          .bind(appId, name, chain, appId),
+      ]);
+      if (results[0]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
     },
 
     async removeModelChain(authority: BotWriteAuthority, appId: string, name: string): Promise<boolean> {
       await requireBotWrite(authority, appId);
       assertModelChainName(name);
-      const res = await db.batch([
-        db.prepare(`DELETE FROM bot_model_chain_seats WHERE bot_id = ? AND chain_name = ?`).bind(appId, name),
-        db.prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ?`).bind(appId, name),
+      const { results, state } = await guardedBatch(appId, [
+        db
+          .prepare(
+            `DELETE FROM bot_model_chain_seats
+              WHERE bot_id = ? AND chain_name = ? AND ${liveBot("bot_model_chain_seats")}`,
+          )
+          .bind(appId, name),
+        db
+          .prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ? AND ${liveBot("bot_model_chains")}`)
+          .bind(appId, name),
       ]);
-      return res[1]!.meta.changes > 0;
+      if (results[1]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
+      return results[1]!.meta.changes > 0;
     },
 
     getModelChainSeats(appId: string): Promise<Record<string, string>> {
@@ -1566,7 +1682,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           : upsertModelChainSeatStatement(appId, role, name);
       });
       if (statements.length > 0) {
-        await db.batch(statements);
+        // Every seat statement carries the archive guard, so an archived bot
+        // writes no seat at all — and the in-batch probe names the reason rather
+        // than reporting a silent no-op as success.
+        const { results, state } = await guardedBatch(appId, statements);
+        if (state !== "live" && results.every((result) => result.meta.changes === 0)) refuseTarget(appId, state);
       }
     },
 
@@ -1616,6 +1736,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
                  AND ${poolAdmission(CUSTOM_KEY_TABLE)}
                  AND NOT EXISTS (SELECT 1 FROM bot_custom_providers
                                   WHERE bot_id = ? AND provider_id = ? AND (base_url <> ? OR api <> ?))
+                 AND ${LIVE_BOT_BY_PARAM}
                ON CONFLICT (bot_id, provider_id) DO UPDATE SET
                  base_url = excluded.base_url,
                  api = excluded.api,
@@ -1638,6 +1759,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               decl.provider_id,
               decl.base_url,
               decl.api,
+              appId,
             )
         : db
             .prepare(
@@ -1646,7 +1768,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
                WHERE bot_id = ? AND provider_id = ?
                  AND ${poolAdmission(CUSTOM_KEY_TABLE)}
                  AND (base_url = ? AND api = ?
-                      OR NOT EXISTS (SELECT 1 FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?))`,
+                      OR NOT EXISTS (SELECT 1 FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?))
+                 AND ${liveBot("bot_custom_providers")}`,
             )
             .bind(
               decl.base_url,
@@ -1666,8 +1789,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         newDeclaration: isNew,
         endpoint: { base_url: decl.base_url, api: decl.api },
       });
-      const res = isNew ? await db.batch([key, declaration]) : await db.batch([declaration, key]);
-      if (res[isNew ? 0 : 1]!.meta.changes === 0) {
+      const statements = isNew ? [key, declaration] : [declaration, key];
+      const { results, state } = await guardedBatch(appId, statements);
+      if (results[isNew ? 0 : 1]!.meta.changes === 0) {
+        if (state !== "live") refuseTarget(appId, state);
         await throwCustomProviderRefusal(appId, decl, keyId, isNew);
       }
     },
@@ -1678,11 +1803,21 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       providerId: string,
     ): Promise<boolean> {
       await requireBotWrite(authority, appId);
-      const res = await db.batch([
-        db.prepare(`DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?`).bind(appId, providerId),
-        db.prepare(`DELETE FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`).bind(appId, providerId),
+      const { results, state } = await guardedBatch(appId, [
+        db
+          .prepare(
+            `DELETE FROM bot_custom_provider_keys
+              WHERE bot_id = ? AND provider = ? AND ${liveBot("bot_custom_provider_keys")}`,
+          )
+          .bind(appId, providerId),
+        db
+          .prepare(
+            `DELETE FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ? AND ${liveBot("bot_custom_providers")}`,
+          )
+          .bind(appId, providerId),
       ]);
-      return res[1]!.meta.changes > 0;
+      if (results[1]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
+      return results[1]!.meta.changes > 0;
     },
 
     async updateCustomProviderModels(
@@ -1707,17 +1842,18 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
                                          FROM json_each(bot_custom_providers.models_meta) AS entry
                                         WHERE entry.key IN (SELECT value FROM json_each(?))),
                         updated_at = datetime('now')
-                  WHERE bot_id = ? AND provider_id = ?`,
+                  WHERE bot_id = ? AND provider_id = ? AND ${liveBot("bot_custom_providers")}`,
               )
               .bind(idsJson, idsJson, appId, providerId)
           : db
               .prepare(
                 `UPDATE bot_custom_providers SET model_ids = ?, models_meta = ?, updated_at = datetime('now')
-                  WHERE bot_id = ? AND provider_id = ?`,
+                  WHERE bot_id = ? AND provider_id = ? AND ${liveBot("bot_custom_providers")}`,
               )
               .bind(idsJson, JSON.stringify(modelsMeta), appId, providerId);
-      const res = await statement.run();
-      if (res.meta.changes === 0) {
+      const { results, state } = await guardedBatch(appId, [statement]);
+      if (results[0]!.meta.changes === 0) {
+        if (state !== "live") refuseTarget(appId, state);
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
       }
     },
@@ -1794,11 +1930,16 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     ): Promise<boolean> {
       await requireBotWrite(authority, appId);
       await readKeyRows(CUSTOM_KEY_TABLE, appId, providerId);
-      const res = await db
-        .prepare(`DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ? AND key_id = ?`)
-        .bind(appId, providerId, keyId)
-        .run();
-      return res.meta.changes > 0;
+      const { results, state } = await guardedBatch(appId, [
+        db
+          .prepare(
+            `DELETE FROM bot_custom_provider_keys
+              WHERE bot_id = ? AND provider = ? AND key_id = ? AND ${liveBot("bot_custom_provider_keys")}`,
+          )
+          .bind(appId, providerId, keyId),
+      ]);
+      if (results[0]!.meta.changes === 0 && state !== "live") refuseTarget(appId, state);
+      return results[0]!.meta.changes > 0;
     },
 
     async getCustomProvidersForConsumer(appId: string): Promise<CustomProviderConsumerConfig[]> {

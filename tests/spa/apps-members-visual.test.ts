@@ -11,7 +11,7 @@ import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
 import { MembersPage } from "../../src/spa/pages/MembersPage";
 import { reviewEnabled, type AppsPayload } from "../../src/spa/pages/data";
 import { matchSpaRoute } from "../../src/spa/routes";
-import { alertSegments, dangerFg, slotTags, textColourOf } from "../helpers/token-colour";
+import { slotTags } from "../helpers/token-colour";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
 
@@ -241,7 +241,8 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       }),
     ]);
     expect(withDelivery).toContain(t("en", "apps.health.outcome.rejected"));
-    expect(withDelivery).toContain(t("en", "apps.health.rejected24h", { count: 2 }));
+    // The ADR bans a 24h rejection figure on every list.
+    expect(withDelivery).not.toContain("24h");
     expect(withDelivery).toContain("tabular-nums");
     expect(renderList([appRow()])).toContain(t("en", "apps.health.deliveryNever"));
   });
@@ -598,26 +599,24 @@ describe("Apps list metric band (payload-proved facts only)", () => {
   const METRIC_CELL =
     /data-slot="metric-key"[^>]*>([^<]*)<\/span><span data-slot="metric-value"[^>]*>([^<]*)</g;
 
-  test("four metric keys, each an AppsPayload fact", () => {
+  test("three metric keys, each an AppsPayload fact — no 24h rejection figure", () => {
     const html = renderFace(APPS);
     const reviewOff = APPS.filter((app) => !reviewEnabled(app)).length;
     expect([...html.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
       [t("en", "apps.metricApps"), "3"],
       [t("en", "apps.metricEnabled"), "2"],
       [t("en", "apps.metricReviewOff"), String(reviewOff)],
-      [t("en", "apps.metricRejected24h"), "3"],
     ]);
     expect(html).toContain(`>${t("en", "apps.headingDescription")}</p>`);
   });
 
-  test("the empty list keeps its guidance and reports four honest zeroes", () => {
+  test("the empty list keeps its guidance and reports three honest zeroes", () => {
     const empty = renderFace([]);
     expect(empty).toContain(t("en", "apps.emptyTitle"));
     expect([...empty.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
       [t("en", "apps.metricApps"), "0"],
       [t("en", "apps.metricEnabled"), "0"],
       [t("en", "apps.metricReviewOff"), "0"],
-      [t("en", "apps.metricRejected24h"), "0"],
     ]);
   });
 
@@ -639,39 +638,22 @@ describe("Apps list metric band (payload-proved facts only)", () => {
     ]);
   });
 
-  test("a non-zero refusal sum is the only figure on the band that wears the alert face", () => {
-    const faces = slotTags(renderFace(APPS), "metric-value");
-    expect(faces).toHaveLength(4);
-    expect(textColourOf(faces[3] ?? "", "light")).toBe(dangerFg("light"));
-    for (const neutral of faces.slice(0, 3)) expect(textColourOf(neutral, "light")).toBeNull();
-  });
-
-  test("a zero refusal sum renders the neutral band cell-for-cell identical to the tone-free face", () => {
-    const quiet = APPS.map((app) => ({ ...app, health: { ...app.health, rejected24h: 0 } }));
+  test("the band renders cell-for-cell the tone-free triple — no metric wears the alert face", () => {
     const control = decoded(
       renderToStaticMarkup(
         createElement(MetricBand, {
           metrics: [
-            { key: t("en", "apps.metricApps"), value: quiet.length },
+            { key: t("en", "apps.metricApps"), value: APPS.length },
             {
               key: t("en", "apps.metricEnabled"),
-              value: quiet.filter((app) => app.status !== "disabled").length,
+              value: APPS.filter((app) => app.status !== "disabled").length,
             },
-            { key: t("en", "apps.metricReviewOff"), value: quiet.filter((app) => !reviewEnabled(app)).length },
-            { key: t("en", "apps.metricRejected24h"), value: 0 },
+            { key: t("en", "apps.metricReviewOff"), value: APPS.filter((app) => !reviewEnabled(app)).length },
           ],
         }),
       ),
     );
-    expect(slotTags(renderFace(quiet), "metric-value")).toEqual(slotTags(control, "metric-value"));
-    expect(slotTags(renderFace(quiet), "metric-key")).toEqual(slotTags(control, "metric-key"));
-  });
-
-  test("the list health cell colours its refusal count, and only when it is non-zero", () => {
-    const refused = renderList([appRow({ health: { latest: null, rejected24h: 2 } })]);
-    const [segment = ""] = alertSegments(refused, "light");
-    expect(segment).toContain(t("en", "apps.health.rejected24h", { count: 2 }));
-    expect(refused).toContain(t("en", "apps.health.deliveryNever"));
-    expect(alertSegments(renderList([appRow()]), "light")).toEqual([]);
+    expect(slotTags(renderFace(APPS), "metric-value")).toEqual(slotTags(control, "metric-value"));
+    expect(slotTags(renderFace(APPS), "metric-key")).toEqual(slotTags(control, "metric-key"));
   });
 });

@@ -18,6 +18,7 @@ export const SPA_PAGES = [
   "login",
   "app-detail",
   "bot-detail",
+  "bots",
 ] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
@@ -34,7 +35,8 @@ export type SpaRoute =
   | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
   | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string }
-  | { page: "bot-detail"; pathname: string; botId: string; workspaceRef: string };
+  | { page: "bot-detail"; pathname: string; botId: string; workspaceRef: string }
+  | { page: "bots"; pathname: string; workspaceRef: string };
 
 /**
  * First path segments that can never name a workspace (today's routes). ONE
@@ -99,6 +101,7 @@ const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)$/;
 const WORKSPACE_REPOS_PATH = /^\/dashboard\/([^/]+)\/repos$/;
 const WORKSPACE_REPOS_DETAIL_PATH = /^\/dashboard\/([^/]+)\/repos\/([^/]+)$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
+const WORKSPACE_BOTS_PATH = /^\/dashboard\/([^/]+)\/bots$/;
 const WORKSPACE_BOT_DETAIL_PATH = /^\/dashboard\/([^/]+)\/bots\/([^/]+)$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
 const WORKSPACE_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/settings$/;
@@ -146,6 +149,20 @@ export function targetsFamilyRedirect(pathname: string): string | null {
 }
 
 /**
+ * The bot-directory address the legacy Apps `?tab=bots` spelling resolves to,
+ * or null for any other path or tab. The bots tab retired into `/bots` when
+ * the directory split; a bookmark from before the split answers ONE 302 to
+ * the same workspace's `/bots` rather than falling back to the Apps default.
+ */
+export function legacyBotsTabRedirect(pathname: string, search: string): string | null {
+  if (new URLSearchParams(search).get("tab") !== "bots") return null;
+  const match = /^\/dashboard\/([^/]+)\/apps$/.exec(pathname);
+  if (match === null || match[1] === undefined) return null;
+  if (RESERVED_WORKSPACE_SLUGS.has(match[1])) return null;
+  return `/dashboard/${match[1]}/bots`;
+}
+
+/**
  * The app-detail address a retired path spelling resolves to, or null for any
  * other path. Both spellings of the settings face — `…/apps/:appId/settings`
  * and the bot page's `…/apps/:appId/bot` — answer ONE redirect to the tab's own
@@ -182,6 +199,7 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
   if (workspaceRef !== null) {
     if (WORKSPACE_REPOS_PATH.test(pathname)) return { page: "repos", pathname, workspaceRef };
     if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceRef };
+    if (WORKSPACE_BOTS_PATH.test(pathname)) return { page: "bots", pathname, workspaceRef };
     if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
     if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
     const targetId = WORKSPACE_REPOS_DETAIL_PATH.exec(pathname)?.[2];

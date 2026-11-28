@@ -44,15 +44,17 @@ describe("apps-store tenant read face", () => {
     expect(rows[0]!.workspace_id).toBe("default");
   });
 
-  test("an orphan App is null from getAppById, getAppForWebhook and getAppByGithubId", async () => {
+  test("an orphan App is null from getAppById, getAppForWebhook and getBindableAppByGithubId", async () => {
     const { db, mapped, orphan } = await seedMappedAndOrphan();
     const store = createReviewBotsStore(db);
     expect((await store.getAppById(mapped.id))?.workspace_id).toBe("default");
     expect(await store.getAppById(orphan.id)).toBeNull();
     expect((await store.getAppForWebhook("default", mapped.id))?.workspace_id).toBe("default");
     expect(await store.getAppForWebhook("default", orphan.id)).toBeNull();
-    expect((await store.getAppByGithubId(1))?.workspace_id).toBe("default");
-    expect(await store.getAppByGithubId(2)).toBeNull();
+    // The bind resolver is ONE predicate over "may a bind act on this App": with
+    // no live association the mapped App answers null exactly like an absent one.
+    expect(await store.getBindableAppByGithubId(1)).toBeNull();
+    expect(await store.getBindableAppByGithubId(2)).toBeNull();
   });
 });
 
@@ -165,12 +167,13 @@ function directReadFiles(): string[] {
 // remaining references in any of them. The bot table is read by the store
 // alone — the allowlist is the proof, not a leftover.
 const MAINTENANCE_SITES: Record<string, number> = {
-  // `readBotMultiplier` is the ONE read of `review_bots.multiplier`, shared by
-  // the metering path and the enqueue ceiling. Authorization happened upstream
-  // (the webhook resolved the bot row, the job carries `botRef.botId`), the row
-  // is addressed by its own id, and the projection is that single price column
-  // — no identity, no ownership, no workspace to scope by.
-  "store/quota-store.ts": 1,
+  // `readBotMultiplier` is the ONE bot row the metering path and the enqueue
+  // ceiling price a review from: the stored factor (one price column, addressed
+  // by the bot's own id), and the owner equality that decides whether THIS
+  // workspace pays it. The second read projects one constant flag and compares
+  // the row's workspace against the caller's — no identity or ownership column
+  // is selected, so nothing here can scope another workspace's row.
+  "store/quota-store.ts": 2,
   // The relay's ceiling fallback: `review_bots` by the bot id the chain named,
   // projecting one price column.
   "worker/select-review-bot.ts": 1,
@@ -178,6 +181,12 @@ const MAINTENANCE_SITES: Record<string, number> = {
   // liveness (Apps without a live Bot, chain rows whose Bot is gone); both
   // project COUNT(*) only.
   "admin/data-upgrades/split-integrity.ts": 2,
+  // The bot write boundary's liveness probe: every configuration batch starts
+  // with it and every guarded statement carries the same predicate. It projects
+  // two EXISTS flags (live / present) for the id the caller already passed the
+  // ownership and role check on — no identity, no ownership column, nothing a
+  // reader could scope a different workspace's row by.
+  "dashboard/app-config-store.ts": 1,
 };
 
 /**

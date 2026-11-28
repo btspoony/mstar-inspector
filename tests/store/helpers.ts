@@ -152,6 +152,18 @@ function wrapStatement(
   recordBindCount: (count: number) => void,
 ): D1StatementLike {
   let bound: unknown[] = [];
+  // D1 rejects a bind whose value count differs from the statement's parameter
+  // count ("D1_ERROR: Wrong number of parameter bindings"); bun:sqlite silently
+  // tolerates surplus values. Enforcing it here makes a `.bind()` with no
+  // matching placeholder fail in every test that runs it, instead of passing
+  // locally and 500ing in production.
+  const assertBinding = (): void => {
+    if (bound.length !== stmt.paramsCount) {
+      throw new Error(
+        `bound ${bound.length} values to a statement with ${stmt.paramsCount} parameters: ${String(stmt)}`,
+      );
+    }
+  };
   return {
     bind(...values: unknown[]): D1StatementLike {
       bound = values;
@@ -159,16 +171,19 @@ function wrapStatement(
       return this;
     },
     async first<T = Record<string, unknown>>(): Promise<T | null> {
+      assertBinding();
       const row = stmt.get(...bound) as T | undefined;
       return row ?? null;
     },
     async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
+      assertBinding();
       return { results: stmt.all(...bound) as T[] };
     },
     async run<T = Record<string, unknown>>(): Promise<{
       results: T[];
       meta: { changes: number; last_row_id: number };
     }> {
+      assertBinding();
       if (stmt.columnNames.length > 0) {
         const before = counter(db, "SELECT total_changes() AS n");
         const results = stmt.all(...bound) as T[];
@@ -470,4 +485,33 @@ export function seedDefaultMemberships(
       )
       .run(role, login);
   }
+}
+
+/**
+ * The `users.id` behind a login, creating the users row when the fixture has
+ * none. The bind write re-checks this id's CURRENT membership, so a test that
+ * binds names the actor by it.
+ */
+export function seedWorkspaceMember(
+  db: TestD1,
+  workspaceId: string,
+  login: string,
+  role: "owner" | "admin" | "member",
+): string {
+  const existing = db.raw.query("SELECT id FROM users WHERE github_login = ?").get(login) as {
+    id: string;
+  } | null;
+  const id = existing?.id ?? crypto.randomUUID();
+  if (existing === null) {
+    db.raw
+      .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, 'member', '2026-01-01T00:00:00.000Z')")
+      .run(id, login);
+  }
+  db.raw
+    .prepare(
+      `INSERT OR REPLACE INTO workspace_members (workspace_id, user_id, role, created_at)
+       VALUES (?, ?, ?, '2026-01-01T00:00:00.000Z')`,
+    )
+    .run(workspaceId, id, role);
+  return id;
 }

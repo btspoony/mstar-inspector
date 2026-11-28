@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { parseAst } from "vite";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1, execMigrationScript, seedTarget, syncReviewBotColumn, applyMigration as applyMigrationShared } from "../store/helpers";
 import { AppCountExceededError, createReviewBotsStore } from "../../src/dashboard/apps-store";
@@ -72,6 +73,89 @@ async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Pro
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type AstNode = { type: string; start?: number; end?: number; [key: string]: unknown };
+
+const FUNCTION_TYPES = /^(?:FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/;
+
+/**
+ * The name a declaration carries: a function's own id, a method's key, or a
+ * `const x = () => …` binding.
+ */
+function declaredName(node: AstNode): string | null {
+  const target = (node.id ?? node.key) as AstNode | null | undefined;
+  if (target === null || target === undefined) return null;
+  if (target.type === "Identifier" || target.type === "PrivateIdentifier") return String(target.name);
+  if (target.type === "StringLiteral" || target.type === "Literal") return String(target.value);
+  return null;
+}
+
+/**
+ * The name and body of the function `node` declares, or `null` when `node`
+ * declares none. A declaration or expression IS the function; a method, an
+ * object member or a variable declarator HOLDS it in `value` / `init` — and the
+ * value must really be function-typed, so a `{ body: … }` object member is never
+ * mistaken for a function's body.
+ */
+function declaration(node: AstNode): { name: string; body: AstNode } | null {
+  const fn =
+    node.type === "FunctionDeclaration" || node.type === "FunctionExpression"
+      ? node
+      : ((node.value ?? node.init) as AstNode | null | undefined);
+  if (fn === null || fn === undefined || !FUNCTION_TYPES.test(fn.type)) return null;
+  const name = declaredName(node) ?? declaredName(fn);
+  if (name === null) return null;
+  const body = fn.body as AstNode | null | undefined;
+  return typeof body?.start === "number" && typeof body.end === "number" ? { name, body } : null;
+}
+
+/**
+ * The name of the function whose BODY contains `at`, or `<module>`.
+ *
+ * Line-scanning for the nearest `    async x(` credits an INSERT to whatever
+ * member was declared above it, so a hit moved into a later non-async function
+ * still read as its async neighbour. A scanner over text is not enough either:
+ * it cannot tell a regex literal's `}` from a block's, so the enclosing body's
+ * end moves and the hit is attributed to a neighbour. This parses the file with
+ * a real parser and returns the INNERMOST function-like node whose body range
+ * spans the offset — every comment, string, template and regex is already one
+ * literal node, so no brace can be miscounted.
+ */
+function enclosingFunction(text: string, at: number): string {
+  const ast = parseAst(text, { lang: "ts", sourceType: "module" }) as unknown as AstNode;
+  // The INNERMOST body wins: recursion returns the smallest body that spans the
+  // hit, and a child's answer replaces its parent's.
+  const walk = (value: unknown): { name: string; size: number } | null => {
+    if (Array.isArray(value)) {
+      let found: { name: string; size: number } | null = null;
+      for (const item of value) found = finer(found, walk(item));
+      return found;
+    }
+    if (value === null || typeof value !== "object") return null;
+    const node = value as AstNode;
+    let found: { name: string; size: number } | null = null;
+    const decl = typeof node.type === "string" ? declaration(node) : null;
+    if (decl !== null && at >= decl.body.start! && at <= decl.body.end!) {
+      found = { name: decl.name, size: decl.body.end! - decl.body.start! };
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "loc" || key === "range") continue;
+      found = finer(found, walk(node[key]));
+    }
+    return found;
+  };
+  return walk(ast)?.name ?? "<module>";
+}
+
+/** The tighter of two candidate bodies; `null` loses to anything. */
+function finer(
+  left: { name: string; size: number } | null,
+  right: { name: string; size: number } | null,
+): { name: string; size: number } | null {
+  if (left === null) return right;
+  if (right === null) return left;
+  return right.size <= left.size ? right : left;
+}
 
 describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", () => {
   test("applies cleanly after 0001/0002 over existing review rows", () => {
@@ -319,27 +403,33 @@ describe("apps-store (createReviewBotsStore)", () => {
     expect((await store(db).getAppById(app.id))?.deleted_at).not.toBeNull();
   });
 
-  test("getAppByGithubId finds the row by GitHub's numeric id, and only through the tenant join", async () => {
+  test("getBindableAppByGithubId finds a live shared App by GitHub's numeric id", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db, { githubAppId: 987654 });
-    expect((await store(db).getAppByGithubId(987654))?.id).toBe(app.id);
-    expect(await store(db).getAppByGithubId(1)).toBeNull();
+    expect(await store(db).getBindableAppByGithubId(987654)).toBeNull();
+    // `createApp` writes an OWNED App; only a shared one is bindable.
+    rawRun(db, "UPDATE github_apps SET scope = 'shared' WHERE id = ?", app.id);
+    expect((await store(db).getBindableAppByGithubId(987654))?.id).toBe(app.id);
+    expect(await store(db).getBindableAppByGithubId(1)).toBeNull();
   });
 
-  test("getAppByGithubId resolves a soft-deleted row but NOT a soft-deleted workspace", async () => {
+  test("getBindableAppByGithubId answers null for a soft-deleted App and a soft-deleted workspace", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db, { githubAppId: 987655 });
+    rawRun(db, "UPDATE github_apps SET scope = 'shared' WHERE id = ?", app.id);
     await store(db).softDeleteApp(app.id);
-    expect((await store(db).getAppByGithubId(987655))?.deleted_at).not.toBeNull();
+    // Retired and missing are the SAME answer: a bind cannot probe existence.
+    expect(await store(db).getBindableAppByGithubId(987655)).toBeNull();
 
     rawRun(
       db,
       `INSERT INTO workspaces (id, slug, name, created_by, created_at) VALUES ('second', 'second', 'Second', NULL, '2026-10-21T00:00:00.000Z')`,
     );
     const second = await seedApp(db, { githubAppId: 987656, workspaceId: "second" });
-    expect((await store(db).getAppByGithubId(987656))?.id).toBe(second.id);
+    rawRun(db, "UPDATE github_apps SET scope = 'shared' WHERE id = ?", second.id);
+    expect((await store(db).getBindableAppByGithubId(987656))?.id).toBe(second.id);
     rawRun(db, "UPDATE workspaces SET deleted_at = datetime('now') WHERE id = 'second'");
-    expect(await store(db).getAppByGithubId(987656)).toBeNull();
+    expect(await store(db).getBindableAppByGithubId(987656)).toBeNull();
   });
 
   test("a soft-deleted workspace makes both resolution reads null; listApps still sees the App", async () => {
@@ -810,7 +900,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     };
     const s = createReviewBotsStore(db);
     await s.getAppForWebhook("workspace", "app");
-    await s.getAppByGithubId(1);
+    await s.getBindableAppByGithubId(1);
     await s.getAppById("id");
     await s.listApps();
     expect(queries).toHaveLength(4);
@@ -820,21 +910,136 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     }
   });
 
-  test("src/ has exactly one INSERT INTO review_bots site (createApp is the only creation path)", () => {
-    const sites: string[] = [];
+  // Two creation paths, both in the store and both legitimate: `createApp`
+  // (an App plus its same-id bot) and `createBot` (a standalone bot). The pin
+  // keeps every other module out of the table — an ad-hoc INSERT elsewhere
+  // fails here — so the intent survives the second path.
+  //
+  // A per-file count alone does not pin the PATHS: moving one INSERT to another
+  // function in the same file kept the count at 2 and the test green. Neither
+  // does remembering the nearest preceding `    async x(` line: an INSERT moved
+  // into a later NON-async member was still credited to the async one above
+  // it. Each hit is therefore attributed to the function whose BODY contains
+  // it, found by brace depth from that function's opening brace, and the whole
+  // map must be exactly the two creation functions.
+  test("an INSERT is attributed to the function whose body encloses it, not the nearest member line", () => {
+    // The shape that broke line-scanning: a non-async function after an async
+    // one, holding the INSERT.
+    const source = [
+      "function outer() {",
+      "  return {",
+      "    async createBot(input: string): Promise<boolean> {",
+      "      const sql = `INSERT INTO review_bots (id) SELECT 'unused'`;",
+      "      return sql.length > 0;",
+      "    },",
+      "    createLater(input: string): void {",
+      "      void `INSERT INTO review_bots (id) SELECT ?1`;",
+      "      void input;",
+      "    },",
+      "  };",
+      "}",
+    ].join("\n");
+    expect([...source.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(source, hit.index!))).toEqual([
+      "createBot",
+      "createLater",
+    ]);
+  });
+
+  test("braces inside comments and strings cannot end or extend a function body", () => {
+    // A lone `}` inside a comment BEFORE the member would end the enclosing
+    // object's body early for a naive depth walk, crediting the INSERT to
+    // `<module>` or the wrong function; a string's braces do the same.
+    const source = [
+      "function outer() {",
+      "  return {",
+      "    // closes the record here } — or so a naive scanner believes",
+      "    async createBot(input: string): Promise<boolean> {",
+      '      const note = "a brace: } and another {";',
+      "      const sql = `INSERT INTO review_bots (id) SELECT 'unused'`;",
+      "      return sql.length > 0 && note.length > 0 && input.length > 0;",
+      "    },",
+      "  };",
+      "}",
+    ].join("\n");
+    expect([...source.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(source, hit.index!))).toEqual([
+      "createBot",
+    ]);
+    // And the template splice still scans as code: an INSERT inside `${…}`
+    // belongs to the enclosing function, not to the literal's text.
+    const spliced = [
+      "function outer() {",
+      "  return {",
+      "    async createBot(input: string): Promise<boolean> {",
+      "      const rows = [1];",
+      "      const sql = `INSERT INTO review_bots (id) SELECT ${rows.map((row) => row).join(\",\")}`;",
+      "      return sql.length > 0 && input.length > 0;",
+      "    },",
+      "  };",
+      "}",
+    ].join("\n");
+    expect([...spliced.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(spliced, hit.index!))).toEqual([
+      "createBot",
+    ]);
+    // A `{` NESTED inside a splice closes before the splice does. A masker that
+    // pops its splice frame on the object literal's `}` leaves the real closer
+    // as template text, so one brace stays uncounted and createBot's body runs
+    // to the end of `outer` — crediting the outsider's INSERT to createBot.
+    const nestedSplice = [
+      "function outer() {",
+      "  function createBot() {",
+      "    const note = `note ${JSON.stringify({ ready: true })}`;",
+      "    void note;",
+      "  }",
+      "  const sql = `INSERT INTO review_bots (id) SELECT ?1`;",
+      "  void sql;",
+      "}",
+    ].join("\n");
+    expect(
+      [...nestedSplice.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(nestedSplice, hit.index!)),
+    ).toEqual(["outer"]);
+    // A REGEX literal's braces are text. A scanner that leaves `/}/` as a slash
+    // and a `}` reads one block closer that is not there, so `outer`'s body ends
+    // early and the second INSERT — genuinely inside it — is credited to
+    // `<module>`. The parser knows the literal, so both hits keep their owner.
+    const regexBraces = [
+      "function outer() {",
+      "  function createBot() {",
+      "    const sql = `INSERT INTO review_bots (id) SELECT ?1`;",
+      "    const mask = /}/;",
+      "    void sql;",
+      "    void mask;",
+      "  }",
+      "  const second = `INSERT INTO review_bots (id) SELECT ?2`;",
+      "  void second;",
+      "}",
+    ].join("\n");
+    expect(
+      [...regexBraces.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(regexBraces, hit.index!)),
+    ).toEqual(["createBot", "outer"]);
+  });
+
+  test("src/ holds exactly the two creation-path INSERT INTO review_bots sites, one per creation function", () => {
+    const root = join(import.meta.dir, "../../");
+    const owners = new Map<string, string[]>();
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const path = join(dir, entry.name);
         if (entry.isDirectory()) walk(path);
         else if (entry.name.endsWith(".ts")) {
-          const hits = readFileSync(path, "utf8").match(/INSERT INTO review_bots\b/g)?.length ?? 0;
-          if (hits > 0) sites.push(`${path}:${hits}`);
+          const text = readFileSync(path, "utf8");
+          const relative = path.slice(root.length);
+          for (const match of text.matchAll(/INSERT INTO review_bots\b/g)) {
+            const list = owners.get(relative) ?? [];
+            list.push(enclosingFunction(text, match.index!));
+            owners.set(relative, list);
+          }
         }
       }
     };
-    walk(join(import.meta.dir, "../../src"));
-    expect(sites).toHaveLength(1);
-    expect(sites[0]).toEndWith(`apps-store.ts:1`);
+    walk(join(root, "src"));
+    expect([...owners.entries()].map(([file, fns]) => `${file} ${fns.sort().join(",")}`)).toEqual([
+      "src/dashboard/apps-store.ts createApp,createBot",
+    ]);
   });
 });
 

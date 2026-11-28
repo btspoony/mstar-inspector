@@ -9707,17 +9707,18 @@ describe("usage ledger (migration 0031)", () => {
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(2);
   });
 
-  test("a shared bot meters its own multiplier: ceil(deep × 10) records 60 RP", async () => {
+  test("a shared bot's stored ×10 is not charged to its owner: ceil(deep × 1) records 6 RP", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The multiplier the split backfilled from the old source_shared rate.
+    // The multiplier the split backfilled from the old source_shared rate. It
+    // prices a CONSUMER (the case above); the bot's own workspace pays ×1.
     db.raw.prepare("UPDATE review_bots SET scope = 'shared', multiplier = 10 WHERE id = ?").run(TEST_APP_ID);
     setAppReviewLevel(db, TEST_APP_ID, "deep");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
 
-    expect(usageRows(db).map((row) => row.rp)).toEqual([60]);
+    expect(usageRows(db).map((row) => row.rp)).toEqual([6]);
   });
 
   test("a soft-deleted workspace is unresolvable — fail closed before any sandbox or usage row", async () => {
@@ -9778,12 +9779,21 @@ describe("usage ledger (migration 0031)", () => {
     // the driver then throws. The read-back must see the row and report
     // applied: true — a batch is atomic, so "landed" cannot mean "half landed".
     let batchCalls = 0;
+    // The batch's LENGTH is an implementation detail a new guard may change, so
+    // the charge batch is recognised by CONTENT: the usage insert is tagged
+    // when it is prepared, and the throw follows whichever batch carries it.
+    const chargeStatements = new WeakSet<object>();
     const appliedThenThrew: TestD1 = {
       ...db,
+      prepare(query: string) {
+        const statement = db.prepare(query);
+        if (query.includes("INSERT INTO usage_events")) chargeStatements.add(statement);
+        return statement;
+      },
       async batch(statements) {
         batchCalls += 1;
         const results = await db.batch(statements);
-        if (statements.length === 2 && results.every((r) => r.meta.changes > 0 || r.results !== undefined)) {
+        if (statements.some((statement) => chargeStatements.has(statement))) {
           throw new Error("usage boom after commit");
         }
         return results;

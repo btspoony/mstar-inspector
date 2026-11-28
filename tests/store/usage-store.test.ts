@@ -1,8 +1,9 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, createTestD1, execMigrationScript } from "./helpers";
-import { rpFor } from "../../src/store/quota-store";
+import { createMigratedTestD1, createTestD1, execMigrationScript, type TestD1 } from "./helpers";
+import { readBotMultiplier, rpFor } from "../../src/store/quota-store";
+import { BOT_MULTIPLIER_MAX } from "../../src/contracts/rp-limits";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import {
   chargeUsage,
@@ -291,7 +292,7 @@ describe("Q10 — the large base preserves every existing price", () => {
           Math.max(1, Math.ceil(newProfile.base[level] * multiplier)),
         );
         if (Number.isInteger(oldProfile.base[level] * multiplier)) {
-          expect(rpFor(level, multiplier, newProfile)).toBe(rpFor(level, multiplier, oldProfile) * RATIO);
+          expect(rpFor(level, multiplier, newProfile)).toBe(rpFor(level, multiplier, oldProfile)! * RATIO);
         }
       }
     }
@@ -581,5 +582,215 @@ describe("usage_events.bot_id (migration 0117)", () => {
         botId: "no-such-bot",
       }),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+  });
+});
+
+describe("F2-2 — the RP domain is enforced AT THE CHARGE, on every path", () => {
+  /**
+   * Own-bot and self-hosted deliveries select a bot WITHOUT pricing it (the
+   * relay's D15 shortcut and its no-plan branch), and a stored multiplier or
+   * profile written by some other path may sit outside the WRITE domain. The
+   * charge write is therefore the last line, and these cases pin what it refuses
+   * there: a factor pair whose price is not representable. A stored value a
+   * writer accepted before a write bound existed still charges — refusing it
+   * would silently lose the spend of every review it governs.
+   */
+  const outOfDomain = (db: TestD1) => ({
+    events: db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get(),
+    bindings: db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get(),
+  });
+
+  test("a stored multiplier past the WRITE bound still charges at its price", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // 1001 is outside what a NEW bot may be priced with, and its price
+    // (6 × 1001) is representable. The bound is a write bound: a row priced
+    // before it existed must meter, not lose the spend.
+    expect(
+      await chargeUsage(db, {
+        ...USAGE,
+        executionToken: "own-over-bound",
+        source: "byok",
+        multiplier: BOT_MULTIPLIER_MAX + 1,
+      }),
+    ).toEqual({ charged: true });
+    expect(db.raw.query("SELECT rp FROM usage_events").get()).toEqual({ rp: 6 * (BOT_MULTIPLIER_MAX + 1) });
+  });
+
+  test("a multiplier whose price no ceiling can bound refuses instead of charging", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    expect(
+      await chargeUsage(db, {
+        ...USAGE,
+        executionToken: "shared-over-bound",
+        source: "shared",
+        multiplier: 1e300,
+      }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("a month BOUND to a legacy version past the WRITE base bound still charges", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // The state a pre-cap deploy leaves behind: October is pinned to v1, and
+    // v1's stored weight is the 400 a writer admitted before the bound existed.
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_quota_binding (workspace_id, month, profile_id)
+         VALUES ('default', '2026-10', 'quota-v1')`,
+      )
+      .run();
+    db.raw.prepare("UPDATE quota_profiles SET base_deep = ?").run(400);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "bound-legacy", source: "shared", level: "deep" }),
+    ).toEqual({ charged: true });
+    expect(db.raw.query("SELECT rp FROM usage_events").get()).toEqual({ rp: 400 });
+  });
+
+  test("a fresh month binds a legacy weight and charges it too — the cap is the writer's", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    db.raw.prepare("UPDATE quota_profiles SET base_deep = ?").run(400);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "fresh-legacy", source: "byok", level: "deep" }),
+    ).toEqual({ charged: true });
+    expect(db.raw.query("SELECT rp FROM usage_events").get()).toEqual({ rp: 400 });
+    // The binding exists WITH its row: the batch's invariant still holds.
+    expect(db.raw.query("SELECT profile_id FROM workspace_quota_binding").all()).toEqual([
+      { profile_id: "quota-v1" },
+    ]);
+  });
+
+  test("a legacy weight whose price is not representable refuses with the named outcome", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // A whole, positive stored weight — but 2e9 RP is past the price domain, so
+    // no ceiling could bound the charge. Nothing binds, nothing is recorded.
+    db.raw.prepare("UPDATE quota_profiles SET base_deep = ?").run(2_000_000_000);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "unboundable-base", source: "byok", level: "deep" }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("a stored fractional base weight refuses — the INTEGER column is not strictly typed", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // A REAL in a column DECLARED INTEGER survives affinity. Before the
+    // integrality guard, 1.5 bound the month and priced ceil(1.5) = 2 RP: a
+    // weight no writer would have admitted, recorded as a charge.
+    db.raw.prepare("UPDATE quota_profiles SET base_deep = ?").run(1.5);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "fractional-base", source: "byok", level: "deep" }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("a fractional weight below 1 refuses even though its price would be 1 RP", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // ceil(0.5 × 1) clamps to 1 RP, well inside the PRICE domain: the refusal
+    // has to come from the weight, which is why both halves are guarded.
+    db.raw.prepare("UPDATE quota_profiles SET base_standard = ?").run(0.5);
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "sub-unit-base", source: "shared", level: "default" }),
+    ).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+
+  test("a fractional multiplier still prices a whole RP — the price cannot leave the domain that way", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // The price is `max(1, ceil(base × multiplier))`, so no in-domain factor
+    // pair can produce a fractional `rp`: the multiplier guard admits 1.5 and
+    // the ceil turns 1 × 1.5 into 2. This pins that the only reachable
+    // fractionality is in the stored BASE, which the guard above refuses.
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "fractional-multiplier", multiplier: 1.5, level: "quick" }),
+    ).toEqual({ charged: true });
+    expect(db.raw.query("SELECT rp FROM usage_events").get()).toEqual({ rp: 2 });
+  });
+
+  test("both factors at their individual maxima still charge — the domain admits the pair", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // The shipped v1 profile's deep weight (6) at the largest multiplier is
+    // 6,000 RP: a whole number inside the ceiling domain, so it must CHARGE.
+    // The guard refuses only what no ceiling could bound.
+    expect(
+      await chargeUsage(db, { ...USAGE, executionToken: "max-pair", multiplier: BOT_MULTIPLIER_MAX, level: "deep" }),
+    ).toEqual({ charged: true });
+    expect(db.raw.query("SELECT rp FROM usage_events").get()).toEqual({ rp: 6 * BOT_MULTIPLIER_MAX });
+  });
+
+  test("replay of an out-of-domain token stays refused and still records nothing", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const input = { ...USAGE, executionToken: "replayed-bad", multiplier: 1e300 };
+    expect(await chargeUsage(db, input)).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(await chargeUsage(db, input)).toEqual({ charged: false, refused: "price-out-of-domain" });
+    expect(outOfDomain(db)).toEqual({ events: { n: 0 }, bindings: { n: 0 } });
+  });
+});
+
+describe("F2-2 — a paid replay is not a refusal, even if the bot's row went bad", () => {
+  test("a charged token replayed with an out-of-domain multiplier reports plain charged: false", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const token = "replay-after-reprice";
+    expect(await chargeUsage(db, { ...USAGE, executionToken: token })).toEqual({ charged: true });
+    // The bot is re-priced into an unpriceable domain after the run was paid. The
+    // replay must be recognised as a replay: raising a metering failure here
+    // would report a correctly charged review as unbilled.
+    db.raw.prepare("UPDATE review_bots SET multiplier = ? WHERE id = ?").run(1e300, "bot-usage");
+    expect(await chargeUsage(db, { ...USAGE, executionToken: token, multiplier: 1e300 })).toEqual({
+      charged: false,
+    });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get()).toEqual({ n: 1 });
+  });
+});
+
+describe("D15 — the owner's own reviews are ×1, a consumer pays the stored factor", () => {
+  test("a shared bot priced ×4 records 100 RP for its owner and 400 RP for a consumer", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_at) VALUES ('consumer', 'consumer', 'Consumer', ?)`,
+      )
+      .run(AT);
+    // A stored weight of 100 makes the ×4 consumer price 400 RP and the owner's
+    // ×1 price 100 RP — the figures the Credits faces state for the same row.
+    db.raw.prepare("UPDATE quota_profiles SET base_standard = ?").run(100);
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared', multiplier = 4 WHERE id = 'bot-usage'").run();
+
+    const ownerMultiplier = await readBotMultiplier(db, "bot-usage", "default");
+    const consumerMultiplier = await readBotMultiplier(db, "bot-usage", "consumer");
+    expect(ownerMultiplier).toBe(1);
+    expect(consumerMultiplier).toBe(4);
+
+    await chargeUsage(db, {
+      ...USAGE,
+      executionToken: "owner-run",
+      level: "default",
+      source: "byok",
+      multiplier: ownerMultiplier!,
+    });
+    await chargeUsage(db, {
+      ...USAGE,
+      executionToken: "consumer-run",
+      level: "default",
+      source: "shared",
+      workspaceId: "consumer",
+      multiplier: consumerMultiplier!,
+    });
+    expect(
+      db.raw.query("SELECT execution_token, rp FROM usage_events ORDER BY execution_token").all(),
+    ).toEqual([
+      { execution_token: "consumer-run", rp: 400 },
+      { execution_token: "owner-run", rp: 100 },
+    ]);
   });
 });

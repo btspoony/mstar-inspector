@@ -1,5 +1,12 @@
 
 import { FREE_SLOT_REFUSAL, WORKSPACE_CREATION_CLOSED_REFUSAL } from "../../dashboard/entitlement";
+import {
+  isRpAmount,
+  isServedChainProduct,
+  isStoredBotMultiplier,
+  isStoredRpCeiling,
+  isStoredRpPerCredit,
+} from "../../contracts/rp-limits";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 
 export type Role = "admin" | "member";
@@ -99,8 +106,9 @@ export type AppsPayload = {
     owned?: boolean;
     installed?: boolean;
     /** F1: the App's month state from its MOUNTED CHAIN; `null` = no chain,
-     * which renders the dash rather than a fabricated number. */
-    month?: { used_rp: number; owned: boolean; multiplier: number } | null;
+     * which renders the dash rather than a fabricated number. A row's
+     * `multiplier` is `null` when no double holds the chain's product. */
+    month?: { used_rp: number; owned: boolean; multiplier: number | null } | null;
     /** The workspace's own live installations of this App (D43). */
     installations?: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
     /** The App's ordered chain in this workspace — read-only in this release. */
@@ -124,7 +132,32 @@ export type AppsPayload = {
   /** F10: absent = unknown (error face), `null` = known unlimited. */
   month_plan_rp?: number | null;
   quota_error?: boolean;
+  /** The operator profile's rate; ABSENT when the profile is unreadable, and
+   * readers then fall back to the ADR-documented 1 Credit = 1,000 RP
+   * ({@link formatCredits}). Never 0, never a fabricated rate. */
+  rp_per_credit?: number;
 };
+
+/**
+ * One list row's month block, or `null` when the field is absent/nil. `used_rp`
+ * is a recorded spend (a whole number, zero allowed) and the multiplier is the
+ * chain's product — an explicit `null` when no double holds it, which renders
+ * the unavailable marker rather than failing the whole list.
+ */
+function isAppsRowMonth(
+  value: unknown,
+): value is { used_rp: number; owned: boolean; multiplier: number | null } {
+  return (
+    isRecord(value) &&
+    isRpAmount(value.used_rp) &&
+    typeof value.owned === "boolean" &&
+    // The server serves the PRODUCT of the mounted chain, not one bot's stored
+    // factor, and the products a legal write can produce are not bounded by the
+    // write guard (a price edit or a sub-1 removal lifts one). Any positive
+    // finite product parses; `null` is the server's own "not representable".
+    (value.multiplier === null || isServedChainProduct(value.multiplier))
+  );
+}
 
 /** One unbound physical installation of an App the workspace may install through. */
 export type PendingBindRow = {
@@ -134,8 +167,20 @@ export type PendingBindRow = {
   app_id: string;
   app_github_app_id: number;
   app_name: string;
+  /**
+   * The server's own answer to "may THIS caller bind it" — the manager gate the
+   * bind route applies first. A member reads `false` and the row states the
+   * installation without offering an action the route would 403.
+   */
+  can_bind: boolean;
 };
 
+/**
+ * One pending installation as a payload states it. `can_bind` is ABSENT on
+ * payloads written before the server stated it; such a row is still shown —
+ * dropping it would hide an installation the workspace really has — with the
+ * action withheld, because "unknown" must never read as "may bind".
+ */
 function isPendingBindRow(value: unknown): value is PendingBindRow {
   return (
     isRecord(value) &&
@@ -145,8 +190,14 @@ function isPendingBindRow(value: unknown): value is PendingBindRow {
     typeof value.app_github_app_id === "number" &&
     typeof value.app_name === "string" &&
     isNullableString(value.account_login) &&
-    typeof value.seen_at === "string"
+    typeof value.seen_at === "string" &&
+    (value.can_bind === undefined || typeof value.can_bind === "boolean")
   );
+}
+
+/** The row's own bindability, and `false` for a payload that never stated it. */
+function pendingBindRow(value: PendingBindRow): PendingBindRow {
+  return { ...value, can_bind: value.can_bind === true };
 }
 
 /** One row of the "Bots I can use" read (D6): the bot plus the caller's month. */
@@ -162,6 +213,14 @@ export type UsableBotRow = {
   scope: BotScope;
   multiplier: number;
   month_used_rp: number;
+  /**
+   * The ceiling the relay enforces for THIS workspace: an override row when
+   * one exists, else the bot's own default. `null` is unlimited. Distinct from
+   * {@link UsableBotsPayload.plan_monthly_rp}, the workspace's plan allowance.
+   */
+  effective_ceiling: number | null;
+  /** Archived is a state fact: the row stays listed, muted, never selected. */
+  archived: boolean;
 };
 
 export type UsableBotsPayload = {
@@ -171,6 +230,8 @@ export type UsableBotsPayload = {
   /** F10: the ceiling could not be resolved — render an error, never
    * "no ceiling". */
   quota_error?: boolean;
+  /** See {@link AppsPayload.rp_per_credit}: absent ⇒ the 1,000 RP fallback. */
+  rp_per_credit?: number;
   bots: UsableBotRow[];
 };
 
@@ -185,8 +246,12 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     typeof value.owned === "boolean" &&
     typeof value.can_manage === "boolean" &&
     isBotScope(value.scope) &&
-    typeof value.multiplier === "number" &&
-    typeof value.month_used_rp === "number"
+    // A STORED factor: a row priced before the writer floor existed still
+    // renders, and the chain product below is what the list bounds.
+    isStoredBotMultiplier(value.multiplier) &&
+    isRpAmount(value.month_used_rp) &&
+    (value.effective_ceiling === null || isStoredRpCeiling(value.effective_ceiling)) &&
+    typeof value.archived === "boolean"
   );
 }
 
@@ -194,12 +259,21 @@ export function parseUsableBots(data: unknown): UsableBotsPayload | null {
   if (!isRecord(data)) return null;
   if (typeof data.workspace_id !== "string") return null;
   if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
-  if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && typeof data.plan_monthly_rp !== "number") {
+  // `null` is a known unlimited plan; a present number must sit in the RP
+  // ceiling domain, and an absent field is the unknown state the flag marks —
+  // absence WITHOUT the flag would read as unlimited, so it fails the parse.
+  if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && !isStoredRpCeiling(data.plan_monthly_rp)) {
     return null;
   }
+  if (data.plan_monthly_rp === undefined && data.quota_error !== true) return null;
+  // Same guard the App-detail parser applies: a present rate must be the whole
+  // positive number the profile writer accepts, never a fraction or zero.
+  if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (!Array.isArray(data.bots)) return null;
   const bots: UsableBotRow[] = [];
   for (const row of data.bots) {
+    // The row rule itself starts at `isRecord`, so a non-object row is refused
+    // here like any other malformed one — never rendered half-read.
     if (!isUsableBotRow(row)) return null;
     bots.push(row);
   }
@@ -207,6 +281,7 @@ export function parseUsableBots(data: unknown): UsableBotsPayload | null {
     workspace_id: data.workspace_id,
     plan_monthly_rp: data.plan_monthly_rp ?? null,
     ...(data.quota_error === true ? { quota_error: true } : {}),
+    ...(data.rp_per_credit === undefined ? {} : { rp_per_credit: data.rp_per_credit }),
     bots,
   };
 }
@@ -561,8 +636,19 @@ export type AppChainEntry = {
   available: boolean;
   multiplier: number;
   month_used_rp: number;
-  /** The bot's own monthly cap; `null` = no cap of its own. */
-  monthly_rp: number | null;
+  /**
+   * The ceiling the relay enforces for this workspace: its
+   * `bot_quota_overrides` row when one exists, else the bot's own default. The
+   * bot's raw default itself is never served — it is the owner's pricing.
+   */
+  effective_monthly_rp: number | null;
+  /** The bot is archived: mounted and listed, never selected by the relay. */
+  archived: boolean;
+  /** The bot's DEFAULT model chain selector; `null` = none configured or not
+   * visible to this workspace (the row outlived the relation). */
+  default_chain: string | null;
+  /** The runtime harness id; `null` under the same rule as `default_chain`. */
+  runtime: string | null;
 };
 
 /**
@@ -589,9 +675,12 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.provider_workspace === "string" &&
     typeof value.owned === "boolean" &&
     typeof value.available === "boolean" &&
-    typeof value.multiplier === "number" &&
-    typeof value.month_used_rp === "number" &&
-    (value.monthly_rp === null || typeof value.monthly_rp === "number")
+    isStoredBotMultiplier(value.multiplier) &&
+    isRpAmount(value.month_used_rp) &&
+    (value.effective_monthly_rp === null || isStoredRpCeiling(value.effective_monthly_rp)) &&
+    typeof value.archived === "boolean" &&
+    (value.default_chain === null || typeof value.default_chain === "string") &&
+    (value.runtime === null || (typeof value.runtime === "string" && value.runtime.length > 0))
   );
 }
 
@@ -687,6 +776,13 @@ export type PendingInstallation = {
 };
 
 /**
+ * A pending installation plus the server's own answer to "may THIS caller bind
+ * it" — the manager gate the bind route applies first. A member sees the row
+ * (it names what GitHub reported) and never the action.
+ */
+export type PendingBindInstallation = PendingInstallation & { can_bind: boolean };
+
+/**
  * Why a target's bot no longer serves it, as the server derives it on every
  * read (no stored status): the bot is `owned` and the target belongs to
  * another workspace. Closed vocabulary — a re-share clears it.
@@ -765,6 +861,13 @@ function isPendingInstallationList(value: unknown): value is PendingInstallation
   );
 }
 
+function isPendingBindInstallationList(value: unknown): value is PendingBindInstallation[] {
+  return (
+    isPendingInstallationList(value) &&
+    (value as readonly Record<string, unknown>[]).every((row) => typeof row.can_bind === "boolean")
+  );
+}
+
 /**
  * The manager face's App meta: the bot's identity plus the review policy the
  * workspace's target holds. Those four review fields ride with the target —
@@ -837,6 +940,9 @@ export type BotSettingsAppMeta = {
   description?: string | null;
   shared_at?: string | null;
   multiplier?: number | null;
+  /** The bot's own ceiling (RP); `null` = none of its own. Owner-only on the
+   * settings face, served on the bot face. */
+  monthly_rp?: number | null;
   status: string | null;
   scope: BotScope;
   /** BOT configuration: the bot payload always carries it; the App face
@@ -885,14 +991,20 @@ export type BotConfigSections = {
  * the workspace that OWNS the bot" — a consuming workspace gets these sections
  * read-only, and the bot's scope never enters the answer.
  */
-/** The bot detail page's overview block (D23): the provider, the caller's
- * month, the consuming workspace's plan ceiling, and the mounts — the
- * editable sections stay out of this shape so the read-only region proves
- * nothing the API did not serve. */
+/**
+ * The bot detail page's overview block (D23): the provider, the caller's
+ * month, the plan ceiling, the ceiling this bot actually enforces on the
+ * caller's workspace, and the mounts — the editable sections stay out of this
+ * shape so the read-only region proves nothing the API did not serve.
+ */
 export type BotOverview = {
   provider_workspace: string;
   month_used_rp: number;
+  /** The workspace's plan allowance; a separate limit from the bot's own. */
   plan_monthly_rp: number | null;
+  /** The ceiling the relay enforces here: this workspace's override else the
+   * bot's default. `null` = no bot-level ceiling. */
+  effective_ceiling: number | null;
   default_chain: string | null;
   mounted_apps: Array<{ id: string; github_app_id: number; name: string }>;
   mounted_bot_ids?: string[];
@@ -901,8 +1013,18 @@ export type BotOverview = {
 function parseBotOverview(value: unknown): BotOverview | null {
   if (!isRecord(value)) return null;
   if (typeof value.provider_workspace !== "string") return null;
-  if (typeof value.month_used_rp !== "number") return null;
-  if (value.plan_monthly_rp !== null && typeof value.plan_monthly_rp !== "number") return null;
+  if (!isRpAmount(value.month_used_rp)) return null;
+  // The plan ceiling is genuinely optional: `null` is a known unlimited plan,
+  // and the field is absent on a payload whose plan could not be resolved.
+  if (value.plan_monthly_rp !== undefined && value.plan_monthly_rp !== null && !isStoredRpCeiling(value.plan_monthly_rp)) {
+    return null;
+  }
+  // The EFFECTIVE ceiling is REQUIRED: the server computes it on every
+  // successful bot read (`override else bot default`). An absent value would
+  // read as "unlimited" through `?? null`, which is exactly the wrong answer —
+  // only an explicit `null` means this bot has no ceiling for this workspace.
+  if (value.effective_ceiling === undefined) return null;
+  if (value.effective_ceiling !== null && !isStoredRpCeiling(value.effective_ceiling)) return null;
   if (value.default_chain !== null && typeof value.default_chain !== "string") return null;
   if (!Array.isArray(value.mounted_apps)) return null;
   for (const row of value.mounted_apps) {
@@ -919,7 +1041,8 @@ function parseBotOverview(value: unknown): BotOverview | null {
   return {
     provider_workspace: value.provider_workspace,
     month_used_rp: value.month_used_rp,
-    plan_monthly_rp: value.plan_monthly_rp,
+    plan_monthly_rp: value.plan_monthly_rp ?? null,
+    effective_ceiling: value.effective_ceiling,
     default_chain: value.default_chain,
     mounted_apps: value.mounted_apps.map((row) => ({
       id: row.id,
@@ -935,6 +1058,8 @@ export type BotQuotaOverride = { workspaceId: string; monthlyRp: number };
 
 export type BotSettingsPayload = {
   can_manage: boolean;
+  /** Archived is a state fact for every viewer; only the owner may flip it. */
+  archived: boolean;
   /** The owner's exception layer over the default ceiling; owner-only. */
   quota_overrides?: BotQuotaOverride[];
   /** F10: the ceiling could not be resolved — never render "no ceiling". */
@@ -942,6 +1067,9 @@ export type BotSettingsPayload = {
   /** Whose bot it is — independent of `scope` (publication) and `can_manage`. */
   owned?: boolean;
   official_workspace?: boolean;
+  /** The operator profile's credit rate; ABSENT when that profile is
+   * unreadable, so readers use the ADR 1,000 RP fallback. */
+  rp_per_credit?: number;
   overview?: BotOverview;
 } & BotConfigSections;
 
@@ -951,8 +1079,37 @@ export type ProviderManagementPayload = BotConfigSections & {
   model_limits_snapshot: string;
 };
 
+/**
+ * Which of the two App faces a reader came for, resolved by the server from
+ * facts that hold for every member — never from the role, because the SPA
+ * picks the face before it knows whether the viewer manages. Required on
+ * every App-detail payload: a payload without it parses to `null`.
+ */
+export type ViewerRelation = "installed" | "created" | "both";
+
+function isViewerRelation(value: unknown): value is ViewerRelation {
+  return value === "installed" || value === "created" || value === "both";
+}
+
+/**
+ * The facts every App-detail face carries, resolved before the role split.
+ * `rp_per_credit` is the operator profile's credit rate; it is ABSENT when
+ * that profile is unreadable — readers fall back to the ADR-documented
+ * 1 Credit = 1,000 RP (see {@link formatCredits}).
+ */
+type AppDetailViewerFacts = {
+  viewer_relation: ViewerRelation;
+  rp_per_credit?: number;
+  /**
+   * The server's own answer to "would the chain write land" — an install row
+   * AND the owner/admin role. Required on every face: a payload without it is
+   * a parse failure, never a default to editable.
+   */
+  can_edit_chain: boolean;
+};
+
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
-export type SettingsReadOnlyPayload = {
+export type SettingsReadOnlyPayload = AppDetailViewerFacts & {
   can_manage: false;
   workspace_id: string;
   blocked: boolean;
@@ -983,11 +1140,11 @@ export function appDisplayName(app: {
   );
 }
 
-type SettingsManageBase = {
+type SettingsManageBase = AppDetailViewerFacts & {
   can_manage: true;
   workspace_id: string;
   installation: BoundInstallation | null;
-  pending_installations: PendingInstallation[];
+  pending_installations: PendingBindInstallation[];
   blocked: false;
   blocked_reason: null;
   targets_many?: boolean;
@@ -1032,7 +1189,7 @@ export type SettingsUntargetedPayload = SettingsManageBase & {
  * chains, custom providers, sandbox image or metadata. Those belong to the
  * owning workspace, so their absence is the contract, not a degradation.
  */
-export type SettingsBlockedPayload = {
+export type SettingsBlockedPayload = AppDetailViewerFacts & {
   can_manage: true;
   blocked: true;
   blocked_reason: BlockedReason;
@@ -1049,7 +1206,7 @@ export type SettingsBlockedPayload = {
  * target-owned slice is absent and `target_id` is an explicit `null` — the
  * shape the SPA's `targets_many` notice reads.
  */
-export type SettingsBlockedManyPayload = AppChain & {
+export type SettingsBlockedManyPayload = AppDetailViewerFacts & AppChain & {
   can_manage: true;
   blocked: true;
   blocked_reason: BlockedReason;
@@ -1060,12 +1217,35 @@ export type SettingsBlockedManyPayload = AppChain & {
   installation: BoundInstallation | null;
 };
 
+/**
+ * The Blocked manager face of an INSTALLATION-ONLY manager: the workspace holds
+ * a bound installation of a bot whose owner stopped sharing, and has no target
+ * of its own (or lost the last one). Zero targets is a DIFFERENT fact from
+ * several, and the payload states it differently — `targets_many: false` with an
+ * explicit `target_id: null`. Nothing else distinguishes the two: both carry
+ * no target-owned slice, so the two flags together are the discriminant.
+ *
+ * The installed face renders for it: the blocked warning, the installation
+ * roster and the chain the workspace still mounts.
+ */
+export type SettingsBlockedInstallPayload = AppDetailViewerFacts & AppChain & {
+  can_manage: true;
+  blocked: true;
+  blocked_reason: BlockedReason;
+  workspace_id: string;
+  target_id: null;
+  targets_many: false;
+  app: BlockedAppIdentityBase;
+  installation: BoundInstallation | null;
+};
+
 export type SettingsPayload =
   | SettingsReadOnlyPayload
   | SettingsManagePayload
   | SettingsUntargetedPayload
   | SettingsBlockedPayload
-  | SettingsBlockedManyPayload;
+  | SettingsBlockedManyPayload
+  | SettingsBlockedInstallPayload;
 
 /**
  * The faces that carry the target-owned review policy — the ones whose
@@ -1866,12 +2046,13 @@ export function pullRequestStatePill(
 
 /**
  * The App detail page's faces: 应用设置 (the App's own configuration, the
- * default), 机器人 (the App's ordered chain, read-only), 投递状态 (the bot's
- * webhook deliveries, filtered and paged) and 已安装. The data faces — 洞察 and
+ * default), 投递状态 (the bot's webhook deliveries, filtered and paged) and
+ * 已安装. The chain is the installed face's subject, so 机器人 is not a tab
+ * here; the data faces — 洞察 and
  * Pull requests — belong to the repository detail, so they are not values a
  * URL can open here.
  */
-export type AppDetailTab = "settings" | "bots" | "delivery" | "installations";
+export type AppDetailTab = "settings" | "delivery" | "installations";
 
 /**
  * URL-derived detail state: the App detail's active tab. `window`/`repo`/`pr`
@@ -1879,6 +2060,33 @@ export type AppDetailTab = "settings" | "bots" | "delivery" | "installations";
  * {@link AppDetailSearch} shape until that surface owns them.
  */
 export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string; pr: string };
+
+/**
+ * The `from` wayfinding param: the list the App was opened from picks the
+ * face. It rides beside the shared `AppDetailSearch` state because
+ * `parseAppDetailSearch` owns only the tab grammar.
+ */
+export type AppDetailFrom = "installed" | "created";
+
+/** The two App detail faces: a mount this workspace installed, or the owner's creation. */
+export type AppDetailFace = "installed" | "creator";
+
+/** Only the two valid `from` values win; anything else reads as absent. */
+export function parseAppDetailFrom(search: string): AppDetailFrom | null {
+  const from = new URLSearchParams(search).get("from");
+  return from === "installed" || from === "created" ? from : null;
+}
+
+/**
+ * Face selection. The served relation is the authority: an installed-only App
+ * is a mount and a created-only App is its owner's creation, whatever the URL
+ * says. `from` only picks between faces when BOTH relations hold, and without
+ * it that case opens as the owner's creation (the creator face is the default).
+ */
+export function appDetailFace(relation: ViewerRelation, from: AppDetailFrom | null): AppDetailFace {
+  if (relation === "both" && from !== null) return from === "installed" ? "installed" : "creator";
+  return relation === "installed" ? "installed" : "creator";
+}
 
 /**
  * The `pr` param string → a detail address, or null when the param is absent
@@ -1903,9 +2111,10 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
 /**
  * The search string as the App detail states it — the ONE derivation shared by
  * the mount initializer and the popstate re-sync (the spa-url-state-resync
- * contract). The bare path IS the 应用设置 tab; `?tab=bots`, `?tab=delivery` and
+ * contract). The bare path IS the 应用设置 tab; `?tab=delivery` and
  * `?tab=installations` are the other addresses this page opens, and any other
- * value (including the retired data-tab spellings) resolves to the default. `pr` rides verbatim only when
+ * value (including the retired `bots` and data-tab spellings) resolves to the
+ * default. `pr` rides verbatim only when
  * `pullRequestRefOf` resolves it — the same predicate the detail face reads —
  * so the address bar never advertises an open detail that can never open.
  */
@@ -1914,7 +2123,7 @@ export function parseAppDetailSearch(search: string): AppDetailSearch {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const rawTab = params.get("tab");
   const tab: AppDetailTab =
-    rawTab === "installations" || rawTab === "delivery" || rawTab === "bots" ? rawTab : "settings";
+    rawTab === "installations" || rawTab === "delivery" ? rawTab : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
@@ -2124,8 +2333,32 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
+  if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
+  if (data.month_plan_rp !== undefined && data.month_plan_rp !== null && !isStoredRpCeiling(data.month_plan_rp)) {
+    return null;
+  }
+  if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
+  // The server omits the ceiling ONLY in the unknown branch. An absence
+  // without the flag would read as a known-unlimited plan through `?? null`,
+  // which is exactly the wrong answer — the payload fails the parse instead.
+  if (data.month_plan_rp === undefined && data.quota_error !== true) return null;
+  // A row is an object first: `isRecord(app)` inside the chain guard alone would
+  // let a non-object row through and render half a list. Chain rows pass the
+  // same guard as the detail parser: a malformed row fails the whole parse
+  // rather than rendering half a chain.
+  for (const app of data.apps) {
+    if (!isRecord(app)) return null;
+    if (app.chain !== undefined && (!Array.isArray(app.chain) || !app.chain.every(isAppChainEntry))) {
+      return null;
+    }
+    if (app.month !== undefined && app.month !== null && !isAppsRowMonth(app.month)) return null;
+    if (app.installations !== undefined && !isPendingInstallationList(app.installations)) return null;
+  }
+  // A pending row is an installation the workspace really has. A row whose
+  // `can_bind` is missing is an OLDER payload: it is kept and shown with the
+  // action withheld, never filtered away silently.
   const pending = Array.isArray(data.pending_installations)
-    ? data.pending_installations.filter(isPendingBindRow)
+    ? data.pending_installations.filter(isPendingBindRow).map(pendingBindRow)
     : [];
   return {
     ...(data as AppsPayload),
@@ -2559,10 +2792,25 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
+/**
+ * RP rendered as Credits. The 1,000 fallback is the ADR-documented rate
+ * (1 Credit = 1,000 RP) for when the operator profile is unreadable and the
+ * payload carries no `rp_per_credit`.
+ */
+export function formatCredits(rp: number, rpPerCredit?: number): string {
+  return `${(rp / (rpPerCredit ?? 1000)).toFixed(2)} Credits`;
+}
+
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data)) return null;
+  if (!isViewerRelation(data.viewer_relation)) return null;
+  if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
+  // The chain-edit capability is REQUIRED on every face: without it the SPA
+  // cannot know whether add/move/remove would even be admitted, so the
+  // payload fails the parse rather than defaulting to editable.
+  if (typeof data.can_edit_chain !== "boolean") return null;
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
   if (data.app.status !== null && typeof data.app.status !== "string") return null;
   if (!isNullableString(data.app.created_by)) return null;
@@ -2573,6 +2821,14 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (data.blocked_reason !== null && !isBlockedReason(data.blocked_reason)) return null;
   if (data.blocked !== (data.blocked_reason !== null)) return null;
   if (data.targets_many !== undefined && typeof data.targets_many !== "boolean") return null;
+  // The chain is served on every face (it is the workspace's install state,
+  // not a credential), so it is validated before the role split.
+  if (
+    data.chain !== undefined &&
+    (!Array.isArray(data.chain) || !data.chain.every(isAppChainEntry))
+  ) {
+    return null;
+  }
   if (data.blocked) {
     if (
       data.app.github_metadata_synced_at !== undefined &&
@@ -2582,9 +2838,18 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     }
   }
   const hasTarget = data.target_id !== undefined;
-  const blockedMany = data.blocked && data.target_id === null;
-  if (hasTarget && !blockedMany && (typeof data.target_id !== "string" || data.target_id.length === 0)) return null;
-  if (!blockedMany && (data.app.review_enabled !== undefined) !== hasTarget) return null;
+  // A blocked manager with an explicit `null` target has NO single target of its
+  // own. `targets_many` then says which fact that is: true = several repositories,
+  // false = NONE (an installation-only manager whose bot stopped being shared).
+  // The two flags travel together; neither implies the other.
+  const blockedNullTarget = data.blocked && data.target_id === null;
+  const blockedMany = blockedNullTarget && data.targets_many === true;
+  const blockedInstall = blockedNullTarget && data.targets_many === false;
+  if (blockedNullTarget && !blockedMany && !blockedInstall) return null;
+  if (hasTarget && !blockedNullTarget && (typeof data.target_id !== "string" || data.target_id.length === 0)) {
+    return null;
+  }
+  if (!blockedNullTarget && (data.app.review_enabled !== undefined) !== hasTarget) return null;
   if (!data.can_manage) {
     if (typeof data.app.created_at !== "string") return null;
     if (hasTarget && typeof data.app.review_enabled !== "boolean") return null;
@@ -2611,8 +2876,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
       return null;
     }
     if (!isBotScope(data.app.scope)) return null;
-    if (blockedMany !== (data.targets_many === true)) return null;
-    if (blockedMany) {
+    if (blockedNullTarget) {
       if (data.app.review_enabled !== undefined) return null;
       if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
       return data as SettingsPayload;
@@ -2630,7 +2894,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (data.app.sandbox_image_id !== undefined && typeof data.app.sandbox_image_id !== "string") return null;
   if (!isBotScope(data.app.scope)) return null;
   if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
-  if (!isPendingInstallationList(data.pending_installations)) return null;
+  if (!isPendingBindInstallationList(data.pending_installations)) return null;
   if (!Array.isArray(data.installations)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
@@ -2640,12 +2904,6 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!parseCatalogReference(data)) return null;
   if (!isSandboxImageList(data.sandbox_images)) return null;
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
-  if (
-    data.chain !== undefined &&
-    (!Array.isArray(data.chain) || !data.chain.every(isAppChainEntry))
-  ) {
-    return null;
-  }
   if (!hasTarget) return data as SettingsPayload;
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
@@ -2670,12 +2928,13 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!isRecord(data)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
+  if (typeof data.archived !== "boolean") return null;
   let quotaOverrides: BotQuotaOverride[] | undefined;
   if (data.quota_overrides !== undefined) {
     if (!Array.isArray(data.quota_overrides)) return null;
     quotaOverrides = [];
     for (const row of data.quota_overrides) {
-      if (!isRecord(row) || typeof row.workspaceId !== "string" || typeof row.monthlyRp !== "number") return null;
+      if (!isRecord(row) || typeof row.workspaceId !== "string" || !isStoredRpCeiling(row.monthlyRp)) return null;
       quotaOverrides.push({ workspaceId: row.workspaceId, monthlyRp: row.monthlyRp });
     }
   }
@@ -2684,6 +2943,14 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (app.status !== null && typeof app.status !== "string") return null;
   if (!isBotScope(app.scope)) return null;
   if (typeof app.sandbox_image_id !== "string") return null;
+  // The pricing pair is the bot's own stored values: absent on the consumer
+  // payload, and inside the shared RP/multiplier domain when present. A
+  // fraction or an out-of-domain ceiling would fail the mounted-chain parser on
+  // the NEXT reader, so it fails here too.
+  // A STORED factor, so the read domain has no floor; the writers hold the floor.
+  if (app.multiplier !== undefined && app.multiplier !== null && !isStoredBotMultiplier(app.multiplier)) return null;
+  if (app.monthly_rp !== undefined && app.monthly_rp !== null && !isStoredRpCeiling(app.monthly_rp)) return null;
+  if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (
     !isNullableString(app.last_webhook_at) ||
     !isNullableString(app.github_name) ||
@@ -2695,7 +2962,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   ) {
     return null;
   }
-  if (!Array.isArray(data.installations)) return null;
+  if (!isPendingInstallationList(data.installations)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (data.model_chain !== null && typeof data.model_chain !== "string") return null;
   if (!isRecord(data.model_roles) || !Array.isArray(data.model_chains)) return null;

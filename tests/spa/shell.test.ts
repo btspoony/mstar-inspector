@@ -16,16 +16,18 @@ const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
 const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat" };
 
 describe("shell models", () => {
-  test("nav order is Repositories → Apps → Members → Settings (insights retired)", () => {
+  test("nav order is Repositories → Apps → Bots → Members → Settings (insights retired)", () => {
     expect(NAV_ITEMS.map((item) => item.href)).toEqual([
       "/dashboard/repos",
       "/dashboard/apps",
+      "/dashboard/bots",
       "/dashboard/members",
       "/dashboard/settings",
     ]);
     expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual([
       "nav.targets",
       "nav.apps",
+      "nav.bots",
       "nav.members",
       "nav.settings",
     ]);
@@ -36,6 +38,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.label)).toEqual([
       "Repositories",
       "Apps",
+      "Bots",
       "Members",
       "Settings",
     ]);
@@ -43,6 +46,7 @@ describe("shell models", () => {
     expect(scoped.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/repos",
       "/dashboard/acme/apps",
+      "/dashboard/acme/bots",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -54,10 +58,11 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/repos",
       "/dashboard/acme/apps",
+      "/dashboard/acme/bots",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
-    expect(sidebar.items.map((item) => item.label)).toEqual(["仓库", "应用", "成员", "设置"]);
+    expect(sidebar.items.map((item) => item.label)).toEqual(["仓库", "应用", "机器人", "成员", "设置"]);
   });
 
   test("navbar is slim: theme + Lang + account + logout only", () => {
@@ -136,6 +141,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/repos",
       "/dashboard/acme/apps",
+      "/dashboard/acme/bots",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -151,6 +157,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/repos",
       "/dashboard/acme/apps",
+      "/dashboard/acme/bots",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -162,6 +169,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/repos",
       "/dashboard/acme/apps",
+      "/dashboard/acme/bots",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -174,6 +182,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/repos",
       "/dashboard/acme/apps",
+      "/dashboard/acme/bots",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -190,6 +199,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/ws_acme/repos",
       "/dashboard/ws_acme/apps",
+      "/dashboard/ws_acme/bots",
       "/dashboard/ws_acme/members",
       "/dashboard/ws_acme/settings",
     ]);
@@ -201,6 +211,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/repos",
       "/dashboard/apps",
+      "/dashboard/bots",
       "/dashboard/members",
       "/dashboard/settings",
     ]);

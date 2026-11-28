@@ -1,6 +1,7 @@
 import { ATTRIBUTION_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
+import { CHAIN_MULTIPLIER_MAX, isBotMultiplier, isRpCeiling, RP_CEILING_MAX } from "../contracts/rp-limits";
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
 import type { WorkspaceRole } from "./workspace-store";
@@ -58,6 +59,8 @@ export type BotScopedRow = {
   sandbox_image_id: string;
   multiplier: number;
   monthly_rp: number | null;
+  /** NULL = live. Set = archived: kept, listed, never selected by the relay. */
+  archived_at: string | null;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
@@ -133,8 +136,19 @@ export type AppInstallationRow = {
   seen_at: string;
 };
 
-/** The outcome of binding one installation to a workspace. */
-export type BindInstallationOutcome = "bound" | "bound_elsewhere" | "unknown";
+/**
+ * The outcome of binding one installation to a workspace. `app_unavailable` is
+ * the App losing its live+shared state between the route's admission and this
+ * write: the write refuses, and the route answers the same `unknown app` it
+ * answers for an App that was never there.
+ */
+export type BindInstallationOutcome =
+  | "bound"
+  | "bound_elsewhere"
+  | "unknown"
+  | "app_unavailable"
+  /** The actor stopped being an owner/admin before the batch ran. */
+  | "not_manager";
 
 /**
  * One installation INCLUDING a removed one — the bound-state read. Unlike
@@ -448,6 +462,48 @@ function countOf(result: AppsStoreBatchResult): number {
 }
 
 /**
+ * The bind write. Its WHERE clause IS the bindability predicate — the route's
+ * admission (`bindAdmission`) and this write apply the same facts:
+ *
+ *  - the installation is live (`removed_at IS NULL`);
+ *  - it is unbound, bound to this workspace, or bound to a workspace that was
+ *    deleted (a dead binding counts as unbound — first binder wins);
+ *  - the App is still BINDABLE (`APP_BINDABLE_SQL` — live, shared, at least one
+ *    live association): the very predicate the route admitted through, so an
+ *    App unshared or deleted after the route checked it refuses HERE;
+ *  - the binding workspace is itself live;
+ *  - the ACTOR is currently an owner/admin of that workspace. The OAuth round
+ *    trip and the GitHub account proof sit between the route's role read and
+ *    this write, so a manager removed or demoted in that window must bind
+ *    nothing: workspace liveness is not actor authorization.
+ *
+ * Being one UPDATE means the check and the write cannot be split by another
+ * writer: SQLite evaluates the predicate against the row it writes.
+ */
+function bindUpdate(
+  db: AppsStoreD1,
+  appId: string,
+  installationId: number,
+  workspaceId: string,
+  actorUserId: string,
+): AppsStoreStatement {
+  return db
+    .prepare(
+      `UPDATE github_app_installations SET bound_workspace_id = ?3
+        WHERE app_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
+          AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3
+               OR NOT EXISTS (SELECT 1 FROM workspaces w
+                               WHERE w.id = github_app_installations.bound_workspace_id AND w.deleted_at IS NULL))
+          AND EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ?1 AND ${APP_BINDABLE_SQL})
+          AND EXISTS (SELECT 1 FROM workspaces ws WHERE ws.id = ?3 AND ws.deleted_at IS NULL)
+          AND EXISTS (SELECT 1 FROM workspace_members wm
+                       WHERE wm.workspace_id = ?3 AND wm.user_id = ?4
+                         AND wm.role IN ('owner', 'admin'))`,
+    )
+    .bind(appId, installationId, workspaceId, actorUserId);
+}
+
+/**
  * The install state for `(appId, workspaceId)`, written only when the App and
  * the workspace are live and no state exists yet. `guard` is the writer's own
  * precondition on the batch: the bind passes `changes() > 0` (only a bind that
@@ -480,6 +536,28 @@ function installStateInsert(
 const BIND_WROTE_GUARD = " AND changes() > 0";
 
 /**
+ * Is this user, RIGHT NOW, an owner/admin of this live workspace? The bind's
+ * refusal path asks the same question the write's WHERE clause already asked,
+ * so a bind refused for that reason is reported as the authorization failure it
+ * is instead of as a missing App.
+ */
+async function isWorkspaceManager(
+  db: AppsStoreD1,
+  workspaceId: string,
+  actorUserId: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS present FROM workspace_members wm
+         JOIN workspaces ws ON ws.id = wm.workspace_id AND ws.deleted_at IS NULL
+        WHERE wm.workspace_id = ?1 AND wm.user_id = ?2 AND wm.role IN ('owner', 'admin')`,
+    )
+    .bind(workspaceId, actorUserId)
+    .first<{ present: number }>();
+  return row !== null;
+}
+
+/**
  * The chain for the state the PREVIOUS statement created, on the BIND path —
  * one workspace per call, so `changes() > 0` is unambiguous there (the revival
  * path restores several workspaces at once and uses the batch stamp instead).
@@ -501,6 +579,7 @@ function installChainCopy(
         WHERE oc.github_app_id = ?1
           AND oc.workspace_id = aw.workspace_id
           AND changes() > 0
+          AND rb.archived_at IS NULL
           AND (rb.scope = 'shared' OR rb.workspace_id = ?2)
           AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
                            WHERE ib.github_app_id = oc.github_app_id
@@ -596,6 +675,7 @@ function installChainForCreatedStates(
          JOIN app_workspaces aw ON aw.app_id = oc.github_app_id AND aw.workspace_id = oc.workspace_id
          JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
         WHERE s.github_app_id = ?1 AND s.created_at = ?2${scope}
+          AND rb.archived_at IS NULL
           AND (rb.scope = 'shared' OR rb.workspace_id = s.workspace_id)
           AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
                            WHERE ib.github_app_id = oc.github_app_id
@@ -658,11 +738,24 @@ function installStateSweep(db: AppsStoreD1, appId: string): AppsStoreStatement[]
 export const APP_READ_SQL = {
   getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
   getAppForWebhook: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
-  getAppByGithubId: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
   listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
-const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.app_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.app_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL) OR EXISTS (SELECT 1 FROM app_installations ai WHERE ai.github_app_id = g.id AND ai.workspace_id = ?2)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+
+/**
+ * The App-level half of bindability, spelled ONCE for every surface that
+ * offers or performs a bind: a live SHARED App with at least one live
+ * associated workspace. It is `getLiveSharedAppById`'s own predicate — the
+ * resolver the bind route admits through — and `bindUpdate` and both pending
+ * lists reuse it, so a row can never offer an action the route refuses and the
+ * write can never accept one the route would not have admitted. Alias the App
+ * as `g`.
+ */
+const APP_BINDABLE_SQL = `g.deleted_at IS NULL AND g.scope = 'shared'
+          AND EXISTS (SELECT 1 FROM app_workspaces aw
+                        JOIN workspaces ws ON ws.id = aw.workspace_id AND ws.deleted_at IS NULL
+                       WHERE aw.app_id = g.id)`;
 
 /**
  * The bot-scoped read faces: the BOT's own columns, authorized from its own
@@ -707,6 +800,7 @@ export type ReviewBotRow = {
   sandbox_image_id: string;
   multiplier: number;
   monthly_rp: number | null;
+  archived_at: string | null;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
@@ -756,6 +850,12 @@ export type UsableBotListRow = {
   shared_at: string | null;
   multiplier: number;
   monthly_rp: number | null;
+  /**
+   * The ceiling the relay enforces for the CALLING workspace: its
+   * `bot_quota_overrides` row when one exists, else the bot's own default.
+   */
+  effective_ceiling: number | null;
+  archived_at: string | null;
 };
 
 /**
@@ -765,7 +865,10 @@ export type UsableBotListRow = {
  */
 const USABLE_BOT_LIST_SQL = `
   SELECT r.id, r.name, r.description, r.workspace_id, r.scope, r.shared_at, r.multiplier, r.monthly_rp,
-         ws.name AS workspace_name
+         r.archived_at, ws.name AS workspace_name,
+         COALESCE((SELECT o.monthly_rp FROM bot_quota_overrides o
+                    WHERE o.bot_id = r.id AND o.workspace_id = ?1), r.monthly_rp)
+           AS effective_ceiling
     FROM review_bots r
     JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
    WHERE r.deleted_at IS NULL AND (r.workspace_id = ?1 OR r.scope = 'shared')
@@ -1036,6 +1139,31 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return row;
     },
 
+    /**
+     * One standalone bot row (no GitHub App behind it): an owned bot at
+     * multiplier 1 on the `omp` runtime, the same id/timestamp conventions
+     * `createApp` writes. The guarded INSERT re-checks the live workspace, so a
+     * workspace deleted between the route's gate and this write creates nothing.
+     */
+    async createBot(input: {
+      id: string;
+      workspaceId: string;
+      name: string;
+      description: string | null;
+    }): Promise<boolean> {
+      const res = await db
+        .prepare(
+          `INSERT INTO review_bots
+             (id, workspace_id, name, description, scope, sandbox_image_id,
+              multiplier, created_at, updated_at)
+           SELECT ?1, ?2, ?3, ?4, 'owned', 'omp', 1, datetime('now'), datetime('now')
+            WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?2 AND deleted_at IS NULL)`,
+        )
+        .bind(input.id, input.workspaceId, input.name, input.description)
+        .run();
+      return res.meta.changes > 0;
+    },
+
     async countLiveApps(workspaceId: string): Promise<number> {
       const row = await db
         .prepare(
@@ -1059,10 +1187,47 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .first<GithubAppTenantRow>();
     },
 
-    async getAppByGithubId(githubAppId: number): Promise<GithubAppTenantRow | null> {
+    /**
+     * The App a bind may act on, by GitHub's numeric id: live, SHARED and
+     * still associated with a live workspace ({@link APP_BINDABLE_SQL}).
+     *
+     * ONE predicate, deliberately — a caller resolving a bind cannot learn
+     * whether an App it may not bind exists. Missing, retired, owned by someone
+     * else, sharing revoked and left with no live association all answer
+     * `null`, and the route turns that into its single opaque 404. The caller's
+     * manager role is checked BEFORE this read, so a member never reaches it.
+     */
+    async getBindableAppByGithubId(githubAppId: number): Promise<GithubAppTenantRow | null> {
       return db
-        .prepare(APP_READ_SQL.getAppByGithubId)
+        .prepare(
+          `SELECT g.*, w.workspace_id FROM github_apps g
+             INNER JOIN app_workspaces w ON w.app_id = g.id
+             INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
+            WHERE g.github_app_id = ?1 AND ${APP_BINDABLE_SQL}
+            LIMIT 1`,
+        )
         .bind(githubAppId)
+        .first<GithubAppTenantRow>();
+    },
+
+    /**
+     * A live shared App by its internal id, IGNORING the caller's relation —
+     * the resolver a bind uses. `getScopedAppByGithubId` answers "may this
+     * workspace see it", which a first bind cannot: the installation being
+     * bound is what CREATES the relation. The bind routes therefore resolve by
+     * identity and then prove the three facts that authorize it (live, shared,
+     * installation pending for this workspace).
+     */
+    async getLiveSharedAppById(appId: string): Promise<GithubAppTenantRow | null> {
+      return db
+        .prepare(
+          `SELECT g.*, w.workspace_id FROM github_apps g
+             INNER JOIN app_workspaces w ON w.app_id = g.id
+             INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
+            WHERE g.id = ?1 AND ${APP_BINDABLE_SQL}
+            LIMIT 1`,
+        )
+        .bind(appId)
         .first<GithubAppTenantRow>();
     },
 
@@ -1274,7 +1439,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       const res = await db
         .prepare(
           `UPDATE review_bots SET sandbox_image_id = ?, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
+           WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`,
         )
         .bind(image.id, id)
         .run();
@@ -1416,22 +1581,26 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * Bind a live installation to a workspace. First binder wins: a row already
      * bound to another live workspace is never rebound here; a binding whose
      * workspace was deleted counts as unbound.
+     *
+     * This write RE-STATES the route's admission in its own WHERE clause
+     * (`bindUpdate`), because the OAuth round trip happens between the two: an
+     * App unshared or deleted, this workspace deleted, or the ACTOR removed or
+     * demoted from owner/admin, in that window, refuses here instead of binding
+     * an installation the route no longer admits. The batch's guard is that same
+     * UPDATE, so the install state and the chain follow only a bind that
+     * actually wrote.
+     *
+     * `actorUserId` is the verified session user's `users.id` — the role read the
+     * route already made, re-proven inside the statement that writes.
      */
     async bindInstallation(
       appId: string,
       installationId: number,
       workspaceId: string,
+      actorUserId: string,
     ): Promise<BindInstallationOutcome> {
       const [res] = await db.batch([
-        db
-          .prepare(
-            `UPDATE github_app_installations SET bound_workspace_id = ?3
-           WHERE app_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
-             AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3
-                  OR NOT EXISTS (SELECT 1 FROM workspaces w
-                                  WHERE w.id = github_app_installations.bound_workspace_id AND w.deleted_at IS NULL))`,
-          )
-          .bind(appId, installationId, workspaceId),
+        bindUpdate(db, appId, installationId, workspaceId, actorUserId),
         // The workspace's install state, written in the same batch as the
         // ownership proof: this bind is its first installation of the App. A
         // refused bind (an UPDATE that matched nothing) writes none, and a later
@@ -1442,54 +1611,60 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         installChainCopy(db, appId, workspaceId),
       ]);
       if (res!.meta.changes > 0) return "bound";
-      const row = await db
-        .prepare(`SELECT removed_at FROM github_app_installations WHERE app_id = ? AND installation_id = ?`)
-        .bind(appId, installationId)
-        .first<{ removed_at: string | null }>();
-      return row !== null && row.removed_at === null ? "bound_elsewhere" : "unknown";
-    },
-
-    async listPendingInstallations(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
-      const res = await db
+      // Refused. The actor's CURRENT role is the one fact the caller can act on:
+      // it means "you are no longer a manager", not "the App vanished".
+      if (!(await isWorkspaceManager(db, workspaceId, actorUserId))) return "not_manager";
+      // Refused, and the actor still manages. Which other fact failed decides
+      // what the caller is told, and the question is asked with the SAME "a dead
+      // binding counts as unbound" rule the UPDATE and `bindAdmission` use: a
+      // LEFT JOIN onto live workspaces nulls a binding whose workspace was
+      // deleted, so it is never reported as a conflict the user could act on.
+      const binding = await db
         .prepare(
-          `SELECT i.installation_id, i.account_login, i.seen_at FROM github_app_installations i
-             JOIN github_apps b ON b.id = i.app_id
-            WHERE i.app_id = ?1 AND i.removed_at IS NULL
-              AND NOT EXISTS (SELECT 1 FROM workspaces bw
-                               WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
-              AND (b.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM app_workspaces w
-                               WHERE w.app_id = b.id AND w.workspace_id = ?2))
-            ORDER BY i.seen_at DESC, i.installation_id`,
+          `SELECT i.removed_at, w.id AS bound_workspace_id FROM github_app_installations i
+             LEFT JOIN workspaces w ON w.id = i.bound_workspace_id AND w.deleted_at IS NULL
+            WHERE i.app_id = ? AND i.installation_id = ?`,
         )
-        .bind(appId, workspaceId)
-        .all<AppInstallationRow>();
-      return res.results;
+        .bind(appId, installationId)
+        .first<{ removed_at: string | null; bound_workspace_id: string | null }>();
+      if (binding === null || binding.removed_at !== null) return "unknown";
+      // A LIVE binding to another workspace is the one race the caller can
+      // understand (409). Everything else that refused — App unshared, deleted,
+      // left with no live association, or this workspace deleted — is the App
+      // no longer being bindable at all (404).
+      return binding.bound_workspace_id !== null && binding.bound_workspace_id !== workspaceId
+        ? "bound_elsewhere"
+        : "app_unavailable";
     },
 
     /**
-     * Every unbound live installation of an App the workspace may install
-     * through (its own, or a shared one) — the installed tab's "Waiting to be
-     * bound" rows, each carrying its App row id so the UI can name the App.
+     * One App's unbound live installations this workspace may bind.
+     *
+     * The rows exist only for a BINDABLE App (`APP_BINDABLE_SQL`, the route's own
+     * predicate), so this list and the bind it offers cannot disagree.
+     *
+     * `canBind` is the manager fact the bind route checks first; it is stamped
+     * on every row so the App detail's install block renders the action only
+     * where the server says it may bind. A caller that has ALREADY proven the
+     * manager role (the bind admission itself) passes `true`.
      */
-    async listWorkspacePendingInstallations(
-      workspaceId: string,
-    ): Promise<Array<AppInstallationRow & { app_id: string }>> {
+    async listPendingInstallations(
+      appId: string,
+      canBind: boolean,
+    ): Promise<Array<AppInstallationRow & { can_bind: boolean }>> {
       const res = await db
         .prepare(
-          `SELECT i.installation_id, i.account_login, i.seen_at, i.app_id FROM github_app_installations i
-             JOIN github_apps b ON b.id = i.app_id AND b.deleted_at IS NULL
-            WHERE i.removed_at IS NULL
+          `SELECT i.installation_id, i.account_login, i.seen_at FROM github_app_installations i
+             JOIN github_apps g ON g.id = i.app_id
+            WHERE i.app_id = ?1 AND i.removed_at IS NULL
               AND NOT EXISTS (SELECT 1 FROM workspaces bw
                                WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
-              AND (b.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM app_workspaces w
-                               WHERE w.app_id = b.id AND w.workspace_id = ?1))
+              AND ${APP_BINDABLE_SQL}
             ORDER BY i.seen_at DESC, i.installation_id`,
         )
-        .bind(workspaceId)
-        .all<AppInstallationRow & { app_id: string }>();
-      return res.results;
+        .bind(appId)
+        .all<AppInstallationRow>();
+      return res.results.map((row) => ({ ...row, can_bind: canBind }));
     },
 
     /**
@@ -1531,33 +1706,55 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       ownerWorkspaceId: string;
       monthlyRp: number | null;
       now: string;
-    }): Promise<"ok" | "not_owner" | "invalid"> {
+    }): Promise<"ok" | "not_owner" | "invalid" | "archived"> {
       const owner = await db
-        .prepare("SELECT workspace_id FROM review_bots WHERE id = ?1 AND deleted_at IS NULL")
+        .prepare("SELECT workspace_id, archived_at FROM review_bots WHERE id = ?1 AND deleted_at IS NULL")
         .bind(input.botId)
-        .first<{ workspace_id: string }>();
+        .first<{ workspace_id: string; archived_at: string | null }>();
       // The caller passes the OWNER it resolved; the store re-checks it against
       // the row, so a caller that bypasses the route cannot write.
       if (owner === null || owner.workspace_id !== input.ownerWorkspaceId) return "not_owner";
-      if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
+      if (owner.archived_at !== null) return "archived";
+      if (input.monthlyRp !== null && !isRpCeiling(input.monthlyRp)) {
         return "invalid";
       }
-      if (input.monthlyRp === null) {
-        await db
-          .prepare("DELETE FROM bot_quota_overrides WHERE bot_id = ?1 AND workspace_id = ?2")
-          .bind(input.botId, input.workspaceId)
-          .run();
-        return "ok";
-      }
-      await db
+      // The archive predicate rides the MUTATION, not the read above: an archive
+      // that lands between the two changes zero rows instead of leaving an
+      // override on a locked bot. The liveness probe rides the SAME batch as
+      // that write, because a read AFTER it cannot answer the question: an
+      // archive followed by a restore in between would report `ok` for a write
+      // that never happened.
+      const live = "EXISTS (SELECT 1 FROM review_bots r WHERE r.id = ?1 AND r.deleted_at IS NULL AND r.archived_at IS NULL)";
+      // The probe carries `present` as well as `live`: a target DELETED before
+      // the batch must not be reported as an archived one.
+      const probe = db
         .prepare(
-          `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
-           VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (bot_id, workspace_id) DO UPDATE SET monthly_rp = excluded.monthly_rp, updated_at = excluded.updated_at`,
+          `SELECT ${live} AS live,
+                  EXISTS (SELECT 1 FROM review_bots r WHERE r.id = ?2 AND r.deleted_at IS NULL) AS present`,
         )
-        .bind(input.botId, input.workspaceId, input.monthlyRp, input.now)
-        .run();
-      return "ok";
+        .bind(input.botId, input.botId);
+      const write =
+        input.monthlyRp === null
+          ? db
+              .prepare(`DELETE FROM bot_quota_overrides WHERE bot_id = ?1 AND workspace_id = ?2 AND ${live}`)
+              .bind(input.botId, input.workspaceId)
+          : db
+              .prepare(
+                `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+                 SELECT ?1, ?2, ?3, ?4 WHERE ${live}
+                 ON CONFLICT (bot_id, workspace_id) DO UPDATE SET
+                   monthly_rp = excluded.monthly_rp, updated_at = excluded.updated_at`,
+              )
+              .bind(input.botId, input.workspaceId, input.monthlyRp, input.now);
+      const [probed, written] = await db.batch([probe, write]);
+      // A deleted target is the same answer the owner read gives: not the
+      // caller's bot. Only an ARCHIVED one is the archive refusal.
+      const state = targetStateOf(probed);
+      if (state === "gone") return "not_owner";
+      if (state === "archived") return "archived";
+      // Live and unchanged: a clear of an absent override is a no-op, and the
+      // INSERT path always writes when the bot is live.
+      return (written?.meta.changes ?? 0) > 0 || input.monthlyRp === null ? "ok" : "archived";
     },
 
     /** Every override one bot carries, for the owner's editor. */
@@ -1578,80 +1775,150 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * belongs to the workspace whose `app_installations` row it is, and a shared
      * App's chain is its owner's to write (D34, D35).
      *
-     * A NEW bot must be shared or owned by that workspace, and that predicate is
-     * checked INSIDE the write batch, so an owner unsharing one between the
-     * request and the batch cannot slip in. A RETAINED id — one the install
-     * already mounts — is inserted regardless of its current scope: the UI shows
-     * such a row as skipped and the operator chose to keep it.
+     * A NEW bot must be live (not archived) and shared or owned by that
+     * workspace. A RETAINED id — one the install already mounts — is inserted
+     * regardless of its current scope or archive state: the UI shows such a row
+     * as skipped and the operator chose to keep it.
+     *
+     * Both halves are decided INSIDE the batch. The guard statement runs while
+     * the OLD chain is still there, so "retained" means "the chain holds this id
+     * right now" — not what the request read a moment earlier. A bot another
+     * request removed and archived in that window is neither retained nor
+     * mountable, the guard row's CHECK fires, and the whole batch rolls back.
+     *
+     * The chain's PRICE rides the same batch: the Apps list serves the product
+     * of the mounted multipliers, and a NEW mount may not push that product past
+     * `CHAIN_MULTIPLIER_MAX` (the most a storable ceiling can cover), because
+     * then no workspace could afford the review the chain prices. The product is
+     * computed from the ids being written against the multipliers stored at
+     * write time — never from a pre-batch read.
+     *
+     * This is a WRITE bound and nothing more. The reader accepts any positive
+     * finite product (`isServedChainProduct`), because a legal price edit on one
+     * mounted bot or a removal of a sub-1 factor lifts an admitted product past
+     * the bound, and neither write is this batch's to refuse. The charge stays
+     * guarded where the money is taken: `rpFor`/`chargeUsage` fail closed.
+     *
+     * The guard folds in exactly the factors the SERVED value does: a row the
+     * viewer may not price, and an archived row, both count as `1`. Anything
+     * else would let the foreign owner's private price, or a retirement the
+     * relay already skips, decide whether this workspace's mount is admitted.
      */
     async replaceInstallChain(
       input: { appId: string; workspaceId: string; botIds: readonly string[] },
-    ): Promise<"ok" | "not_installer" | "bot_unavailable"> {
+    ): Promise<"ok" | "not_installer" | "bot_unavailable" | "chain_too_large"> {
       const own = await db
         .prepare(`SELECT 1 AS present FROM app_installations WHERE github_app_id = ?1 AND workspace_id = ?2`)
         .bind(input.appId, input.workspaceId)
         .first<{ present: number }>();
       if (own === null) return "not_installer";
 
-      // The ids the chain ALREADY holds. A retained row survives a rewrite even
-      // when its owner stopped sharing it: the UI shows such a row as skipped
-      // (D29), and dropping it here would silently un-mount a bot every operator
-      // on that page can still see. Only a NEW id must be mountable.
-      const retained = new Set(
-        (await db
-          .prepare(
-            "SELECT bot_id FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2",
-          )
-          .bind(input.appId, input.workspaceId)
-          .all<{ bot_id: string }>()).results.map((row) => row.bot_id),
-      );
-
-      // ONE batch: clear, re-insert, then a SHAPE GUARD. The guard is the repo's
-      // existing recipe (0057, 0115): a real table with `CHECK (n = 0)`, inserted
-      // from a SELECT that compares requested against inserted. A bot that went
-      // unavailable between the request and this batch inserts nothing, the counts
-      // disagree, the CHECK fires, and the WHOLE batch — the DELETE included —
-      // rolls back. The original chain stays byte-identical: no reader ever sees a
-      // partial chain, and no compensating write can overwrite a concurrent edit.
+      // ONE batch: ADMISSION GUARD, clear, re-insert. The guard is the repo's
+      // existing recipe (0057, 0115, 0124): a real table with `CHECK (n = 0)`,
+      // inserted from a SELECT that counts the ids the rewrite cannot admit. A
+      // refused id makes that count non-zero, the CHECK fires, and the WHOLE
+      // batch — the DELETE included — rolls back. The original chain stays
+      // byte-identical: no reader ever sees a partial chain, and no compensating
+      // write can overwrite a concurrent edit.
       const requested = JSON.stringify(input.botIds);
-      const retainedJson = JSON.stringify([...retained]);
       try {
         await db.batch([
+          db
+            .prepare("DELETE FROM app_install_chain_guard WHERE github_app_id = ?1 AND workspace_id = ?2")
+            .bind(input.appId, input.workspaceId),
+          db
+            .prepare(
+              `WITH unadmitted AS (
+                 SELECT COUNT(*) AS n FROM json_each(?3) j
+                  WHERE NOT (j.value IN (SELECT ib.bot_id FROM app_install_bots ib
+                                          WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2)
+                             OR EXISTS (SELECT 1 FROM review_bots b
+                                         WHERE b.id = j.value AND b.deleted_at IS NULL
+                                           AND b.archived_at IS NULL
+                                           AND (b.scope = 'shared' OR b.workspace_id = ?2)))
+               )
+               INSERT INTO app_install_chain_guard (github_app_id, workspace_id, n)
+               SELECT ?1, ?2, n FROM unadmitted WHERE n <> 0`,
+            )
+            .bind(input.appId, input.workspaceId, requested),
+          // The PRICE guard, same recipe, same table. Both halves ride the
+          // "mounts a NEW id" clause because ONLY a new mount can change the
+          // product in a way the reader refuses: multiplying in small (each
+          // individually legal) factors can underflow it to `0`, and new ids can
+          // push it past the write bound. A removal divides by a positive factor
+          // and a reorder keeps the same factors, so neither can produce a
+          // non-positive product and neither is ever vetoed — that is the
+          // operator's only way to repair an oversize chain, and the reader
+          // accepts the overshoot it leaves. It omits `n`, so its refusal is the
+          // column's NOT NULL rather than the table's CHECK — that is what tells
+          // the two refusals apart below.
+          //
+          // The product is taken in `json_each` key order (left to right, the
+          // same order the served `month.multiplier` reduces in), so an
+          // exactly-at-bound chain is admitted by the writer on the very bits
+          // the reader accepts. A rewrite that mounts no id the chain does not
+          // already hold can only shrink or reorder what is served, so it is
+          // admitted even when the old chain was already outside the domain:
+          // that is the operator's only way to repair it.
+          //
+          // A row the VIEWER may not price — a bot of another workspace that is
+          // no longer shared — counts as `1`, exactly as the read projection
+          // serves it. Folding its stored multiplier in would let the foreign
+          // owner's private price change whether THIS workspace's mount is
+          // admitted, which leaks the number the row masks. An ARCHIVED row
+          // counts as `1` for the same reason reversed: the served factor
+          // leaves it out, so a price the reader never applies must not veto a
+          // mount either. Both predicates are the read projection's, so the two
+          // cannot drift.
+          db
+            .prepare(
+              `WITH RECURSIVE step(i, p) AS (
+                 SELECT -1, 1.0
+                 UNION ALL
+                 SELECT j.key, step.p * COALESCE((SELECT CASE
+                                                     WHEN b.archived_at IS NULL
+                                                      AND (b.scope = 'shared' OR b.workspace_id = ?2)
+                                                     THEN b.multiplier ELSE 1 END
+                                                   FROM review_bots b
+                                                   WHERE b.id = j.value AND b.deleted_at IS NULL), 1)
+                   FROM step JOIN json_each(?3) j ON j.key = step.i + 1
+               ),
+               chain(product) AS (
+                 SELECT p FROM step ORDER BY i DESC LIMIT 1
+               )
+               INSERT INTO app_install_chain_guard (github_app_id, workspace_id)
+               SELECT ?1, ?2
+                 FROM chain
+                WHERE (product <= 0 OR product > ?4)
+                  AND EXISTS (SELECT 1 FROM json_each(?3) j
+                               WHERE j.value NOT IN (SELECT ib.bot_id FROM app_install_bots ib
+                                                      WHERE ib.github_app_id = ?1 AND ib.workspace_id = ?2))`,
+            )
+            .bind(input.appId, input.workspaceId, requested, CHAIN_MULTIPLIER_MAX),
           db
             .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
             .bind(input.appId, input.workspaceId),
           db
             .prepare(
               `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
-               SELECT ?1, ?2, j.key + 1, j.value
-                 FROM json_each(?3) j
-                WHERE j.value IN (SELECT value FROM json_each(?4))
-                   OR EXISTS (SELECT 1 FROM review_bots b
-                               WHERE b.id = j.value AND b.deleted_at IS NULL
-                                 AND (b.scope = 'shared' OR b.workspace_id = ?2))`,
-            )
-            .bind(input.appId, input.workspaceId, requested, retainedJson),
-          db
-            .prepare("DELETE FROM app_install_chain_guard WHERE github_app_id = ?1 AND workspace_id = ?2")
-            .bind(input.appId, input.workspaceId),
-          db
-            .prepare(
-              `INSERT INTO app_install_chain_guard (github_app_id, workspace_id, n)
-               SELECT ?1, ?2, (SELECT COUNT(*) FROM json_each(?3))
-                                 - (SELECT COUNT(*) FROM app_install_bots
-                                     WHERE github_app_id = ?1 AND workspace_id = ?2)
-                WHERE (SELECT COUNT(*) FROM json_each(?3))
-                      <> (SELECT COUNT(*) FROM app_install_bots
-                           WHERE github_app_id = ?1 AND workspace_id = ?2)`,
+               SELECT ?1, ?2, j.key + 1, j.value FROM json_each(?3) j`,
             )
             .bind(input.appId, input.workspaceId, requested),
         ]);
       } catch (err) {
-        if (!(err instanceof Error) || !/app_install_chain_guard/.test(err.message)) throw err;
+        if (!(err instanceof Error)) throw err;
         // The batch rolled back; the ids that failed to insert are the ones this
         // caller must retry without. Naming a specific one here would require
         // reading state the failed batch never wrote, so the caller re-reads the
         // chain and re-derives the list — the guard's rollback is the authority.
+        //
+        // A price refusal is its own outcome: the ids were all admissible, and
+        // the caller's fix is to mount fewer bots, not to re-derive the list.
+        // Its statement omits `n`, so the refusal is that column's NOT NULL —
+        // matched without the `table.column` spelling, which differs between
+        // the local driver and D1.
+        if (/NOT NULL/.test(err.message) && /app_install_chain_guard/.test(err.message)) return "chain_too_large";
+        if (!/app_install_chain_guard/.test(err.message)) throw err;
         return "bot_unavailable";
       }
       return "ok";
@@ -1676,15 +1943,59 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           owned: boolean;
           available: boolean;
           multiplier: number;
-          monthlyRp: number | null;
+          /**
+           * The ceiling the relay enforces for THIS workspace: its
+           * `bot_quota_overrides` row when one exists, else the bot's own
+           * default. The default alone never leaves the store — it is the
+           * owner's pricing, not the viewer's ceiling.
+           */
+          effectiveMonthlyRp: number | null;
+          archived: boolean;
+          /**
+           * The bot's DEFAULT chain selector string; `null` = none configured
+           * OR the row is not available to this workspace (see the read).
+           */
+          defaultChain: string | null;
+          /** The bot's runtime harness id; `null` under the same rule. */
+          runtime: string | null;
         }>
       >
     > {
+      // The default chain and the effective ceiling ride this SAME statement as
+      // correlated subselects — `readDefaultChainSummary` and `readBotCeiling`
+      // are the same reads, but calling them per row would turn one statement
+      // into N+1 for a whole Apps page. The override's column is NOT NULL, so
+      // COALESCE expresses "override else default" exactly.
+      //
+      // The bot's DEFAULT selector, its runtime harness AND its price are the
+      // owner's configuration: a retained row whose bot stopped being available
+      // here (unshared, or owned by someone else) still shows its mount and its
+      // history, but not the configuration written after this workspace's
+      // relation ended. The availability predicate is the same one the mapper
+      // applies, so the two cannot drift.
+      //
+      // The PRICE is withheld to the effective `1` / `null` rather than nulled
+      // outright: `multiplier` is a number on the wire, and a factor of 1 is
+      // exactly what an unshared bot costs here (nothing runs it), so the served
+      // value states the truth without disclosing a price the owner can still
+      // change. `effective_monthly_rp` becomes `null` for the same reason — the
+      // relay skips the row, so no ceiling applies to it.
+      const available = `(r.scope = 'shared' OR r.workspace_id = ?1)`;
       const res = await db
         .prepare(
           `SELECT ib.github_app_id AS app_id, ib.position, ib.bot_id, r.name, r.description,
                   r.workspace_id AS bot_workspace_id, r.scope, ws.name AS provider_workspace,
-                  r.multiplier, r.monthly_rp
+                  r.archived_at,
+                  CASE WHEN ${available} THEN r.multiplier ELSE 1 END AS multiplier,
+                  CASE WHEN ${available} AND r.archived_at IS NULL THEN r.sandbox_image_id END
+                    AS sandbox_image_id,
+                  CASE WHEN ${available} AND r.archived_at IS NULL
+                       THEN (SELECT bc.chain FROM bot_model_chains bc
+                              WHERE bc.bot_id = r.id AND bc.name = 'default') END AS default_chain,
+                  CASE WHEN ${available}
+                       THEN COALESCE((SELECT o.monthly_rp FROM bot_quota_overrides o
+                                       WHERE o.bot_id = r.id AND o.workspace_id = ?1), r.monthly_rp) END
+                    AS effective_monthly_rp
              FROM app_install_bots ib
              JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
              JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
@@ -1702,7 +2013,10 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           scope: BotScope;
           provider_workspace: string;
           multiplier: number;
-          monthly_rp: number | null;
+          archived_at: string | null;
+          sandbox_image_id: string | null;
+          default_chain: string | null;
+          effective_monthly_rp: number | null;
         }>();
       const byApp = new Map<
         string,
@@ -1715,7 +2029,10 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           owned: boolean;
           available: boolean;
           multiplier: number;
-          monthlyRp: number | null;
+          effectiveMonthlyRp: number | null;
+          archived: boolean;
+          defaultChain: string | null;
+          runtime: string | null;
         }>
       >();
       for (const row of res.results) {
@@ -1732,7 +2049,12 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           // will never run (D29).
           available: row.scope === "shared" || row.bot_workspace_id === workspaceId,
           multiplier: row.multiplier,
-          monthlyRp: row.monthly_rp,
+          effectiveMonthlyRp: row.effective_monthly_rp,
+          // A read-only fact: an archived bot stays mounted and listed, the
+          // relay just never selects it (T1's chain filter owns that rule).
+          archived: row.archived_at !== null,
+          defaultChain: row.default_chain,
+          runtime: row.sandbox_image_id,
         });
         byApp.set(row.app_id, list);
       }
@@ -1795,13 +2117,25 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * F16: the same pending rows, each carrying the App's DISPLAY name and
-     * numeric GitHub id — an uninstalled shared App is absent from
-     * `/api/apps`, so the UI must not resolve the name from that list.
+     * F16/F10: the installed tab's pending rows — one per unbound live
+     * installation of a SHARED App, each carrying the App's display name, its
+     * numeric GitHub id, and whether THIS caller may bind it.
+     *
+     * Only a BINDABLE shared App qualifies (`APP_BINDABLE_SQL` — live, shared,
+     * one live association), the same predicate the bind route admits through;
+     * an owned App's unbound installation is a webhook artifact, not an action.
+     * `canBind` is the manager fact the route checks first, so a member's row
+     * states the installation without offering the action.
+     *
+     * The statement has no placeholders: a workspace predicate here would
+     * contradict "shared App" (the App belongs to its owner, not to the reader),
+     * so there is nothing to bind — D1 rejects surplus parameters outright.
      */
-    async listWorkspacePendingInstallationsNamed(workspaceId: string): Promise<
+    async listWorkspacePendingInstallationsNamed(
+      canBind: boolean,
+    ): Promise<
       Array<
-        AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string }
+        AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string; can_bind: boolean }
       >
     > {
       const res = await db
@@ -1810,18 +2144,15 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                   g.github_app_id AS app_github_app_id,
                   COALESCE(g.github_name, g.github_slug, CAST(g.github_app_id AS TEXT)) AS app_name
              FROM github_app_installations i
-             JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
+             JOIN github_apps g ON g.id = i.app_id
             WHERE i.removed_at IS NULL
               AND NOT EXISTS (SELECT 1 FROM workspaces bw
                                WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
-              AND (g.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM app_workspaces w
-                               WHERE w.app_id = g.id AND w.workspace_id = ?1))
+              AND ${APP_BINDABLE_SQL}
             ORDER BY i.seen_at DESC, i.installation_id`,
         )
-        .bind(workspaceId)
         .all<AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string }>();
-      return res.results;
+      return res.results.map((row) => ({ ...row, can_bind: canBind }));
     },
 
     /**
@@ -2428,7 +2759,21 @@ export type BotScopeOutcome =
   | { outcome: "outside_official_workspace" }
   | { outcome: "confirm_required" }
   /** F12: the caller does not own the bot, or lacks the owner/admin role. */
-  | { outcome: "forbidden" };
+  | { outcome: "forbidden" }
+  /** The bot is archived: restore is the only transition it accepts. */
+  | { outcome: "archived" };
+
+/**
+ * A bot profile/pricing/archive write's outcome. Same value-not-message rule as
+ * {@link BotScopeOutcome}: the route maps the value to a frozen status.
+ */
+export type BotWriteOutcome =
+  | "ok"
+  | "bot_not_found"
+  | "forbidden"
+  | "invalid"
+  /** The bot is archived: archive/restore are its only transitions. */
+  | "archived";
 
 /**
  * One live App/bot pair as the operator console lists it (contract § 8.3).
@@ -2457,7 +2802,41 @@ const APP_SCOPE_READ_SQL = `
   SELECT scope, shared_at FROM github_apps WHERE id = ? AND deleted_at IS NULL`;
 
 const REVIEW_BOT_SCOPE_READ_SQL = `
-  SELECT scope, shared_at, workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
+  SELECT scope, shared_at, workspace_id, archived_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
+
+/**
+ * The target's state as a BATCH STATEMENT, not a read after it: a guarded write
+ * that changed nothing cannot say why, and re-reading afterwards is unsound —
+ * an archive followed by a restore would report `ok` for a write that never
+ * happened. `present` separates a DELETED target (the caller's own missing-row
+ * answer) from an ARCHIVED one, which is a refusal.
+ */
+const LIVENESS_PROBE_SQL = `
+  SELECT EXISTS (SELECT 1 FROM review_bots b
+                  WHERE b.id = ? AND b.deleted_at IS NULL AND b.archived_at IS NULL) AS live,
+         EXISTS (SELECT 1 FROM review_bots b WHERE b.id = ? AND b.deleted_at IS NULL) AS present`;
+
+/** The App's probe on the same rule (`github_apps` has no archive state). */
+const APP_LIVENESS_PROBE_SQL = `
+  SELECT EXISTS (SELECT 1 FROM github_apps b WHERE b.id = ? AND b.deleted_at IS NULL) AS live,
+         EXISTS (SELECT 1 FROM github_apps b WHERE b.id = ? AND b.deleted_at IS NULL) AS present`;
+
+/** One probe row: `live` = writable now, `present` = the row exists at all. */
+type LivenessRow = { live: number; present: number };
+
+/**
+ * The probe's three states — the ONE mapping every guarded write reads:
+ * `live` proceeds, `archived` is a refusal, `gone` is an absent target (a
+ * deleted row or one that never existed). A refusal that cannot tell them
+ * apart reports `archived` for a DELETED target, which is a different answer.
+ */
+export type TargetState = "live" | "archived" | "gone";
+
+export function targetStateOf(result: { results: unknown[] } | undefined): TargetState {
+  const [row] = (result?.results ?? []) as LivenessRow[];
+  if (row === undefined || row.present !== 1) return "gone";
+  return row.live === 1 ? "live" : "archived";
+}
 
 const BOT_SCOPE_LIST_SQL = `
   SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at,
@@ -2541,12 +2920,12 @@ const REVIEW_BOT_SCOPE_SHARE_AUDIT_SQL = `
            'after', json_object('scope', 'shared', 'shared_at', ?4)),
          ?5
    WHERE EXISTS (SELECT 1 FROM review_bots b
-                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'shared'
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.archived_at IS NULL AND b.scope <> 'shared'
                     AND ${botOfficialWorkspaceGuardSql.replace("review_bots.workspace_id", "b.workspace_id")})`;
 
 const REVIEW_BOT_SCOPE_SHARE_SQL = `
   UPDATE review_bots SET scope = 'shared', shared_at = ?2
-   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'shared'
+   WHERE id = ?1 AND deleted_at IS NULL AND archived_at IS NULL AND scope <> 'shared'
      AND ${botOfficialWorkspaceGuardSql}`;
 
 const REVIEW_BOT_SCOPE_UNSHARE_AUDIT_SQL = `
@@ -2559,11 +2938,11 @@ const REVIEW_BOT_SCOPE_UNSHARE_AUDIT_SQL = `
            'after', json_object('scope', 'owned', 'shared_at', NULL)),
          ?4
    WHERE EXISTS (SELECT 1 FROM review_bots b
-                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'owned')`;
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.archived_at IS NULL AND b.scope <> 'owned')`;
 
 const REVIEW_BOT_SCOPE_UNSHARE_SQL = `
   UPDATE review_bots SET scope = 'owned', shared_at = NULL
-   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'owned'`;
+   WHERE id = ?1 AND deleted_at IS NULL AND archived_at IS NULL AND scope <> 'owned'`;
 
 /**
  * The shared transition engine behind both share switches. A same-value
@@ -2578,6 +2957,8 @@ async function scopeTransition(
   input: { id: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
   sql: {
     read: string;
+    /** The in-batch liveness proof: `live` = 1 only while the target accepts a write. */
+    probe: string;
     shareAudit: string;
     share: string;
     unshareAudit: string;
@@ -2588,22 +2969,34 @@ async function scopeTransition(
   const current = await db
     .prepare(sql.read)
     .bind(id)
-    .first<{ scope: BotScope; shared_at: string | null }>();
+    .first<{ scope: BotScope; shared_at: string | null; archived_at?: string | null }>();
   if (!current) return { outcome: "bot_not_found" };
+  if (current.archived_at != null) return { outcome: "archived" };
   if (current.scope === scope) return { outcome: "ok", scope, sharedAt: current.shared_at };
   if (scope === "owned" && input.confirm !== true) return { outcome: "confirm_required" };
 
-  const [, write] =
+  // The liveness probe rides the batch, so `archived` is the state the write
+  // saw: an archive followed by a restore before a later read would otherwise
+  // report a refusal as anything but what it was.
+  const [probed, , write] =
     scope === "shared"
       ? await db.batch([
+          db.prepare(sql.probe).bind(id, id),
           db.prepare(sql.shareAudit).bind(crypto.randomUUID(), actor, id, now, now),
           db.prepare(sql.share).bind(id, now),
         ])
       : await db.batch([
+          db.prepare(sql.probe).bind(id, id),
           db.prepare(sql.unshareAudit).bind(crypto.randomUUID(), actor, id, now),
           db.prepare(sql.unshare).bind(id),
         ]);
 
+  // The batch's own probe decides: a target DELETED before it is an absent
+  // target, not an archived one, and the post-batch read cannot tell them
+  // apart (a restore between the two makes a refused write look live).
+  const state = targetStateOf(probed);
+  if (state === "gone") return { outcome: "bot_not_found" };
+  if (state === "archived") return { outcome: "archived" };
   if ((write?.meta.changes ?? 0) > 0) {
     return { outcome: "ok", scope, sharedAt: scope === "shared" ? now : null };
   }
@@ -2611,8 +3004,11 @@ async function scopeTransition(
   const persisted = await db
     .prepare(sql.read)
     .bind(id)
-    .first<{ scope: BotScope; shared_at: string | null }>();
+    .first<{ scope: BotScope; shared_at: string | null; archived_at?: string | null }>();
   if (persisted === null) return { outcome: "bot_not_found" };
+  // The probe already proved the row live when the batch ran, so the remaining
+  // causes are a same-value transition that raced this one, or a guard the
+  // statement itself refuses (a non-official workspace's share).
   if (persisted.scope === scope) return { outcome: "ok", scope, sharedAt: persisted.shared_at };
   return { outcome: "outside_official_workspace" };
 }
@@ -2631,6 +3027,7 @@ export async function setAppScope(
     { ...input, id: input.appId },
     {
       read: APP_SCOPE_READ_SQL,
+      probe: APP_LIVENESS_PROBE_SQL,
       shareAudit: APP_SCOPE_SHARE_AUDIT_SQL,
       share: APP_SCOPE_SHARE_SQL,
       unshareAudit: APP_SCOPE_UNSHARE_AUDIT_SQL,
@@ -2668,11 +3065,14 @@ export async function setReviewBotScope(
   if (input.authority.role !== "owner" && input.authority.role !== "admin") {
     return { outcome: "forbidden" };
   }
+  // The archive flag is read AND enforced inside `scopeTransition`: its read
+  // carries `archived_at`, and both share statements carry `archived_at IS NULL`.
   return scopeTransition(
     db,
     { ...input, id: input.botId },
     {
       read: REVIEW_BOT_SCOPE_READ_SQL,
+      probe: LIVENESS_PROBE_SQL,
       shareAudit: REVIEW_BOT_SCOPE_SHARE_AUDIT_SQL,
       share: REVIEW_BOT_SCOPE_SHARE_SQL,
       unshareAudit: REVIEW_BOT_SCOPE_UNSHARE_AUDIT_SQL,
@@ -2682,21 +3082,179 @@ export async function setReviewBotScope(
 }
 
 /**
+ * The authorization every bot face-write shares: the row must be live, belong
+ * to the AUTHORIZING workspace, and the role must be owner or admin. Read here,
+ * inside the store, so a caller that bypasses the route cannot write either.
+ */
+async function botWriteAuthority(
+  db: AppsStoreD1,
+  botId: string,
+  authority: { workspaceId: string; role: WorkspaceRole },
+  mode: "active" | "archive" = "active",
+): Promise<BotWriteOutcome> {
+  const owner = await db
+    .prepare(`SELECT workspace_id, archived_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+    .bind(botId)
+    .first<{ workspace_id: string; archived_at: string | null }>();
+  if (owner === null) return "bot_not_found";
+  if (owner.workspace_id !== authority.workspaceId) return "forbidden";
+  if (authority.role !== "owner" && authority.role !== "admin") return "forbidden";
+  // An archived bot takes no configuration writes; flipping the flag itself is
+  // the one transition it accepts.
+  if (mode === "active" && owner.archived_at !== null) return "archived";
+  return "ok";
+}
+
+/**
+ * One bot face-write statement: only the columns the caller carries, plus
+ * `updated_at`. `sets` is built from fixed literals in this file, never from
+ * request input, so a column name cannot be injected; omitting a column in a
+ * partial body leaves whatever another manager wrote to it in between.
+ */
+async function writeBotFace(
+  db: AppsStoreD1,
+  botId: string,
+  now: string,
+  sets: string[],
+  values: unknown[],
+): Promise<boolean> {
+  // `archived_at IS NULL` rides the UPDATE itself: an archive that lands
+  // between the authority read and this statement leaves zero rows changed, so
+  // the caller reports `archived` instead of silently writing a locked bot.
+  const res = await db
+    .prepare(
+      `UPDATE review_bots SET ${sets.join(", ")}, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`,
+    )
+    .bind(...values, now, botId)
+    .run();
+  return res.meta.changes > 0;
+}
+
+/**
+ * The bot's profile face. An omitted `name` or `description` is untouched; an
+ * explicit `null` description clears it.
+ */
+export async function updateBotProfile(
+  db: AppsStoreD1,
+  input: {
+    botId: string;
+    name?: string;
+    description?: string | null;
+    authority: { workspaceId: string; role: WorkspaceRole };
+    now: string;
+  },
+): Promise<BotWriteOutcome> {
+  const gate = await botWriteAuthority(db, input.botId, input.authority);
+  if (gate !== "ok") return gate;
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (input.name !== undefined) {
+    const name = input.name.trim();
+    if (name.length === 0) return "invalid";
+    sets.push("name = ?");
+    values.push(name);
+  }
+  if (input.description !== undefined) {
+    sets.push("description = ?");
+    values.push(input.description);
+  }
+  if (sets.length === 0) return "invalid";
+  return (await writeBotFace(db, input.botId, input.now, sets, values)) ? "ok" : "archived";
+}
+
+/**
+ * The bot's price face: `multiplier` (> 0) and `monthly_rp` (NULL = no bot-level
+ * ceiling). Each is written only when carried, so a multiplier-only edit never
+ * restores or clears a ceiling another manager set at the same time.
+ *
+ * Both bounds come from `contracts/rp-limits` — the SAME domain the SPA parser
+ * and the mounted-chain reader apply. A ceiling outside it would persist and
+ * then make the whole App read fail to parse, and an unbounded multiplier would
+ * price a review into a number no ceiling can be compared against.
+ */
+export async function updateBotPricing(
+  db: AppsStoreD1,
+  input: {
+    botId: string;
+    multiplier?: number;
+    monthlyRp?: number | null;
+    authority: { workspaceId: string; role: WorkspaceRole };
+    now: string;
+  },
+): Promise<BotWriteOutcome> {
+  const gate = await botWriteAuthority(db, input.botId, input.authority);
+  if (gate !== "ok") return gate;
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (input.multiplier !== undefined) {
+    if (!isBotMultiplier(input.multiplier)) return "invalid";
+    sets.push("multiplier = ?");
+    values.push(input.multiplier);
+  }
+  if (input.monthlyRp !== undefined) {
+    if (input.monthlyRp !== null && !isRpCeiling(input.monthlyRp)) {
+      return "invalid";
+    }
+    sets.push("monthly_rp = ?");
+    values.push(input.monthlyRp);
+  }
+  if (sets.length === 0) return "invalid";
+  return (await writeBotFace(db, input.botId, input.now, sets, values)) ? "ok" : "archived";
+}
+
+/**
+ * Archive (`archived_at = now`) or restore (`NULL`). Archiving keeps the row
+ * listed and auditable; the relay's chain read is what stops selecting it.
+ */
+export async function setBotArchived(
+  db: AppsStoreD1,
+  input: {
+    botId: string;
+    archived: boolean;
+    authority: { workspaceId: string; role: WorkspaceRole };
+    now: string;
+  },
+): Promise<BotWriteOutcome> {
+  const gate = await botWriteAuthority(db, input.botId, input.authority, "archive");
+  if (gate !== "ok") return gate;
+  await db
+    .prepare(
+      `UPDATE review_bots SET archived_at = ?, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .bind(input.archived ? input.now : null, input.now, input.botId)
+    .run();
+  return "ok";
+}
+
+/**
  * Every live bot with its scope and the columns only the console needs
  * (workspace name, the official-workspace flag, live installation and target
  * counts) — name-ordered, one statement.
  */
-/** F12: the owner workspace a bot write is authorized against — the store is
- * the only reader of `review_bots`, so this lookup lives here too. */
+/**
+ * F12: what a bot write is authorized against — the owning workspace and the
+ * archive flag — read in ONE statement. `review_bots` has one reader module,
+ * so this lookup lives here.
+ */
+export async function readBotWriteTarget(
+  db: AppsStoreD1,
+  botId: string,
+): Promise<{ workspaceId: string; archived: boolean } | null> {
+  const row = await db
+    .prepare(`SELECT workspace_id, archived_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+    .bind(botId)
+    .first<{ workspace_id: string; archived_at: string | null }>();
+  return row === null ? null : { workspaceId: row.workspace_id, archived: row.archived_at !== null };
+}
+
+/** The owning workspace alone, for callers that do not write configuration. */
 export async function readBotOwnerWorkspace(
   db: AppsStoreD1,
   botId: string,
 ): Promise<string | null> {
-  const row = await db
-    .prepare(`SELECT workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
-    .bind(botId)
-    .first<{ workspace_id: string }>();
-  return row?.workspace_id ?? null;
+  return (await readBotWriteTarget(db, botId))?.workspaceId ?? null;
 }
 
 export async function listBotScopes(db: AppsStoreD1): Promise<BotScopeRow[]> {

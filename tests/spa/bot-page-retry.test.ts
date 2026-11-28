@@ -24,6 +24,7 @@ const BOOT: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
 const BOT_PAYLOAD = {
   can_manage: true,
   owned: true,
+  archived: false,
   app: {
     github_app_id: null,
     id: "bot-1",
@@ -56,6 +57,7 @@ const BOT_PAYLOAD = {
     provider_workspace: "Acme",
     month_used_rp: 0,
     plan_monthly_rp: null,
+    effective_ceiling: null,
     default_chain: null,
     mounted_apps: [],
   },
@@ -76,15 +78,19 @@ async function click(win: FixtureWindow, node: DomElement | null): Promise<void>
 }
 
 describe("F14 — BotDetailPage keeps a models failure visible and retries it", () => {
-  test("failure renders the editor error while the page still renders; retry re-reads and succeeds", async () => {
+  test("the retry re-reads ONLY the options: unsaved drafts and chain rows survive, no second bot GET", async () => {
     const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
     const realFetch = globalThis.fetch;
     let modelsCalls = 0;
+    let botGets = 0;
     let modelsShouldFail = true;
     globalThis.fetch = (async (input: unknown) => {
       const url = String(input);
-      if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(BOT_PAYLOAD);
-      if (url.endsWith("/api/models")) {
+      if (url.includes("/api/review-bots/bot-1/bot")) {
+        botGets += 1;
+        return Response.json(BOT_PAYLOAD);
+      }
+      if (url.endsWith("/api/review-bots/bot-1/models")) {
         modelsCalls += 1;
         return modelsShouldFail
           ? new Response("unavailable", { status: 503 })
@@ -104,7 +110,7 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
       //    models read failed — the failure is not fatal to the page.
       expect(container.textContent).toContain("Team bot");
       // The rest of the page rendered: the overview's own facts are present.
-      expect(container.textContent).toContain(t("en", "bots.fieldProvider"));
+      expect(container.textContent).toContain(t("en", "botDetail.usage.source"));
       expect(container.textContent).toContain("Acme");
 
       // 2. THE FAILURE IS VISIBLE on the editor, with its retry affordance —
@@ -116,7 +122,22 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
       expect(retry).toBeDefined();
       const callsBeforeRetry = modelsCalls;
 
-      // 3. RETRY RE-READS and, this time, succeeds: the error clears.
+      // 2b. TYPE A DRAFT into the identity editor — the retry must not discard it.
+      const nameInput = container.querySelector('input[aria-label]');
+      expect(nameInput).not.toBeNull();
+      const inputEl = nameInput as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+      const proto = Object.getPrototypeOf(nameInput) as object;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      setter?.call(nameInput, "Renamed in progress");
+      inputEl.dispatchEvent(new win.Event("input", { bubbles: true }));
+      await act(async () => {});
+      expect((container.querySelector('input[aria-label]') as unknown as { value: string }).value).toBe(
+        "Renamed in progress",
+      );
+      const botGetsBefore = botGets;
+
+      // 3. RETRY RE-READS THE OPTIONS ONLY and, this time, succeeds: the error
+      //    clears, the DRAFT SURVIVES, and the bot payload is not re-read.
       modelsShouldFail = false;
       if (retry !== undefined) {
         // happy-dom's element type differs nominally from the DOM's; the node
@@ -128,6 +149,11 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
       expect(modelsCalls).toBeGreaterThan(callsBeforeRetry);
       expect(container.textContent).not.toContain(t("en", "bots.modelsFailed"));
       expect(container.textContent).toContain("Team bot");
+      // THE CONTRACT: no second bot GET, and the typed draft survived the retry.
+      expect(botGets).toBe(botGetsBefore);
+      expect((container.querySelector('input[aria-label]') as unknown as { value: string }).value).toBe(
+        "Renamed in progress",
+      );
     } finally {
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;
@@ -141,7 +167,7 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
     globalThis.fetch = (async (input: unknown) => {
       const url = String(input);
       if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(BOT_PAYLOAD);
-      if (url.endsWith("/api/models")) return Response.json({ groups: "nope" });
+      if (url.endsWith("/api/review-bots/bot-1/models")) return Response.json({ groups: "nope" });
       return new Response("not found", { status: 404 });
     }) as unknown as typeof fetch;
 
@@ -157,6 +183,70 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;
       cleanup();
+    }
+  });
+});
+
+/**
+ * QC F3-3: the bot payload is the page. A held `/api/models` must not delay the
+ * overview, and only the editable owner face ever issues that read at all.
+ */
+describe("QC F3-3 — options never gate the page", () => {
+  async function mountHeld(payload: Record<string, unknown>) {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
+    const realFetch = globalThis.fetch;
+    let modelsCalls = 0;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(payload);
+      if (url.endsWith("/api/review-bots/bot-1/models")) {
+        modelsCalls += 1;
+        // Held forever: a pending options read must leave the page usable.
+        return new Promise<Response>(() => {});
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => root.render(createElement(BotDetailPage, { boot: BOOT, botId: "bot-1" })));
+    for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+    return {
+      container,
+      modelsCalls: () => modelsCalls,
+      text: () => container.textContent ?? "",
+      async close() {
+        await act(async () => root.unmount());
+        globalThis.fetch = realFetch;
+        cleanup();
+      },
+    };
+  }
+
+  test("the consumer overview renders while the options read is still pending, and never issues it", async () => {
+    const page = await mountHeld({ ...BOT_PAYLOAD, can_manage: false, owned: false });
+    try {
+      // Rendered from the bot payload alone.
+      expect(page.text()).toContain("Team bot");
+      expect(page.text()).toContain(t("en", "botDetail.usage.source"));
+      expect(page.container.querySelector('[role="tablist"]')).toBeNull();
+      // The consumer face has no options to show, so it asks for none.
+      expect(page.modelsCalls()).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  test("the owner page is usable while the options read is pending, and shows the editor's own loading state", async () => {
+    const page = await mountHeld(BOT_PAYLOAD);
+    try {
+      expect(page.text()).toContain("Team bot");
+      expect(page.text()).toContain(t("en", "botDetail.usage.source"));
+      expect(page.modelsCalls()).toBe(1);
+      // The only thing pending is the chain editor's option list.
+      expect(page.text()).toContain(t("en", "settings.modelChains"));
+    } finally {
+      await page.close();
     }
   });
 });

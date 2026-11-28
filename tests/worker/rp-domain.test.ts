@@ -1,0 +1,681 @@
+/**
+ * QC F2-7: ONE RP domain for writers and readers.
+ *
+ * A ceiling the writer accepts but a parser refuses turns a whole mounted App
+ * read into a load error; a multiplier with no accounting bound prices a review
+ * into a number no stored ceiling can be compared against. Both bounds live in
+ * `contracts/rp-limits`, and these cases pin each surface to it: the write, the
+ * parse, the price and the SPA guard.
+ */
+import { describe, expect, test } from "bun:test";
+import worker from "../../src/worker/index";
+import { updateBotPricing } from "../../src/dashboard/apps-store";
+import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
+import {
+  BOT_MULTIPLIER_MAX,
+  BOT_MULTIPLIER_MIN,
+  CHAIN_MULTIPLIER_MAX,
+  QUOTA_BASE_MAX,
+  RP_CEILING_MAX,
+  isBotMultiplier,
+  isRpCeiling,
+  isServedChainProduct,
+  isStoredBotMultiplier,
+  isStoredRpCeiling,
+} from "../../src/contracts/rp-limits";
+import { parseQuotaNumbers } from "../../src/admin/quota-versions";
+import { rpFor, type QuotaProfile } from "../../src/store/quota-store";
+import { parseApps, parseBotSettings, type AppsPayload } from "../../src/spa/pages/data";
+import { createMigratedTestD1, seedBot, type TestD1 } from "../store/helpers";
+import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
+import type { Env } from "../../src/worker/env";
+
+const SESSION_SECRET = ["test", "rp", "domain", "session", "secret", "32b"].join("-");
+const TEST_KEY = Buffer.alloc(32, 3).toString("base64");
+const OFFICIAL = "default";
+const OTHER = "ws-consumer";
+const BOT_ROW = "bot-priced";
+const GITHUB_APP_ID = 8401;
+const NOW = "2026-11-01T00:00:00.000Z";
+
+let db: TestD1;
+
+function envFor(): Env {
+  return {
+    REVIEW_QUEUE: { send: async () => {} },
+    IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
+    GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
+    GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
+    DASHBOARD_SESSION_SECRET: SESSION_SECRET,
+    DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
+    DEPLOYMENT_MODE: "self-hosted",
+    DB: db,
+  } as unknown as Env;
+}
+
+function world(): void {
+  db = createMigratedTestD1();
+  db.raw.prepare("INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, 'member', ?, NULL)").run(
+    crypto.randomUUID(),
+    "dana",
+    NOW,
+  );
+  db.raw
+    .prepare(
+      "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) SELECT ?, id, 'owner', ? FROM users WHERE github_login = 'dana'",
+    )
+    .run(OFFICIAL, NOW);
+  db.raw.prepare("INSERT INTO workspaces (id, slug, name, created_by, created_at) VALUES (?, ?, ?, NULL, ?)").run(
+    OTHER,
+    OTHER,
+    OTHER,
+    NOW,
+  );
+  seedBot(db, BOT_ROW, GITHUB_APP_ID, { workspaceId: OFFICIAL });
+  db.raw.prepare("UPDATE review_bots SET scope = 'shared', shared_at = ? WHERE id = ?").run(NOW, BOT_ROW);
+}
+
+async function patchPricing(body: unknown, botId = BOT_ROW): Promise<Response> {
+  const session = await createSessionValue("dana", null, SESSION_SECRET);
+  return worker.fetch(
+    new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${botId}/pricing`, {
+      method: "PATCH",
+      headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    envFor(),
+  );
+}
+
+const storedPricing = (): { multiplier: number; monthly_rp: number | null } =>
+  db.raw
+    .query("SELECT multiplier, monthly_rp FROM review_bots WHERE id = ?")
+    .get(BOT_ROW) as { multiplier: number; monthly_rp: number | null };
+
+describe("the shared RP domain", () => {
+  test("the ceiling must be a positive safe integer inside the domain", () => {
+    expect(isRpCeiling(1)).toBe(true);
+    expect(isRpCeiling(RP_CEILING_MAX)).toBe(true);
+    expect(isRpCeiling(RP_CEILING_MAX + 1)).toBe(false);
+    // Past 2^53 the value is no longer the number it printed as, so it can
+    // neither be compared against nor rendered faithfully.
+    expect(isRpCeiling(Number.MAX_SAFE_INTEGER + 2)).toBe(false);
+    expect(isRpCeiling(0)).toBe(false);
+    expect(isRpCeiling(1.5)).toBe(false);
+  });
+
+  test("the multiplier is finite, floored and bounded so its price stays representable", () => {
+    // The floor keeps a chain's product of legal factors strictly positive: two
+    // legacy legal values (1e-200 each) multiply to 0, which the chain parser
+    // refuses. 0.01 costs no price anyone could mean — `rpFor` floors at 1 RP.
+    expect(isBotMultiplier(BOT_MULTIPLIER_MIN)).toBe(true);
+    expect(isBotMultiplier(BOT_MULTIPLIER_MIN / 10)).toBe(false);
+    expect(isBotMultiplier(1e-200)).toBe(false);
+    expect(isBotMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isBotMultiplier(BOT_MULTIPLIER_MAX + 1)).toBe(false);
+    expect(isBotMultiplier(Number.POSITIVE_INFINITY)).toBe(false);
+    expect(isBotMultiplier(0)).toBe(false);
+    expect(isBotMultiplier(-1)).toBe(false);
+  });
+
+  test("a STORED multiplier keeps the wider read domain, so a legacy row still renders", () => {
+    // Written before either bound existed; its product is still positive on its
+    // own and `rpFor` prices it, so refusing it would be a load error for data
+    // nobody migrated. The WRITE bound is not re-applied to a stored row.
+    expect(isStoredBotMultiplier(1e-200)).toBe(true);
+    expect(isStoredBotMultiplier(0.001)).toBe(true);
+    expect(isStoredBotMultiplier(BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isStoredBotMultiplier(BOT_MULTIPLIER_MAX + 1)).toBe(true);
+    expect(isStoredBotMultiplier(1e300)).toBe(true);
+    expect(isStoredBotMultiplier(0)).toBe(false);
+    expect(isStoredBotMultiplier(Number.NaN)).toBe(false);
+    expect(isStoredBotMultiplier(Number.POSITIVE_INFINITY)).toBe(false);
+  });
+
+  test("a STORED ceiling is any positive safe integer — the write bound is not re-applied", () => {
+    expect(isStoredRpCeiling(1)).toBe(true);
+    // The value that used to make the whole Bots directory unloadable: legal as a
+    // stored override, one past what a NEW write may carry.
+    expect(isStoredRpCeiling(RP_CEILING_MAX + 1)).toBe(true);
+    expect(isStoredRpCeiling(Number.MAX_SAFE_INTEGER)).toBe(true);
+    // Only what no reader can represent fails.
+    expect(isStoredRpCeiling(0)).toBe(false);
+    expect(isStoredRpCeiling(-1)).toBe(false);
+    expect(isStoredRpCeiling(1.5)).toBe(false);
+    expect(isStoredRpCeiling(Number.MAX_SAFE_INTEGER + 2)).toBe(false);
+    expect(isStoredRpCeiling(Number.POSITIVE_INFINITY)).toBe(false);
+  });
+
+  // The Apps list serves `month.multiplier` as the PRODUCT of the mounted
+  // chain. The READ domain is any positive finite product: a legal price edit on
+  // one mounted bot, or removing a factor below 1, lifts an admitted product past
+  // the write bound, and refusing that would make a legal write fail the list.
+  test("a served chain product parses whenever it is positive and finite", () => {
+    expect(isServedChainProduct(BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isServedChainProduct(BOT_MULTIPLIER_MAX * BOT_MULTIPLIER_MAX)).toBe(true);
+    expect(isServedChainProduct(CHAIN_MULTIPLIER_MAX)).toBe(true);
+    // Past the WRITE bound is still readable: these are exactly the products a
+    // price edit or a sub-1 removal creates from an admitted chain.
+    expect(isServedChainProduct(CHAIN_MULTIPLIER_MAX + 1)).toBe(true);
+    expect(isServedChainProduct(10_000_000)).toBe(true);
+    expect(isServedChainProduct(1e-200)).toBe(true);
+    expect(isServedChainProduct(Number.POSITIVE_INFINITY)).toBe(false);
+    expect(isServedChainProduct(Number.NaN)).toBe(false);
+    expect(isServedChainProduct(0)).toBe(false);
+    expect(isServedChainProduct(-1)).toBe(false);
+    // Two factors each written before the floor underflow to 0: that product is
+    // outside the read domain exactly like a negative one.
+    expect(1e-200 * 1e-200).toBe(0);
+    expect(isServedChainProduct(1e-200 * 1e-200)).toBe(false);
+    // The WRITE bound is exactly "no storable ceiling could cover one review".
+    expect(isRpCeiling(CHAIN_MULTIPLIER_MAX * 300)).toBe(true);
+    expect(CHAIN_MULTIPLIER_MAX * 300 <= RP_CEILING_MAX).toBe(true);
+  });
+});
+
+describe("the pricing writer refuses what the reader cannot parse", () => {
+  const authority = { workspaceId: OFFICIAL, role: "owner" as const };
+
+  test("a NEW quota version still refuses a base weight past the write bound", () => {
+    const candidate = (deep: number) => ({ base: { quick: 1, default: 2, deep }, rpPerCredit: 1000 });
+    expect(parseQuotaNumbers(candidate(QUOTA_BASE_MAX)).ok).toBe(true);
+    // The charge accepts a legacy 400; publishing a NEW one is still refused.
+    expect(parseQuotaNumbers(candidate(QUOTA_BASE_MAX + 1)).ok).toBe(false);
+  });
+
+  test("an unsafe ceiling integer is refused at the write and persists nothing", async () => {
+    world();
+    db.raw.prepare("UPDATE review_bots SET monthly_rp = 1000 WHERE id = ?").run(BOT_ROW);
+    const unsafe = Number.MAX_SAFE_INTEGER + 2;
+    expect(await updateBotPricing(db, { botId: BOT_ROW, monthlyRp: unsafe, authority, now: NOW })).toBe("invalid");
+    expect(storedPricing().monthly_rp).toBe(1000);
+  });
+
+  test("a ceiling past the domain's ceiling is refused at the write", async () => {
+    world();
+    db.raw.prepare("UPDATE review_bots SET monthly_rp = 1000 WHERE id = ?").run(BOT_ROW);
+    expect(
+      await updateBotPricing(db, { botId: BOT_ROW, monthlyRp: RP_CEILING_MAX + 1, authority, now: NOW }),
+    ).toBe("invalid");
+    expect(storedPricing().monthly_rp).toBe(1000);
+  });
+
+  test("a multiplier above the bound is refused at the write", async () => {
+    world();
+    db.raw.prepare("UPDATE review_bots SET multiplier = 1 WHERE id = ?").run(BOT_ROW);
+    expect(
+      await updateBotPricing(db, { botId: BOT_ROW, multiplier: BOT_MULTIPLIER_MAX + 1, authority, now: NOW }),
+    ).toBe("invalid");
+    expect(storedPricing().multiplier).toBe(1);
+  });
+
+  test("a multiplier below the floor is refused at the write, and a below-floor row still reads", async () => {
+    world();
+    db.raw.prepare("UPDATE review_bots SET multiplier = 1 WHERE id = ?").run(BOT_ROW);
+    // Below the floor: two of these would underflow the chain product to 0.
+    expect(
+      await updateBotPricing(db, { botId: BOT_ROW, multiplier: BOT_MULTIPLIER_MIN / 10, authority, now: NOW }),
+    ).toBe("invalid");
+    expect(await updateBotPricing(db, { botId: BOT_ROW, multiplier: 1e-200, authority, now: NOW })).toBe("invalid");
+    expect(storedPricing().multiplier).toBe(1);
+    // A row already holding one (written before the floor) is NOT re-validated on
+    // read: the page it feeds still parses.
+    db.raw.prepare("UPDATE review_bots SET multiplier = ? WHERE id = ?").run(1e-200, BOT_ROW);
+    expect(storedPricing().multiplier).toBe(1e-200);
+  });
+
+  test("the route answers 400 for both, so the SPA sees the same refusal", async () => {
+    world();
+    const unsafe = await patchPricing({ monthly_rp: Number.MAX_SAFE_INTEGER + 2 });
+    expect(unsafe.status).toBe(400);
+    const multiplier = await patchPricing({ multiplier: BOT_MULTIPLIER_MAX + 1 });
+    expect(multiplier.status).toBe(400);
+    const belowFloor = await patchPricing({ multiplier: BOT_MULTIPLIER_MIN / 10 });
+    expect(belowFloor.status).toBe(400);
+    const maxValid = await patchPricing({ monthly_rp: RP_CEILING_MAX, multiplier: BOT_MULTIPLIER_MAX });
+    expect(maxValid.status).toBe(200);
+    expect(storedPricing()).toEqual({ multiplier: BOT_MULTIPLIER_MAX, monthly_rp: RP_CEILING_MAX });
+  });
+});
+
+describe("the price calculation fails closed", () => {
+  const profile: QuotaProfile = {
+    id: "quota-v2-large-base",
+    version: 2,
+    effectiveFrom: NOW,
+    base: { quick: 50, default: 100, deep: 300 },
+    rpPerCredit: 1000,
+  };
+
+  test("a max-valid multiplier prices representably", () => {
+    const rp = rpFor("deep", BOT_MULTIPLIER_MAX, profile);
+    expect(rp).toBe(300 * BOT_MULTIPLIER_MAX);
+    expect(isRpCeiling(rp!)).toBe(true);
+  });
+
+  test("an unrepresentable product answers null instead of a number no ceiling can bound", () => {
+    expect(rpFor("deep", Number.POSITIVE_INFINITY, profile)).toBeNull();
+    expect(rpFor("deep", RP_CEILING_MAX, profile)).toBeNull();
+  });
+});
+
+describe("the SPA parser applies the same domain", () => {
+  const chainRow = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    position: 1,
+    bot_id: "bot-1",
+    name: "Priced",
+    description: null,
+    provider_workspace: "Default",
+    owned: false,
+    available: true,
+    multiplier: 1,
+    month_used_rp: 0,
+    effective_monthly_rp: 1000,
+    archived: false,
+    default_chain: "anthropic/claude",
+    runtime: "omp",
+    ...overrides,
+  });
+
+  const appsPayload = (row: Record<string, unknown>): Record<string, unknown> => ({
+    viewer: { login: "dana", role: "admin" },
+    // The list's plan fact: `parseApps` fails an absence without `quota_error`,
+    // so a fixture that omits it describes no payload the route can serve.
+    month_plan_rp: null,
+    apps: [
+      {
+        github_app_id: 1,
+        owned: true,
+        installed: true,
+        month: null,
+        github_slug: "demo",
+        github_name: "Demo",
+        github_avatar_url: null,
+        status: "active",
+        review_enabled: 1,
+        created_by: "dana",
+        health: { latest: null, rejected24h: 0 },
+        chain: [row],
+      },
+    ],
+    shared_bots: [],
+    pending_installations: [],
+  });
+
+  test("a stored ceiling past the WRITE bound parses; only an unrepresentable one fails", () => {
+    const parsed = parseApps(appsPayload(chainRow()));
+    expect(parsed).not.toBeNull();
+    expect((parsed as AppsPayload).apps[0]?.chain?.[0]?.effective_monthly_rp).toBe(1000);
+
+    // A stored legacy override: the writer refuses this for a NEW row, and the
+    // list must still open on one that already exists.
+    expect(parseApps(appsPayload(chainRow({ effective_monthly_rp: RP_CEILING_MAX + 1 })))).not.toBeNull();
+    // Past 2^53 the value is no longer the number it printed as.
+    expect(parseApps(appsPayload(chainRow({ effective_monthly_rp: Number.MAX_SAFE_INTEGER + 2 })))).toBeNull();
+  });
+
+  test("a stored multiplier past the single-bot bound parses — the write cap is the writer's", () => {
+    expect(parseApps(appsPayload(chainRow()))).not.toBeNull();
+    expect(parseApps(appsPayload(chainRow({ multiplier: BOT_MULTIPLIER_MAX + 1 })))).not.toBeNull();
+  });
+
+  // A row priced before the writer floor existed is a STORED value, not a
+  // write: it parses (its own product is positive, and `rpFor` prices it at the
+  // 1-RP floor). Only the chain product reaching 0 is refused, and the store
+  // refuses that at the write.
+  test("a below-floor stored multiplier still parses on both faces", () => {
+    expect(isBotMultiplier(1e-200)).toBe(false);
+    expect(parseApps(appsPayload(chainRow({ multiplier: 1e-200 })))).not.toBeNull();
+  });
+
+  // The wire fact: `month.multiplier` is the chain's PRODUCT. Two 100× bots —
+  // each a legal stored value — make 10,000, which the single-bot bound refuses.
+  // End to end on the real list route: the payload the server actually serves
+  // for two mounted 100× bots must parse. This is the regression the guard
+  // exists for — the aggregate is a product, and the single-bot bound refused it.
+  test("a two-bot 100× chain serves month.multiplier 10,000 and parses", async () => {
+    world();
+    const partner = "bot-partner";
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+         VALUES (?, ?, ?, 100, 'shared', ?, ?)`,
+      )
+      .run(partner, OFFICIAL, partner, NOW, NOW);
+    db.raw.prepare("UPDATE review_bots SET multiplier = 100 WHERE id = ?").run(BOT_ROW);
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    db.raw
+      .prepare(
+        `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES (?, ?, 1, ?), (?, ?, 2, ?)`,
+      )
+      .run(BOT_ROW, OFFICIAL, BOT_ROW, BOT_ROW, OFFICIAL, partner);
+
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      apps: Array<{ github_app_id: number; month: { multiplier: number } | null }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!;
+    expect(row.month?.multiplier).toBe(100 * 100);
+    // And the guard the SPA applies accepts the payload the server sends.
+    expect(parseApps(body)).not.toBeNull();
+  });
+
+  // A reorder mounts no new id, so the write guard never runs and the factors
+  // arrive in whatever order the operator put them. 103 `1000×` factors ahead of
+  // the sub-1 ones overflow a plain left fold to `Infinity` while the product is
+  // still `10` — the list must serve the finite product, not fail on it.
+  test("a reorder that would overflow a left fold still serves a finite product that parses", async () => {
+    world();
+    const factors = [...Array(103).fill(BOT_MULTIPLIER_MAX), ...Array(154).fill(BOT_MULTIPLIER_MIN)];
+    // The premise: a plain fold over this order is `Infinity`, not the answer.
+    expect(factors.reduce((product, factor) => product * factor, 1)).toBe(Number.POSITIVE_INFINITY);
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    factors.forEach((factor, index) => {
+      const id = `bot-reorder-${index}`;
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, factor, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      apps: Array<{ github_app_id: number; month: { multiplier: number } | null }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!;
+    // 1000^103 × 0.01^154 = 10^(309-308) = 10.
+    expect(row.month?.multiplier).toBeCloseTo(10, 6);
+    expect(Number.isFinite(row.month?.multiplier)).toBe(true);
+    expect(parseApps(body)).not.toBeNull();
+  });
+
+  // A finite product whose factors are ordered badly for a fold: 1000^106 ×
+  // 0.01^5 = 10^308. Every intermediate of a left fold is `Infinity` here, and
+  // the previous mantissa scheme was refused at its FINAL rescale (mantissa
+  // 8.29e-9 × 2^1050), so a representable chain failed the whole list.
+  test("a chain that overflows every intermediate but whose product fits still serves and parses", async () => {
+    world();
+    const factors = [...Array(106).fill(BOT_MULTIPLIER_MAX), ...Array(5).fill(BOT_MULTIPLIER_MIN)];
+    expect(factors.reduce((product, factor) => product * factor, 1)).toBe(Number.POSITIVE_INFINITY);
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    factors.forEach((factor, index) => {
+      const id = `bot-wide-${index}`;
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, factor, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      apps: Array<{ github_app_id: number; month: { multiplier: number } | null }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!;
+    expect(Number.isFinite(row.month?.multiplier)).toBe(true);
+    expect(row.month!.multiplier).toBeGreaterThan(9e307);
+    expect(parseApps(body)).not.toBeNull();
+  });
+
+  // A reorder mounts no new id, so the write guard never runs: the SAME multiset
+  // must serve the SAME bits whichever order the operator left it in. This pair
+  // is where the previous mantissa scheme disagreed with itself across orders.
+  test("a pure reorder of two factors serves the same value bit-for-bit", async () => {
+    world();
+    const factors = [1e-316, 0.1];
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    factors.forEach((factor, index) => {
+      const id = `bot-order-${index}`;
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, factor, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const served = async (): Promise<number> => {
+      const session = await createSessionValue("dana", null, SESSION_SECRET);
+      const res = await worker.fetch(
+        new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+          headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+        }),
+        envFor(),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        apps: Array<{ github_app_id: number; month: { multiplier: number } | null }>;
+      };
+      return body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!.month!.multiplier;
+    };
+    const forward = await served();
+    // Same multiset, opposite order: swap which factor sits at each position.
+    // `position` itself is unique, so the ROWS stay and only their bot changes.
+    db.raw
+      .prepare(
+        `UPDATE app_install_bots
+            SET bot_id = CASE position WHEN 1 THEN 'bot-order-1' ELSE 'bot-order-0' END
+          WHERE github_app_id = ? AND workspace_id = ?`,
+      )
+      .run(BOT_ROW, OFFICIAL);
+    const reversed = await served();
+    expect(Object.is(forward, reversed)).toBe(true);
+    expect(forward).toBeGreaterThan(0);
+  });
+
+  // The other end: no double holds the product. The route SERVES the row with
+  // `multiplier: null` — the same answer a legal reprice or a sub-1 removal
+  // produces — rather than failing every App in the workspace with a 500.
+  test("a chain whose product no double holds serves a null factor and the list stays readable", async () => {
+    world();
+    const factors = Array(103).fill(BOT_MULTIPLIER_MAX);
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    factors.forEach((factor, index) => {
+      const id = `bot-huge-${index}`;
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, factor, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      apps: Array<{ github_app_id: number; month: { multiplier: number | null } | null }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!;
+    expect(row.month?.multiplier).toBeNull();
+    // The key is REQUIRED and explicitly null, so a reader cannot mistake it for
+    // "no chain" — and the SPA parser accepts the payload instead of failing.
+    expect(row.month).toHaveProperty("multiplier");
+    expect(parseApps(body)).not.toBeNull();
+  });
+
+  // The same state reached by WRITES the route accepts: mount 103 distinct bots
+  // at ×1, then reprice them one at a time to the maximum. Every reprice is a
+  // legal single-bot price (the pricing route never rechecks the chain), and the
+  // last one pushes the product past the double range. The list must stay
+  // readable, with the one affected row stating its factor as unavailable.
+  test("a legal reprice into the double range's end degrades one row, not the list", async () => {
+    world();
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    const ids = Array.from({ length: 103 }, (_, index) => `bot-reprice-${index}`);
+    ids.forEach((id, index) => {
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, 1, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const list = async (): Promise<{ status: number; multiplier: number | null | undefined }> => {
+      const session = await createSessionValue("dana", null, SESSION_SECRET);
+      const res = await worker.fetch(
+        new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+          headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+        }),
+        envFor(),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        apps: Array<{ github_app_id: number; month: { multiplier: number | null } | null }>;
+      };
+      expect(parseApps(body)).not.toBeNull();
+      return { status: res.status, multiplier: body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)?.month?.multiplier };
+    };
+
+    // 102 reprices: 1000^102 ≈ 1e306, still a double the list serves.
+    for (const id of ids.slice(0, 102)) {
+      expect((await patchPricing({ multiplier: BOT_MULTIPLIER_MAX }, id)).status).toBe(200);
+    }
+    const nearLimit = await list();
+    expect(nearLimit.multiplier).toBeGreaterThan(9e305);
+    expect(Number.isFinite(nearLimit.multiplier)).toBe(true);
+
+    // The 103rd legal reprice: 1000^103 is past the double range.
+    expect((await patchPricing({ multiplier: BOT_MULTIPLIER_MAX }, ids[102]!)).status).toBe(200);
+    expect((await list()).multiplier).toBeNull();
+  });
+
+  test("a list row's chain-product multiplier parses past the single-bot bound", () => {
+    const withMonth = (month: Record<string, unknown>) => {
+      const base = appsPayload(chainRow());
+      const rows = base.apps as Array<Record<string, unknown>>;
+      const [only] = rows;
+      return { ...base, apps: [{ ...only, month }] };
+    };
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 100 * 100 }))).not.toBeNull();
+    // The three products a LEGAL write creates from an admitted chain — a 1000×
+    // price edit, a sub-1 removal, and the aggregate of both — must parse. The
+    // write guard is a write guard: it never runs for either of those edits.
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 10_000_000 }))).not.toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 100_000_000 }))).not.toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 0.01 }))).not.toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: CHAIN_MULTIPLIER_MAX }))).not.toBeNull();
+    // Only a NON-REPRESENTABLE product is null; zero, negative, infinite and
+    // NaN are still refused, so the marker cannot hide a malformed payload.
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: null }))).not.toBeNull();
+    // Only an unrenderable product fails: zero, negative, infinite or NaN.
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 0 }))).toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: -1 }))).toBeNull();
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: Number.POSITIVE_INFINITY }))).toBeNull();
+  });
+});
+
+/**
+ * QC (Devin #3): a stored ceiling authored before the write bound existed must
+ * open the owner's page and stay clearable. The READ domain is a positive safe
+ * integer; the WRITE domain still bounds new rows.
+ */
+describe("a stored override past the WRITE bound loads and clears", () => {
+  async function getBotPayload(): Promise<Response> {
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    return worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${BOT_ROW}/bot`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+  }
+
+  async function patchOverride(body: unknown): Promise<Response> {
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    return worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${BOT_ROW}/quota-overrides`, {
+        method: "PATCH",
+        headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      envFor(),
+    );
+  }
+
+  test("the bot page serves and parses it, and the Clear action removes it", async () => {
+    world();
+    db.raw
+      .prepare(
+        `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(BOT_ROW, OTHER, 1_000_000_001, NOW);
+
+    const page = await getBotPayload();
+    expect(page.status).toBe(200);
+    const payload = (await page.json()) as unknown;
+    // The owner's page must OPEN with the legacy row present — a load error here
+    // is what put the Clear action behind an unreachable screen.
+    expect(parseBotSettings(payload)).not.toBeNull();
+
+    const cleared = await patchOverride({ workspaceId: OTHER, monthlyRp: null });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ overrides: [] });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_quota_overrides").get()).toEqual({ n: 0 });
+  });
+
+  test("a NEW above-cap ceiling is still refused at the route", async () => {
+    world();
+    const res = await patchOverride({ workspaceId: OTHER, monthlyRp: RP_CEILING_MAX + 1 });
+    expect(res.status).toBe(400);
+  });
+});

@@ -27,6 +27,8 @@ import {
   ProviderKeyTooLongError,
   UnknownModelChainError,
   UnknownModelRoleError,
+  BotArchivedError,
+  BotWriteForbiddenError,
   createAppConfigStore,
   parseModelChain,
   type AppConfigD1,
@@ -2380,7 +2382,7 @@ describe("API settings face — several repositories under one App (targets_many
     expect(body.blocked_reason).toBe("bot_not_shared");
     expect(body.targets_many).toBe(true);
     expect(body.target_id).toBeNull();
-    const parsed = parseSettings({ ...body, can_manage: true, workspace_id: consumer });
+    const parsed = parseSettings(body);
     expect(parsed).not.toBeNull();
     expect(parsed?.target_id).toBeNull();
     expect(parsed?.targets_many).toBe(true);
@@ -4144,5 +4146,287 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const admin = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db), CUSTOM_FORM);
     expect(admin.status).toBe(200);
     expect(rawCount(db, "bot_custom_providers")).toBe(1);
+  });
+});
+
+/**
+ * F1-1/F1-5: `requireBotWrite` reads the bot, then the mutation runs. An archive
+ * that lands in that window must change ZERO rows — the guard rides each write
+ * statement itself — and the store must say `archived` rather than report a
+ * silent no-op as success.
+ */
+describe("an archive between the store's authority read and its write", () => {
+  /** A DB whose first statement matching `trigger` archives the bot first. */
+  function archiveOnFirst(inner: TestD1, botId: string, trigger: RegExp): { db: AppConfigD1; fired(): boolean } {
+    let fired = false;
+    const db: AppConfigD1 = {
+      prepare(query: string) {
+        if (!fired && trigger.test(query)) {
+          fired = true;
+          inner.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", botId);
+        }
+        return inner.prepare(query);
+      },
+      batch: (statements) => inner.batch(statements),
+    };
+    return { db, fired: () => fired };
+  }
+
+  test("a provider key insert writes nothing and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    const race = archiveOnFirst(db, app.id, /INSERT INTO bot_provider_keys/);
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_provider_keys")).toBe(0);
+  });
+
+  test("a custom-provider declaration writes nothing and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    const race = archiveOnFirst(
+      db,
+      app.id,
+      /INSERT INTO bot_custom_providers/,
+    );
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).upsertCustomProvider(
+        authority(app.id),
+        app.id,
+        {
+          provider_id: "my-custom",
+          base_url: "https://api.example.test/v1",
+          api: "openai-completions",
+          model_ids: ["deepseek-v4-flash"],
+        },
+        sk("racer-key-0001"),
+      ),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_custom_providers")).toBe(0);
+    expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
+  });
+
+  test("a chain write writes nothing and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    const race = archiveOnFirst(db, app.id, /INSERT INTO bot_model_chains/);
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).setModelChain(authority(app.id), app.id, PLAIN_CHAIN),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_model_chains")).toBe(0);
+  });
+
+  test("a seat write writes nothing and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertModelChain(authority(app.id), app.id, "review", PLAIN_CHAIN);
+    const race = archiveOnFirst(db, app.id, /INSERT INTO bot_model_chain_seats/);
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).setModelChainSeat(authority(app.id), app.id, MODEL_ROLE_IDS[0]!, "review"),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
+  });
+
+  test("a key deletion keeps the row and reports archived", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const race = archiveOnFirst(db, app.id, /DELETE FROM bot_provider_keys/);
+
+    await expect(
+      createAppConfigStore(race.db, TEST_KEY).deleteProviderKey(
+        authority(app.id),
+        app.id,
+        "anthropic",
+        await keyIdOf(PLAIN_ANTHROPIC_KEY),
+      ),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    expect(race.fired()).toBe(true);
+    expect(rawCount(db, "bot_provider_keys")).toBe(1);
+  });
+});
+
+/**
+ * F1 re-review 2: the refusal must be decided by the state the WRITE saw, not
+ * by a read after it. These seams archive the bot inside the mutation's own
+ * batch and restore it before the batch commits, so a post-hoc archive read
+ * would find a live bot and report success for a write that never happened.
+ */
+describe("an archive the batch itself saw decides the outcome", () => {
+  /**
+   * A DB whose `batch` archives the bot before the statements run and restores
+   * it before they commit — the interleaving a read-after-the-write misreports.
+   */
+  function archiveWithinBatch(inner: TestD1, botId: string): { db: AppConfigD1; fired(): boolean } {
+    let fired = false;
+    return {
+      db: {
+        prepare: (query: string) => inner.prepare(query),
+        batch: async (statements) => {
+          if (!fired) {
+            fired = true;
+            inner.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", botId);
+          }
+          return await inner.batch(statements);
+        },
+      },
+      fired: () => fired,
+    };
+  }
+
+  test("a verified key write refused inside its batch leaves the stored model evidence untouched", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    // The key and its evidence already exist from an earlier verification.
+    await store.saveVerifiedKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY, ["model-one"]);
+    const evidenceBefore = db.raw
+      .query("SELECT * FROM bot_provider_models WHERE bot_id = ? ORDER BY key_id")
+      .all(app.id);
+    expect(evidenceBefore).toHaveLength(1);
+
+    const race = archiveWithinBatch(db, app.id);
+    await expect(
+      configStore(race.db).saveVerifiedKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY, [
+        "model-two",
+        "model-three",
+      ]),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+
+    expect(race.fired()).toBe(true);
+    // The refused write's model evidence never landed: the row still names the
+    // vocabulary the earlier verification produced, and the key row is intact.
+    expect(db.raw.query("SELECT * FROM bot_provider_models WHERE bot_id = ? ORDER BY key_id").all(app.id)).toEqual(
+      evidenceBefore,
+    );
+    expect(rawCount(db, "bot_provider_keys")).toBe(1);
+    const keyRow = db.raw.query("SELECT verified_status FROM bot_provider_keys").get() as { verified_status: string };
+    expect(keyRow.verified_status).toBe("ok");
+  });
+
+  test("an archive the batch saw is reported as archived even when the bot is live again afterwards", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertModelChain(authority(app.id), app.id, "named", PLAIN_CHAIN);
+    await store.setModelChainSeat(authority(app.id), app.id, "code-reviewer", "named");
+    // Archive before the statements run, restore before the batch returns: the
+    // seat delete inside it is refused, and a read afterwards would see a LIVE
+    // bot and call that refusal a success.
+    let fired = false;
+    const racing: AppConfigD1 = {
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", app.id);
+        const results = await db.batch(statements);
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = NULL WHERE id = ?").run(app.id);
+        }
+        return results;
+      },
+    };
+
+    await expect(
+      createAppConfigStore(racing, TEST_KEY).clearModelChainSeat(authority(app.id), app.id, "code-reviewer"),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+    // Restored by now, so a post-hoc archive read would have said "fine".
+    const bot = db.raw.query("SELECT archived_at FROM review_bots WHERE id = ?").get(app.id) as { archived_at: string | null };
+    expect(bot.archived_at).toBeNull();
+    // The seat survives, which is what "refused" has to mean.
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "named" });
+  });
+
+  test("a legacy key row is not promoted once the bot is archived", async () => {
+    const { db, app } = await seededWorld();
+    const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
+      PLAIN_ANTHROPIC_KEY,
+      `app_provider_keys.key_enc:${app.id}:anthropic`,
+    );
+    rawRun(
+      db,
+      `INSERT INTO bot_provider_keys (bot_id, provider, key_id, key_enc, created_at, updated_at)
+       VALUES (?, 'anthropic', '', ?, '2026-01-01 00:00:00', '2026-01-02 00:00:00')`,
+      app.id,
+      legacyEnc,
+    );
+    const before = db.raw.query("SELECT key_id, key_enc FROM bot_provider_keys").get();
+    rawRun(db, "UPDATE review_bots SET archived_at = ? WHERE id = ?", "2026-02-01T00:00:00.000Z", app.id);
+
+    // The read still decrypts the legacy envelope (it is not a write), but the
+    // stored row is NOT rewritten: the sentinel stays the sentinel.
+    const config = await configStore(db).getAppConfig(app.id);
+    expect(config.keys).toEqual({ anthropic: [PLAIN_ANTHROPIC_KEY] });
+    expect(db.raw.query("SELECT key_id, key_enc FROM bot_provider_keys").get()).toEqual(before);
+  });
+});
+
+/**
+ * F1 re-review 3: the probe's `present` column separates a DELETED target from
+ * an ARCHIVED one. A deletion inside the write's own batch is the same
+ * forbidden refusal `requireBotWrite` gives — never the archive refusal, and
+ * never a silent success for a write that changed nothing.
+ */
+describe("a target deleted inside the batch is refused as forbidden, not as archived", () => {
+  function deleteWithinBatch(inner: TestD1, botId: string): AppConfigD1 {
+    let fired = false;
+    return {
+      prepare: (query: string) => inner.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          inner.raw.prepare("UPDATE review_bots SET deleted_at = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", botId);
+        }
+        return await inner.batch(statements);
+      },
+    };
+  }
+
+  test("a void chain write refuses instead of reporting success", async () => {
+    const { db, app } = await seededWorld();
+    await expect(
+      configStore(deleteWithinBatch(db, app.id)).upsertModelChain(authority(app.id), app.id, "gone", "a/b"),
+    ).rejects.toBeInstanceOf(BotWriteForbiddenError);
+    expect(await configStore(db).getModelChain(app.id)).toBeNull();
+  });
+
+  test("a key delete refuses instead of reporting another admission failure", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.addProviderKey(authority(app.id), app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const keyId = await keyIdOf(PLAIN_ANTHROPIC_KEY);
+    await expect(
+      configStore(deleteWithinBatch(db, app.id)).deleteProviderKey(authority(app.id), app.id, "anthropic", keyId),
+    ).rejects.toBeInstanceOf(BotWriteForbiddenError);
+    expect(rawCount(db, "bot_provider_keys")).toBe(1);
+  });
+
+  test("an archived target is still the archive refusal", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE review_bots SET archived_at = ? WHERE id = ?", "2026-02-01T00:00:00.000Z", app.id);
+    await expect(
+      configStore(db).upsertModelChain(authority(app.id), app.id, "gone", "a/b"),
+    ).rejects.toBeInstanceOf(BotArchivedError);
+  });
+
+  test("a target archived and restored inside the batch writes successfully", async () => {
+    const { db, app } = await seededWorld();
+    let fired = false;
+    const racing: AppConfigD1 = {
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", app.id);
+          db.raw.prepare("UPDATE review_bots SET archived_at = NULL WHERE id = ?").run(app.id);
+        }
+        return await db.batch(statements);
+      },
+    };
+    await createAppConfigStore(racing, TEST_KEY).setModelChain(authority(app.id), app.id, "a/b");
+    expect(await configStore(db).getModelChain(app.id)).toBe("a/b");
   });
 });

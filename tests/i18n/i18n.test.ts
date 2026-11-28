@@ -268,6 +268,25 @@ describe("App detail IA copy", () => {
     expect(isDictionaryKey("settings.backToApps")).toBe(false);
   });
 
+  test("the creator face's retired keys are removed, not aliased", () => {
+    for (const key of ["appDetail.botSettingsLink", "appDetail.tabBots"] as const) {
+      expect(isDictionaryKey(key), key).toBe(false);
+    }
+  });
+
+  test("the bot settings view's retired scope and read-only keys are removed, not aliased", () => {
+    // The consumer face renders botDetail.consumer.readOnlyNotice at page level
+    // (BotDetailPage), and the bot header carries bots.stateShared/stateOwn;
+    // BotSettingsView itself has no non-manager copy of its own.
+    for (const key of [
+      "botSettings.readOnly",
+      "botSettings.scopeShared",
+      "botSettings.scopeOwned",
+    ] as const) {
+      expect(isDictionaryKey(key), key).toBe(false);
+    }
+  });
+
   test("the installations section keys exist atomically; the retired eyebrow and sentence keys are removed, not aliased", () => {
     for (const key of [
       "settings.installations",
@@ -320,7 +339,7 @@ describe("App detail IA copy", () => {
 
 describe("creation chooser copy", () => {
   const KEYS = [
-    "apps.createDialog.title",
+    "apps.createDialog.githubTitle",
     "apps.createDialog.description",
     "apps.createDialog.botTargets",
     "apps.createDialog.noSharedBots",
@@ -441,6 +460,29 @@ describe("the shared-bot surfaces' copy", () => {
       const label = t(locale, "admin.nav.bots");
       expect(label).not.toBe("admin.nav.bots");
       expect(label.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("App/Bot IA contract keys (Task 4)", () => {
+  /**
+   * The Credits copy is the one new vocabulary a reader cannot infer from a
+   * label: the ADR bans the legacy unit on every user-facing amount. The key
+   * list is the test's own input, not a pin on dictionary internals.
+   */
+  const CREDIT_KEYS = [
+    "appDetail.installed.metricSpend",
+    "credits.unit",
+    "credits.usedThisMonth",
+    "credits.noCeiling",
+    "credits.unlimitedOwn",
+  ] as const;
+
+  test("the new Credits copy never prints the legacy RP unit", () => {
+    for (const key of CREDIT_KEYS) {
+      for (const locale of LOCALES) {
+        expect(t(locale, key as DictionaryKey), `${locale} ${key}`).not.toMatch(/\bRP\b/);
+      }
     }
   });
 });

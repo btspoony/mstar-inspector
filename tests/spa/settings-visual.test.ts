@@ -29,6 +29,8 @@ const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
+  can_edit_chain: false,
+  viewer_relation: "created",
   installation: null,
   pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",
@@ -381,11 +383,11 @@ describe("section description wording (A8)", () => {
 });
 
 describe("delivery-status summary line (I-000251)", () => {
-  const render = (rejected24h: number): string =>
+  const render = (): string =>
     renderToStaticMarkup(
       createElement(DeliveryStatusView, {
         locale: "en",
-        summary: { last_webhook_at: null, rejected24h },
+        summary: { last_webhook_at: null },
         page: null,
         filters: { repo: "", since: "", type: "" },
         offset: 0,
@@ -396,19 +398,18 @@ describe("delivery-status summary line (I-000251)", () => {
       }),
     );
 
-  test("the refusal count wears the alert colour, and only when it is non-zero", () => {
-    const [segment = ""] = alertSegments(render(3), "light");
-    expect(segment).toContain(t("en", "apps.health.rejected24h", { count: 3 }));
+  test("the summary line is the webhook stamp alone — the 24h figure is banned everywhere", () => {
     const lastWebhook = t("en", "settings.lastWebhook", { time: t("en", "common.time.never") });
-    expect(render(3)).toContain(lastWebhook);
-    expect(alertSegments(render(0), "light")).toEqual([]);
-    expect(render(0)).toContain(lastWebhook);
+    expect(render()).toContain(lastWebhook);
+    expect(render()).not.toContain("24h");
+    expect(alertSegments(render(), "light")).toEqual([]);
   });
 });
 
 describe("the bot page carries the moved sections", () => {
   const botPayload = (): BotSettingsPayload => ({
     can_manage: true,
+    archived: false,
     app: {
       github_app_id: 1,
       id: "app-demo",
@@ -477,20 +478,9 @@ describe("the bot page carries the moved sections", () => {
     expect(markup).toContain("omp");
   });
 
-  test("a shared bot's page renders the same sections read-only", () => {
-    const markup = renderToStaticMarkup(
-      createElement(BotSettingsView, {
-        locale: "en",
-        payload: { ...botPayload(), can_manage: false, app: { ...botPayload().app, scope: "shared" } },
-        groups: [],
-        notice: null,
-        onReload: async () => true,
-      }),
-    );
-    expect(markup).toContain(t("en", "botSettings.readOnly"));
-    expect(markup).toContain(t("en", "botSettings.scopeShared"));
-    expect(markup).toContain(t("en", "settings.runtimeHarnessValue", { id: "omp" }));
-    expect(markup).toContain("wxyz");
-    expect(markup).not.toContain(t("en", "settings.saveRuntimeHarness"));
-  });
+  // The retired "shared bot's page renders the same sections read-only" case:
+  // the consumer FACE (read-only notice and none of the owner's machinery) is
+  // proven in bot-detail-faces.test.tsx, and this view's non-manager sandbox
+  // branch in runtime-harness-card.test.tsx. BotSettingsView carries no
+  // read-only or scope copy of its own, so the case had no observable left.
 });

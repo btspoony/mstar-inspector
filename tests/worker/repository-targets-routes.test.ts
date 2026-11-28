@@ -5,7 +5,7 @@ import { SHARED_BOT_REFUSAL } from "../../src/dashboard/entitlement";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { syncSplitPair, createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedDefaultMemberships, seedTarget, seedWorkspaceMember, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
 import type { Env } from "../../src/worker/env";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -754,6 +754,14 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     db.raw
       .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
       .run(sharedId, OTHER_WS);
+    // `syncSplitPair` mapped this App to `default` before it was pointed at its
+    // real owner, so it left an install state here. The scoped resolve admits an
+    // App on that row alone, and this case must hold no such row: it is about
+    // target-based reach, which `bindInstallation` grants further down.
+    db.raw.run(
+      `DELETE FROM app_install_bots WHERE github_app_id = '${sharedId}' AND workspace_id = 'default';
+       DELETE FROM app_installations WHERE github_app_id = '${sharedId}' AND workspace_id = 'default';`,
+    );
     await createReviewBotsStore(db).upsertInstallation({
       appId: sharedId,
       installationId: INSTALLATION,
@@ -778,7 +786,14 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     expect(written.n).toBe(0);
 
     seedTarget(db, sharedId, { workspaceId: "default", repoId: 1302, repoOwner: "acme", repoName: "web" });
-    expect(await createReviewBotsStore(db).bindInstallation(sharedId, INSTALLATION, "default")).toBe("bound");
+    expect(
+      await createReviewBotsStore(db).bindInstallation(
+        sharedId,
+        INSTALLATION,
+        "default",
+        seedWorkspaceMember(db, "default", "mallory", "owner"),
+      ),
+    ).toBe("bound");
     const accepted = await post(db, "/dashboard/default/api/targets", "mallory", body);
     expect(accepted.status).toBe(201);
     const acceptedBody = (await accepted.json()) as { created: Array<{ repo_id: number }>; duplicates: unknown[] };
