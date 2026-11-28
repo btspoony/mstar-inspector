@@ -517,4 +517,60 @@ describe("the bot page's share switch", () => {
       await view.cleanup();
     }
   });
+  test("a legacy stored ceiling above the write cap renders its real amount, never a blank", async () => {
+    // 1,100,000 Credits = 1,100,000,000 RP at the default rate — past the
+    // write cap but storable. The editor reads it on the STORED domain so the
+    // owner can see and clear it.
+    const view = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", monthly_rp: 1_100_000_000 },
+    });
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      expect(capInput?.value).toBe("1100000.00");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("deleting a legacy ceiling and saving sends monthly_rp: null", async () => {
+    const view = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", monthly_rp: 1_100_000_000 },
+    });
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, capInput, "");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { monthly_rp: null } }]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a new above-cap value is still refused before any request", async () => {
+    const view = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", monthly_rp: 1234 },
+    });
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, capInput, "1000001");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      expect(view.sent.filter((row) => row.path.endsWith("/pricing"))).toEqual([]);
+      expect(String(view.container.textContent)).toContain(t(locale, "bots.overrideInvalid"));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
 });

@@ -14,7 +14,7 @@ import {
 } from "@design-system";
 import { creditAmount } from "./credits";
 import { LoadingNotice, NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
-import { isBotMultiplier, isRpCeiling } from "../../contracts/rp-limits";
+import { isBotMultiplier, isRpCeiling, isStoredRpCeiling } from "../../contracts/rp-limits";
 import { patchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
@@ -91,7 +91,10 @@ export function BotPricingSection({
   const rpPerCredit =
     typeof rawRate === "number" && Number.isFinite(rawRate) && rawRate > 0 ? rawRate : undefined;
   const rate = rpPerCredit ?? 1000;
-  const monthlyRp = isRpCeiling(app.monthly_rp) ? app.monthly_rp : null;
+  // The STORED ceiling is read on its own domain: a legacy row above the
+  // write cap must still render (so the owner can see and clear it), while
+  // `isRpCeiling` keeps refusing what a NEW save types in.
+  const monthlyRp = isStoredRpCeiling(app.monthly_rp) ? app.monthly_rp : null;
 
   const [multiplier, setMultiplier] = useState(String(app.multiplier ?? 1));
   const [cap, setCap] = useState(monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit));
