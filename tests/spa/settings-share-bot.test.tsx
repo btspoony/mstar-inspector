@@ -330,6 +330,67 @@ describe("the bot page's share switch", () => {
     }
   });
 
+  test("a ceiling-only save omits the untouched multiplier, so a concurrent edit survives", async () => {
+    // The mirror of the case above: sending the page's stored 2 would restore it
+    // over a 5 another admin set after this page loaded. The route's "leave the
+    // column alone" is the omission.
+    const view = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", multiplier: 2, monthly_rp: 1234 },
+    });
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, capInput, "20");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { monthly_rp: 20000 } }]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a legacy below-floor multiplier does not block a ceiling-only save", async () => {
+    // A row priced before the 0.01 write floor still renders and still serves.
+    // It must not refuse a save that never carries it: an untouched multiplier
+    // is omitted, so the client never re-validates a stored value it is not
+    // writing.
+    const view = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", multiplier: 0.001, monthly_rp: 1234 },
+    });
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, capInput, "20");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { monthly_rp: 20000 } }]);
+      expect(String(view.container.textContent)).not.toContain(t(locale, "botDetail.share.multiplierInvalid"));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("neither field edited means no request at all", async () => {
+    const view = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", multiplier: 2, monthly_rp: 1234 },
+    });
+    try {
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      expect(view.sent.filter((row) => row.path.endsWith("/pricing"))).toEqual([]);
+      expect(String(view.container.textContent)).toContain(t(locale, "botSettings.nothingToSave"));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   test("a bad multiplier names the multiplier, not the ceiling integer", async () => {
     const view = await mount({ app: { ...payload().app, scope: "shared", multiplier: 2 } });
     try {

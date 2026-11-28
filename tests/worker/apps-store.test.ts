@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { createScanner, SyntaxKind } from "typescript/unstable/ast";
+import { parseAst } from "vite";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1, execMigrationScript, seedTarget, syncReviewBotColumn, applyMigration as applyMigrationShared } from "../store/helpers";
 import { AppCountExceededError, createReviewBotsStore } from "../../src/dashboard/apps-store";
@@ -74,81 +74,39 @@ async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Pro
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+type AstNode = { type: string; start?: number; end?: number; [key: string]: unknown };
+
+const FUNCTION_TYPES = /^(?:FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/;
+
 /**
- * A copy of `text` in which every comment and literal TEXT is blanked, while
- * the CODE inside a template's `${…}` splices survives: those braces are real
- * code braces and the depth walk below must count them.
- *
- * The tokenisation is the TypeScript scanner's, not a hand-rolled one: a
- * regex-based mask cannot tell a splice's `}` from the `}` of an object literal
- * nested inside it, and it reads a regex literal or an escaped quote as code.
- * The scanner reports each comment and literal as ONE token, so only their own
- * text is blanked and every structural character the walk reads is code.
+ * The name a declaration carries: a function's own id, a method's key, or a
+ * `const x = () => …` binding.
  */
-function maskNonCode(text: string): string {
-  const out = text.split("");
-  const blank = (start: number, end: number): void => {
-    for (let k = start; k < end; k += 1) if (out[k] !== "\n") out[k] = " ";
-  };
-  // Numeric kinds, not names: the enum aliases several spellings to one value,
-  // and the reverse lookup returns whichever alias happens to come first (`{`
-  // reads back as `FirstPunctuation`).
-  // `EndOfFile`, not `EndOfFileToken`: this build only defines the former.
-  const EOF = SyntaxKind.EndOfFile as number;
-  const TEMPLATE_HEAD = SyntaxKind.TemplateHead as number;
-  const TEMPLATE_MIDDLE = SyntaxKind.TemplateMiddle as number;
-  const TEMPLATE_TAIL = SyntaxKind.TemplateTail as number;
-  const TEMPLATE_PLAIN = SyntaxKind.NoSubstitutionTemplateLiteral as number;
-  const STRING_LITERAL = SyntaxKind.StringLiteral as number;
-  const REGEX_LITERAL = SyntaxKind.RegularExpressionLiteral as number;
-  const OPEN_BRACE = SyntaxKind.OpenBraceToken as number;
-  const CLOSE_BRACE = SyntaxKind.CloseBraceToken as number;
-  const scanner = createScanner(true, undefined, text);
-  // The `${…}` splice depth of each enclosing template; `0` = at its `{`.
-  const splices: number[] = [];
-  let cursor = 0;
-  let kind: number = scanner.scan() as number;
-  while (kind !== EOF) {
-    const start: number = scanner.getTokenStart();
-    const end: number = scanner.getTokenEnd();
-    // Trivia (whitespace, comments) is skipped by the scanner: blank the gap.
-    if (start > cursor) blank(cursor, start);
-    cursor = Math.max(cursor, end);
-    if (kind === TEMPLATE_HEAD) {
-      // Keep the `${`'s brace: it is the splice's opening code brace.
-      blank(start, end - 1);
-      splices.push(0);
-    } else if (kind === TEMPLATE_PLAIN || kind === STRING_LITERAL || kind === REGEX_LITERAL) {
-      // A quoted or regex literal is ONE token: its braces and quotes are text.
-      blank(start, end);
-    } else if (kind === TEMPLATE_MIDDLE) {
-      // `}` of one splice, raw text, `${` of the next: both braces stay.
-      blank(start + 1, Math.max(start + 1, end - 1));
-    } else if (kind === TEMPLATE_TAIL) {
-      blank(start + 1, end);
-    } else if (kind === OPEN_BRACE && splices.length > 0) {
-      splices[splices.length - 1] = (splices[splices.length - 1] ?? 0) + 1;
-    } else if (kind === CLOSE_BRACE && splices.length > 0) {
-      if ((splices[splices.length - 1] ?? 0) > 0) {
-        splices[splices.length - 1] = (splices[splices.length - 1] ?? 0) - 1;
-      } else {
-        // This `}` closes the splice, not a block: the splice ends here and the
-        // scanner resumes in the template's raw text.
-        kind = scanner.reScanTemplateToken(false) as number;
-        const tailStart: number = scanner.getTokenStart();
-        const tailEnd: number = scanner.getTokenEnd();
-        if (kind === TEMPLATE_MIDDLE) blank(tailStart + 1, Math.max(tailStart + 1, tailEnd - 1));
-        else if (kind === TEMPLATE_TAIL) blank(tailStart + 1, tailEnd);
-        cursor = Math.max(cursor, tailEnd);
-        if (kind === TEMPLATE_TAIL) splices.pop();
-        kind = scanner.scan() as number;
-        continue;
-      }
-    }
-    kind = scanner.scan() as number;
-  }
-  if (cursor < text.length) blank(cursor, text.length);
-  return out.join("");
+function declaredName(node: AstNode): string | null {
+  const target = (node.id ?? node.key) as AstNode | null | undefined;
+  if (target === null || target === undefined) return null;
+  if (target.type === "Identifier" || target.type === "PrivateIdentifier") return String(target.name);
+  if (target.type === "StringLiteral" || target.type === "Literal") return String(target.value);
+  return null;
+}
+
+/**
+ * The name and body of the function `node` declares, or `null` when `node`
+ * declares none. A declaration or expression IS the function; a method, an
+ * object member or a variable declarator HOLDS it in `value` / `init` — and the
+ * value must really be function-typed, so a `{ body: … }` object member is never
+ * mistaken for a function's body.
+ */
+function declaration(node: AstNode): { name: string; body: AstNode } | null {
+  const fn =
+    node.type === "FunctionDeclaration" || node.type === "FunctionExpression"
+      ? node
+      : ((node.value ?? node.init) as AstNode | null | undefined);
+  if (fn === null || fn === undefined || !FUNCTION_TYPES.test(fn.type)) return null;
+  const name = declaredName(node) ?? declaredName(fn);
+  if (name === null) return null;
+  const body = fn.body as AstNode | null | undefined;
+  return typeof body?.start === "number" && typeof body.end === "number" ? { name, body } : null;
 }
 
 /**
@@ -156,59 +114,47 @@ function maskNonCode(text: string): string {
  *
  * Line-scanning for the nearest `    async x(` credits an INSERT to whatever
  * member was declared above it, so a hit moved into a later non-async function
- * still read as its async neighbour. This instead finds every declaration,
- * walks its body to the matching close brace, and returns the innermost
- * declaration whose body spans `at`. Body braces are matched by depth over
- * the scanner-masked copy, so neither a comment's, a string's nor a template's
- * braces can end or extend a body; the `${…}` splices stay live because they
- * are real code, and so is a `{` nested inside one.
+ * still read as its async neighbour. A scanner over text is not enough either:
+ * it cannot tell a regex literal's `}` from a block's, so the enclosing body's
+ * end moves and the hit is attributed to a neighbour. This parses the file with
+ * a real parser and returns the INNERMOST function-like node whose body range
+ * spans the offset — every comment, string, template and regex is already one
+ * literal node, so no brace can be miscounted.
  */
-function enclosingFunction(rawText: string, at: number): string {
-  const text = maskNonCode(rawText);
-  let best: { name: string; start: number } | null = null;
-  for (const decl of text.matchAll(/\b(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)\s*(?:<[^<>]*>)?\s*\(/g)) {
-    const name = decl[1]!;
-    // Control-flow keywords and member CALLS (`store.replaceInstallChain(`)
-    // look like declarations to a regex; both are rejected below, so a call
-    // nearer the hit can never win the innermost test.
-    if (/^(?:if|for|while|switch|catch|do|else|return|typeof|await|with)$/.test(name)) continue;
-    if (/\.\s*$/.test(text.slice(Math.max(0, decl.index! - 3), decl.index!))) continue;
-    // The parameter list's own close paren, then the body's opening brace.
-    let depth = 0;
-    let open = -1;
-    for (let i = decl.index! + decl[0].length - 1; i < text.length; i += 1) {
-      const ch = text[i];
-      if (ch === "(") depth += 1;
-      else if (ch === ")") {
-        depth -= 1;
-        if (depth === 0) {
-          open = text.indexOf("{", i);
-          // A trailing `;` (or another `)`) before the brace means this was a
-          // CALL, not a declaration with a body.
-          const between = text.slice(i + 1, open === -1 ? text.length : open);
-          if (open === -1 || /[;)]/.test(between)) open = -1;
-          break;
-        }
-      }
+function enclosingFunction(text: string, at: number): string {
+  const ast = parseAst(text, { lang: "ts", sourceType: "module" }) as unknown as AstNode;
+  // The INNERMOST body wins: recursion returns the smallest body that spans the
+  // hit, and a child's answer replaces its parent's.
+  const walk = (value: unknown): { name: string; size: number } | null => {
+    if (Array.isArray(value)) {
+      let found: { name: string; size: number } | null = null;
+      for (const item of value) found = finer(found, walk(item));
+      return found;
     }
-    if (open === -1 || open > at) continue;
-    depth = 0;
-    let close = -1;
-    for (let i = open; i < text.length; i += 1) {
-      if (text[i] === "{") depth += 1;
-      else if (text[i] === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          close = i;
-          break;
-        }
-      }
+    if (value === null || typeof value !== "object") return null;
+    const node = value as AstNode;
+    let found: { name: string; size: number } | null = null;
+    const decl = typeof node.type === "string" ? declaration(node) : null;
+    if (decl !== null && at >= decl.body.start! && at <= decl.body.end!) {
+      found = { name: decl.name, size: decl.body.end! - decl.body.start! };
     }
-    if (close === -1 || close < at) continue;
-    // Innermost wins: the declaration that starts closest before the hit.
-    if (best === null || decl.index! >= best.start) best = { name, start: decl.index! };
-  }
-  return best?.name ?? "<module>";
+    for (const key of Object.keys(node)) {
+      if (key === "loc" || key === "range") continue;
+      found = finer(found, walk(node[key]));
+    }
+    return found;
+  };
+  return walk(ast)?.name ?? "<module>";
+}
+
+/** The tighter of two candidate bodies; `null` loses to anything. */
+function finer(
+  left: { name: string; size: number } | null,
+  right: { name: string; size: number } | null,
+): { name: string; size: number } | null {
+  if (left === null) return right;
+  if (right === null) return left;
+  return right.size <= left.size ? right : left;
 }
 
 describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", () => {
@@ -1051,6 +997,25 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(
       [...nestedSplice.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(nestedSplice, hit.index!)),
     ).toEqual(["outer"]);
+    // A REGEX literal's braces are text. A scanner that leaves `/}/` as a slash
+    // and a `}` reads one block closer that is not there, so `outer`'s body ends
+    // early and the second INSERT — genuinely inside it — is credited to
+    // `<module>`. The parser knows the literal, so both hits keep their owner.
+    const regexBraces = [
+      "function outer() {",
+      "  function createBot() {",
+      "    const sql = `INSERT INTO review_bots (id) SELECT ?1`;",
+      "    const mask = /}/;",
+      "    void sql;",
+      "    void mask;",
+      "  }",
+      "  const second = `INSERT INTO review_bots (id) SELECT ?2`;",
+      "  void second;",
+      "}",
+    ].join("\n");
+    expect(
+      [...regexBraces.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(regexBraces, hit.index!)),
+    ).toEqual(["createBot", "outer"]);
   });
 
   test("src/ holds exactly the two creation-path INSERT INTO review_bots sites, one per creation function", () => {

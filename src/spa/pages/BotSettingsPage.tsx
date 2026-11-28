@@ -101,6 +101,10 @@ export function BotPricingSection({
   // sub-0.005-Credit ceiling to `0.00` and refuse it). Untouched therefore
   // sends the stored RP verbatim.
   const [capEdited, setCapEdited] = useState(false);
+  // The multiplier is edit-tracked for the same reason, and one more: a stored
+  // price below the write floor (a legacy ×0.001) must not refuse a save that
+  // only touches the ceiling — the partial PATCH never carries it.
+  const [multEdited, setMultEdited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [shareNotice, setShareNotice] = useState<OpNotice | null>(null);
@@ -113,6 +117,7 @@ export function BotPricingSection({
     // 1.23 here exactly as it does in `1.23 Credits` there.
     setCap(monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit));
     setCapEdited(false);
+    setMultEdited(false);
   }, [app.multiplier, monthlyRp, rpPerCredit]);
 
   async function submitScope(scope: "owned" | "shared"): Promise<OpNotice> {
@@ -138,11 +143,13 @@ export function BotPricingSection({
 
   async function savePricing(): Promise<void> {
     if (busy) return;
-    // An untouched ceiling is OMITTED, which the route reads as "leave the
-    // column alone" — the field's two-decimal text is a READ rendering, so
-    // echoing it back would rewrite `1234 RP` as `1230 RP` (or zero a
-    // sub-0.005-Credit ceiling and refuse it), and echoing the page's stored
-    // copy would overwrite a ceiling another admin changed meanwhile.
+    // An untouched CEILING and an untouched MULTIPLIER are both OMITTED, which
+    // the route reads as "leave the column alone". The ceiling's field text is
+    // a READ rendering, so echoing it back would rewrite `1234 RP` as `1230 RP`
+    // (or zero a sub-0.005-Credit ceiling and refuse it). For both, echoing the
+    // page's stored copy would overwrite a value another admin changed
+    // meanwhile — and the multiplier would additionally refuse a ceiling-only
+    // save on a legacy price below the write floor.
     const capValue = capEdited ? parseCreditsInput(cap, rate) : undefined;
     if (capValue === "invalid") {
       setNotice({ kind: "error", message: t(locale, "bots.overrideInvalid") });
@@ -151,15 +158,15 @@ export function BotPricingSection({
     // The multiplier is inert (and its control disabled) while unshared, so
     // an unshared save omits it — the route keeps the stored value.
     let nextMultiplier: number | undefined;
-    if (shared) {
+    if (shared && multEdited) {
       nextMultiplier = Number(multiplier);
       if (!isBotMultiplier(nextMultiplier)) {
         setNotice({ kind: "error", message: t(locale, "botDetail.share.multiplierInvalid") });
         return;
       }
     }
-    // Nothing edited (an unshared bot's ceiling untouched): the route requires
-    // at least one field, and there is no write to make.
+    // Nothing edited: the route requires at least one field, and there is no
+    // write to make.
     if (nextMultiplier === undefined && capValue === undefined) {
       setNotice({ kind: "warn", message: t(locale, "botSettings.nothingToSave") });
       return;
@@ -235,7 +242,10 @@ export function BotPricingSection({
               // (×1, as every effective presentation does); the stored draft
               // stays in state untouched, so re-sharing restores it as-is.
               value={shared ? multiplier : "1"}
-              onChange={(event) => setMultiplier(event.target.value)}
+              onChange={(event) => {
+                setMultiplier(event.target.value);
+                setMultEdited(true);
+              }}
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">

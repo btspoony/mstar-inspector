@@ -524,28 +524,29 @@ describe("replaceInstallChain — a new mount stays inside the write bound", () 
     const store = createReviewBotsStore(db);
     // Mount the foreign bot while it is still shared, then have its owner stop
     // sharing it: the row is RETAINED, and from here its price is invisible here.
-    await store.replaceInstallChain({
-      appId: "app-1",
-      workspaceId: "default",
-      botIds: ["bot-solo", "bot-foreign"],
-    });
+    const baseline = ["bot-solo", "bot-foreign"];
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: baseline });
     db.raw.run("UPDATE review_bots SET scope = 'owned' WHERE id = 'bot-foreign'");
+    const candidate = [...baseline, "bot-1000a", "bot-1000b"];
 
-    // Two different private prices, one candidate chain: the two 1000× factors
-    // are the whole VISIBLE product (1,000,000, inside the bound), and the
-    // foreign row is a `1`. The decision must not move with the hidden number.
-    const decision = async (): Promise<string> =>
-      store.replaceInstallChain({
-        appId: "app-1",
-        workspaceId: "default",
-        botIds: ["bot-solo", "bot-1000a", "bot-1000b", "bot-foreign"],
-      });
-    const outcomes: string[] = [];
+    // Both scenarios start from the SAME chain and each mounts the two 1000×
+    // factors once — the candidate ids are NEW in both runs, so the price guard
+    // actually evaluates the product. Reusing the first run's chain would leave
+    // no new id and skip the guard entirely, which is not the rule under test.
+    // The visible product is 1,000,000, inside the bound; the foreign row is a
+    // `1`. Reading its hidden price would give 10^9 (refused) at one value and
+    // 11,000 (admitted) at the other, so a matching pair of decisions is proof.
+    const decisions: string[] = [];
     for (const hidden of [1000, 0.01]) {
       db.raw.prepare("UPDATE review_bots SET multiplier = ? WHERE id = 'bot-foreign'").run(hidden);
-      outcomes.push(await decision());
+      // A removal mounts no new id, so it is always admitted — the reset itself
+      // never depends on the number the case is about.
+      await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: baseline });
+      decisions.push(
+        await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: candidate }),
+      );
     }
-    expect(outcomes).toEqual(["ok", "ok"]);
+    expect(decisions).toEqual(["ok", "ok"]);
     db.raw.close();
   });
 
