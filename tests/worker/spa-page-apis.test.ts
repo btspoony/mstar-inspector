@@ -256,6 +256,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(other.status).toBe(200);
     const otherBody = (await other.json()) as {
       can_manage: boolean;
+      can_edit_chain: boolean;
       app: Record<string, unknown>;
       installations?: unknown;
       deliveries?: unknown;
@@ -276,10 +277,13 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       "app",
       "blocked",
       "blocked_reason",
+      "can_edit_chain",
       "can_manage",
       "viewer_relation",
       "workspace_id",
     ]);
+    // A bot route serves no App chain: the key must be present and false.
+    expect(otherBody.can_edit_chain).toBe(false);
     expect(Object.keys(otherBody.app).sort()).toEqual([
       "created_at",
       "created_by",

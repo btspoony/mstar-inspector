@@ -333,6 +333,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
     expect(res.headers.get("Content-Type")).toContain("application/json");
     const body = (await res.json()) as {
       can_manage: unknown;
+      can_edit_chain: unknown;
       workspace_id: unknown;
       target_id: unknown;
       app: Record<string, unknown>;
@@ -341,11 +342,14 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       "app",
       "blocked",
       "blocked_reason",
+      "can_edit_chain",
       "can_manage",
       "target_id",
       "viewer_relation",
       "workspace_id",
     ]);
+    // A bot route serves no App chain: the key must be present and false.
+    expect(body.can_edit_chain).toBe(false);
     expect(body.workspace_id).toBe("default");
     const target = db.raw
       .prepare(
