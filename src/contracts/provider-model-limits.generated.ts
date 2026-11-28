@@ -3,13 +3,13 @@
  * provider catalog. DO NOT EDIT BY HAND — regenerate with
  * `bun run scripts/generate-provider-catalog.ts`.
  *
- * Source: `scripts/provider-catalog/inputs/models.dev-2026-11-27.json` (fetched
- * 2026-11-27 from https://models.dev/api.json; each model carries
+ * Source: `scripts/provider-catalog/inputs/models.dev-2026-11-28.json` (fetched
+ * 2026-11-28 from https://models.dev/api.json; each model carries
  * `limit: { context, output }`). Only providers and model ids that the
  * generated provider catalog lists are carried here — the table exists to fill
  * an operator's blank size fields, not to mirror the whole directory.
  *
- * Coverage: 326 of 334 catalog providers, 9770 model entries. The omitted
+ * Coverage: 327 of 335 catalog providers, 9781 model entries. The omitted
  * 8 providers carry no models.dev model row at all (their
  * vocabulary comes from the vendored omp provider snapshot, or the row is
  * local-only metadata), so the table states no number for them instead of
@@ -24,7 +24,7 @@
 export type ModelLimit = { contextWindow: number; maxTokens: number };
 
 /** The snapshot date the table was generated from (shown as the value's source). */
-export const MODEL_LIMITS_SNAPSHOT = "2026-11-27";
+export const MODEL_LIMITS_SNAPSHOT = "2026-11-28";
 
 /** provider id → model id → sizes. */
 export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, ModelLimit>>>> = Object.freeze({
@@ -1211,7 +1211,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "deepseek/deepseek-r1-0528": {
       "contextWindow": 163840,
-      "maxTokens": 32000
+      "maxTokens": 32768
     },
     "deepseek/deepseek-v3.1-terminus": {
       "contextWindow": 163840,
@@ -1247,7 +1247,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "deepseek/deepseek-v4.1-flash": {
       "contextWindow": 1048576,
-      "maxTokens": 393216
+      "maxTokens": 384000
     },
     "deepseek/deepseek-v4.1-flash-1017": {
       "contextWindow": 1048576,
@@ -1383,7 +1383,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "google/gemma-3-4b-it": {
       "contextWindow": 131072,
-      "maxTokens": 16384
+      "maxTokens": 131072
     },
     "google/gemma-4-26b-a4b-it": {
       "contextWindow": 262144,
@@ -1727,7 +1727,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "nvidia/nemotron-3.5-super-vl": {
       "contextWindow": 1048576,
-      "maxTokens": 8192
+      "maxTokens": 131072
     },
     "nvidia/nemotron-3.5-super-vl:free": {
       "contextWindow": 1000000,
@@ -2065,10 +2065,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262144,
       "maxTokens": 16384
     },
-    "qwen/qwen3-235b-a22b-thinking-2507": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
     "qwen/qwen3-30b-a3b": {
       "contextWindow": 40960,
       "maxTokens": 16384
@@ -2131,7 +2127,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.5-9b": {
       "contextWindow": 262144,
-      "maxTokens": 65536
+      "maxTokens": 40960
     },
     "qwen/qwen3.5-flash-02-23": {
       "contextWindow": 1000000,
@@ -2175,7 +2171,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.8-2.4t-a95b": {
       "contextWindow": 1000000,
-      "maxTokens": 65536
+      "maxTokens": 131072
     },
     "qwen/qwen3.8-27b": {
       "contextWindow": 1024000,
@@ -2491,7 +2487,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "~deepseek/deepseek-v4-flash-latest": {
       "contextWindow": 1048576,
-      "maxTokens": 943718
+      "maxTokens": 131072
     },
     "~google/gemini-flash-latest": {
       "contextWindow": 1048576,
@@ -2732,8 +2728,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 8192
     },
     "deepseek/deepseek-r1-0528": {
-      "contextWindow": 128000,
-      "maxTokens": 32000
+      "contextWindow": 163840,
+      "maxTokens": 147456
     },
     "deepseek/deepseek-v3.1-terminus": {
       "contextWindow": 163840,
@@ -2773,7 +2769,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "deepseek/deepseek-v4.1-flash": {
       "contextWindow": 1048576,
-      "maxTokens": 393216
+      "maxTokens": 943718
     },
     "deepseek/deepseek-v4.1-flash-1017": {
       "contextWindow": 1048576,
@@ -2933,7 +2929,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "google/gemma-3-4b-it": {
       "contextWindow": 131072,
-      "maxTokens": 16384
+      "maxTokens": 117964
     },
     "google/gemma-4-26b-a4b-it": {
       "contextWindow": 262144,
@@ -2989,6 +2985,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "inclusionai/ling-3.1-flash-1019": {
       "contextWindow": 1000000,
+      "maxTokens": 262144
+    },
+    "inclusionai/ling-3.2-flash": {
+      "contextWindow": 1048576,
       "maxTokens": 262144
     },
     "inclusionai/lingsante-3.1-air-vl": {
@@ -3349,7 +3349,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "nvidia/nemotron-3.5-super-vl": {
       "contextWindow": 1048576,
-      "maxTokens": 943718
+      "maxTokens": 131072
     },
     "nvidia/nemotron-3.5-super-vl:free": {
       "contextWindow": 1000000,
@@ -3827,10 +3827,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 131072,
       "maxTokens": 117964
     },
-    "qwen/qwen3-235b-a22b-thinking-2507": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
     "qwen/qwen3-30b-a3b": {
       "contextWindow": 40960,
       "maxTokens": 16384
@@ -3893,7 +3889,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen/qwen3.5-9b": {
       "contextWindow": 262144,
-      "maxTokens": 235929
+      "maxTokens": 40960
     },
     "qwen/qwen3.5-flash": {
       "contextWindow": 1000000,
@@ -3944,8 +3940,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 131072
     },
     "qwen/qwen3.8-2.4t-a95b": {
-      "contextWindow": 262144,
-      "maxTokens": 65536
+      "contextWindow": 1000000,
+      "maxTokens": 900000
     },
     "qwen/qwen3.8-27b": {
       "contextWindow": 262144,
@@ -4329,7 +4325,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "~deepseek/deepseek-v4-flash-latest": {
       "contextWindow": 1048576,
-      "maxTokens": 943718
+      "maxTokens": 131072
     },
     "~google/gemini-flash-latest": {
       "contextWindow": 1048576,
@@ -5302,6 +5298,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "anthropic/claude-sonnet-5.5": {
       "contextWindow": 1000000,
       "maxTokens": 128000
+    },
+    "deepseek-ai/deepseek-v4.1-flash-1017": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
     },
     "deepseek/deepseek-v4-pro": {
       "contextWindow": 131072,
@@ -8434,6 +8434,22 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "kimi-k3.1-pro-prime": {
       "contextWindow": 1048576,
       "maxTokens": 1048576
+    },
+    "mindlab/macaron-v1-tall": {
+      "contextWindow": 262144,
+      "maxTokens": 65536
+    },
+    "mindlab/macaron-v1.1-coding-venti": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "mindlab/macaron-v1.1-venti": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "mindlab/macaron-v1.1-venti-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
     },
     "qwen-flash": {
       "contextWindow": 1000000,
@@ -14376,8 +14392,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 65536
     },
     "inkling": {
-      "contextWindow": 1048576,
-      "maxTokens": 1048576
+      "contextWindow": 524288,
+      "maxTokens": 524288
     },
     "inkling-2-mini": {
       "contextWindow": 1048576,
@@ -14624,10 +14640,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 10000
     },
     "o3": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o3-mini": {
       "contextWindow": 200000,
       "maxTokens": 100000
     },
@@ -16233,13 +16245,9 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 128000,
       "maxTokens": 8192
     },
-    "deepseek-ai/deepseek-v3.1-maas": {
-      "contextWindow": 163840,
-      "maxTokens": 32768
-    },
-    "deepseek-ai/deepseek-v3.2-maas": {
-      "contextWindow": 163840,
-      "maxTokens": 65536
+    "deepseek-ai/deepseek-v4.1-flash-1017-maas": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
     },
     "gemini-2.5-flash": {
       "contextWindow": 1048576,
@@ -16341,10 +16349,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262144,
       "maxTokens": 128000
     },
-    "meta/llama-3.3-70b-instruct-maas": {
-      "contextWindow": 128000,
-      "maxTokens": 8192
-    },
     "meta/llama-4-maverick-17b-128e-instruct-maas": {
       "contextWindow": 524288,
       "maxTokens": 8192
@@ -16361,21 +16365,9 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 128000,
       "maxTokens": 16384
     },
-    "moonshotai/kimi-k2-thinking-maas": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
     "openai/gpt-oss-120b-maas": {
       "contextWindow": 131072,
       "maxTokens": 131072
-    },
-    "openai/gpt-oss-20b-maas": {
-      "contextWindow": 131072,
-      "maxTokens": 32768
-    },
-    "qwen/qwen3-235b-a22b-instruct-2507-maas": {
-      "contextWindow": 262144,
-      "maxTokens": 16384
     },
     "xai/grok-4.1-fast-non-reasoning": {
       "contextWindow": 128000,
@@ -16404,14 +16396,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "xai/grok-4.7": {
       "contextWindow": 524288,
       "maxTokens": 500000
-    },
-    "zai-org/glm-4.7-maas": {
-      "contextWindow": 200000,
-      "maxTokens": 128000
-    },
-    "zai-org/glm-5-maas": {
-      "contextWindow": 200000,
-      "maxTokens": 128000
     },
     "zai-org/glm-5.2-maas": {
       "contextWindow": 1000000,
@@ -17284,7 +17268,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 8192
     },
     "Qwen/Qwen3-235B-A22B-Instruct-2507": {
-      "contextWindow": 131072,
+      "contextWindow": 262144,
       "maxTokens": 16384
     },
     "Qwen/Qwen3-235B-A22B-Thinking-2507": {
@@ -19957,6 +19941,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1050000,
       "maxTokens": 384000
     },
+    "deepseek-v4-pro-0813": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
     "deepseek-v4.1-flash": {
       "contextWindow": 1050000,
       "maxTokens": 384000
@@ -20420,10 +20408,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "llama-3.2-11b-instruct": {
       "contextWindow": 128000,
       "maxTokens": 8192
-    },
-    "llama-3.3-70b-instruct": {
-      "contextWindow": 131072,
-      "maxTokens": 4096
     },
     "llama-4-maverick-17b-instruct": {
       "contextWindow": 1048576,
@@ -21343,6 +21327,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 384000
     },
+    "canopywave/deepseek-v4-pro-0813": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
     "canopywave/deepseek-v4.1-flash-1017": {
       "contextWindow": 1000000,
       "maxTokens": 384000
@@ -21366,6 +21354,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "canopywave/kimi-k2.6": {
       "contextWindow": 262144,
       "maxTokens": 32768
+    },
+    "canopywave/kimi-k2.7-code": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
     },
     "canopywave/kimi-k3": {
       "contextWindow": 1048576,
@@ -21975,14 +21967,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 393216
     },
-    "novita/gemma-4-26b-a4b-it": {
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "novita/gemma-4-31b-it": {
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
     "novita/glm-4.5v": {
       "contextWindow": 65536,
       "maxTokens": 16000
@@ -22050,10 +22034,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "novita/ling-3.1-flash": {
       "contextWindow": 1000000,
       "maxTokens": 262144
-    },
-    "novita/llama-3.3-70b-instruct": {
-      "contextWindow": 131072,
-      "maxTokens": 120000
     },
     "novita/llama-4-maverick-17b-instruct": {
       "contextWindow": 1048576,
@@ -22262,6 +22242,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "reka-ai/deepseek-v4.1-flash-latest": {
       "contextWindow": 1048576,
       "maxTokens": 393216
+    },
+    "reka-ai/glm-5.3": {
+      "contextWindow": 1048576,
+      "maxTokens": 262144
     },
     "reka-ai/glm-5.3-flash": {
       "contextWindow": 1048576,
@@ -24917,10 +24901,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 128000,
       "maxTokens": 16384
     },
-    "Qwen3.5-27B-Blossom-V6.4-Derestricted": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
     "Qwen3.5-27B-BlueStar-v3-Derestricted": {
       "contextWindow": 262144,
       "maxTokens": 16384
@@ -24932,10 +24912,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted-Lite": {
       "contextWindow": 262144,
       "maxTokens": 262144
-    },
-    "Qwen3.5-27B-Queen-Derestricted": {
-      "contextWindow": 262144,
-      "maxTokens": 16384
     },
     "ReadyArt/MS3.2-The-Omega-Directive-24B-Unslop-v2.0": {
       "contextWindow": 32768,
@@ -25292,10 +25268,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "bytedance/doubao-seed-character": {
       "contextWindow": 128000,
       "maxTokens": 32768
-    },
-    "celeris-1": {
-      "contextWindow": 8192,
-      "maxTokens": 8192
     },
     "claw-high": {
       "contextWindow": 1048576,
@@ -25801,6 +25773,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262144,
       "maxTokens": 32768
     },
+    "inclusionai/ling-3.2-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 262144
+    },
     "inclusionai/lingsante-3.1-air-vl": {
       "contextWindow": 131072,
       "maxTokens": 32768
@@ -26088,10 +26064,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "moondream/moondream3.1-9b-a2b": {
       "contextWindow": 32000,
       "maxTokens": 4096
-    },
-    "moonshotai/kimi-k2-thinking": {
-      "contextWindow": 262144,
-      "maxTokens": 98304
     },
     "moonshotai/kimi-k2.5": {
       "contextWindow": 256000,
@@ -27022,7 +26994,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 450000
     },
     "xiaomi/mimo-v2.5": {
-      "contextWindow": 1048576,
+      "contextWindow": 1000000,
       "maxTokens": 131072
     },
     "xiaomi/mimo-v2.5-pro": {
@@ -27034,7 +27006,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 131072
     },
     "xiaomi/mimo-v2.5:thinking": {
-      "contextWindow": 1048576,
+      "contextWindow": 1000000,
       "maxTokens": 131072
     },
     "xiaomi/mimo-v2.6-flash": {
@@ -31147,6 +31119,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 943718
     },
+    "google/gemini-4-hydrogen": {
+      "contextWindow": 1048576,
+      "maxTokens": 943718
+    },
     "google/gemini-4-neon": {
       "contextWindow": 1048576,
       "maxTokens": 943718
@@ -31967,6 +31943,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
+    "claude-fable-5.2": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
     "claude-fable-5@eu": {
       "contextWindow": 1000000,
       "maxTokens": 128000
@@ -32431,6 +32411,14 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 500000,
       "maxTokens": 500000
     },
+    "hy4": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "hy4-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
     "inkling": {
       "contextWindow": 65536,
       "maxTokens": 32768
@@ -32634,6 +32622,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "qwen3.8-max": {
       "contextWindow": 1048576,
       "maxTokens": 131072
+    },
+    "qwen4-max": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
     },
     "seed-1.8": {
       "contextWindow": 256000,
@@ -34726,6 +34718,60 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 512000
     }
   },
+  "tencent-token-plan-intl": {
+    "deepseek/deepseek-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "deepseek/deepseek-v4-pro": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "glm-5.2": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "glm-5.3-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "glm-5.4": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "hy4": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "hy4-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "kimi-k2.6": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "kimi-k3": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "kimi-k3.1-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "mimo-v2.6-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "minimax-m3": {
+      "contextWindow": 1048576,
+      "maxTokens": 512000
+    },
+    "minimax-m3.1-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 512000
+    }
+  },
   "tencent-tokenhub": {
     "deepseek-v4-pro": {
       "contextWindow": 1000000,
@@ -36083,6 +36129,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
+    "nvidia-nemotron-3-5-lightning-30b-a3b": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
     "nvidia-nemotron-3-5-super-vl-120b-a12b": {
       "contextWindow": 262144,
       "maxTokens": 102400
@@ -36206,10 +36256,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "openai-gpt-oss-120b": {
       "contextWindow": 128000,
       "maxTokens": 16384
-    },
-    "pareto": {
-      "contextWindow": 1000000,
-      "maxTokens": 32768
     },
     "qwen-3-6-plus": {
       "contextWindow": 1000000,
