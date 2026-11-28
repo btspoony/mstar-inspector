@@ -2142,8 +2142,10 @@ async function appsListWithHealth(
  * `2 ** exponent` scale would overflow.
  *
  * `null` = no double holds the product (it is `0` or `Infinity`, i.e. outside
- * the double range). The caller refuses that explicitly rather than serving a
- * value every reader rejects as a non-product.
+ * the double range). That is a SERVED value, not a refusal: a legal price edit
+ * or a removal can create it from an admitted chain, so the row states the
+ * factor as unavailable and the rest of the list stays readable. `rpFor` /
+ * `chargeUsage` refuse to price such a chain where the money is taken.
  */
 function servedChainProduct(factors: readonly number[]): number | null {
   for (const factor of factors) {
@@ -2223,29 +2225,26 @@ const appListRoute = async (c: DashboardContext) => {
     }),
   ]);
   // The served factor counts only what the relay would RUN: a row whose bot
-  // stopped being available is skipped before any price applies, so folding its
-  // stored factor in would both misprice the chain and disclose the owner's
-  // current price. Recorded spend stays `used_rp` — that is history, not a price.
+  // stopped being available is skipped before any price applies, and an
+  // ARCHIVED row is skipped too, so folding either one's stored factor in would
+  // both misprice the chain and disclose the owner's current price. Recorded
+  // spend stays `used_rp` — that is history, not a price.
   //
-  // A chain whose product no double holds is REFUSED here rather than served as
-  // `Infinity`: every reader rejects that as a non-product, and a silent one
-  // would fail the whole list with no cause named.
-  const chainProducts = new Map<string, number>();
+  // A chain whose product no double holds serves `null` rather than an
+  // `Infinity`/`0`: every reader rejects those as a non-product, and refusing
+  // would fail the whole list for a state a legal write can create.
+  const chainProducts = new Map<string, number | null>();
   for (const app of rows) {
     const chain = chains.get(app.id) ?? [];
     if (chain.length === 0) continue;
-    const product = servedChainProduct(
-      chain.filter((bot) => bot.available).map((bot) => bot.multiplier),
+    chainProducts.set(
+      app.id,
+      servedChainProduct(
+        chain
+          .filter((bot) => bot.available && !bot.archived)
+          .map((bot) => bot.multiplier),
+      ),
     );
-    if (product === null) {
-      logSettingsFailure(
-        "api_apps_list_chain_product",
-        app.id,
-        new Error("the mounted chain's price factor is not representable"),
-      );
-      return c.json({ error: "the mounted chain's price factor is not representable" }, 500);
-    }
-    chainProducts.set(app.id, product);
   }
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
@@ -2289,9 +2288,9 @@ const appListRoute = async (c: DashboardContext) => {
                 used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
                 owned: chain.every((bot) => bot.owned),
                 // The chain's factor, accumulated without an intermediate
-                // overflow (see `servedChainProduct`); refused above when no
-                // double holds it.
-                multiplier: chainProducts.get(app.id)!,
+                // overflow (see `servedChainProduct`); `null` when no double
+                // holds the product of what the relay would run.
+                multiplier: chainProducts.get(app.id) ?? null,
               },
         bot_id: app.id,
         github_name: app.github_name ?? null,

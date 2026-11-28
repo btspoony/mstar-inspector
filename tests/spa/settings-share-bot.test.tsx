@@ -281,8 +281,11 @@ describe("the bot page's share switch", () => {
     }
   });
 
-  test("a multiplier-only save leaves the stored ceiling byte-for-byte", async () => {
-    // 1,234 RP renders as `1.23`; converting that text back would store 1,230.
+  test("a multiplier-only save omits the untouched ceiling, so a concurrent edit survives", async () => {
+    // 1,234 RP renders as `1.23`; sending anything back would rewrite it as
+    // 1,230 — and sending the page's stored 1,234 would OVERWRITE a ceiling
+    // another admin raised to 2,000 after this page loaded. Omission is the
+    // route's "leave the column alone".
     const view = await mount({
       rp_per_credit: 1000,
       app: { ...payload().app, scope: "shared", multiplier: 2, monthly_rp: 1234 },
@@ -295,7 +298,7 @@ describe("the bot page's share switch", () => {
       await view.click(view.buttonWith(t(locale, "common.save")));
 
       const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
-      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 5, monthly_rp: 1234 } }]);
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 5 } }]);
     } finally {
       await view.cleanup();
     }
@@ -320,7 +323,7 @@ describe("the bot page's share switch", () => {
       await view.click(view.buttonWith(t(locale, "common.save")));
 
       const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
-      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 3, monthly_rp: 4 } }]);
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 3 } }]);
       expect(String(view.container.textContent)).not.toContain(t(locale, "bots.overrideInvalid"));
     } finally {
       await view.cleanup();

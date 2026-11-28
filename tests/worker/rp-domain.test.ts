@@ -72,10 +72,10 @@ function world(): void {
   db.raw.prepare("UPDATE review_bots SET scope = 'shared', shared_at = ? WHERE id = ?").run(NOW, BOT_ROW);
 }
 
-async function patchPricing(body: unknown): Promise<Response> {
+async function patchPricing(body: unknown, botId = BOT_ROW): Promise<Response> {
   const session = await createSessionValue("dana", null, SESSION_SECRET);
   return worker.fetch(
-    new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${BOT_ROW}/pricing`, {
+    new Request(`https://worker.local/dashboard/${OFFICIAL}/api/review-bots/${botId}/pricing`, {
       method: "PATCH",
       headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -476,9 +476,10 @@ describe("the SPA parser applies the same domain", () => {
     expect(forward).toBeGreaterThan(0);
   });
 
-  // The other end: no double holds the product, so the route names the refusal
-  // instead of serving `Infinity` (which every reader rejects).
-  test("a chain whose product no double holds answers an explicit refusal", async () => {
+  // The other end: no double holds the product. The route SERVES the row with
+  // `multiplier: null` — the same answer a legal reprice or a sub-1 removal
+  // produces — rather than failing every App in the workspace with a 500.
+  test("a chain whose product no double holds serves a null factor and the list stays readable", async () => {
     world();
     const factors = Array(103).fill(BOT_MULTIPLIER_MAX);
     db.raw
@@ -504,10 +505,68 @@ describe("the SPA parser applies the same domain", () => {
       }),
       envFor(),
     );
-    expect(res.status).toBe(500);
-    expect((await res.json()) as unknown).toEqual({
-      error: "the mounted chain's price factor is not representable",
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      apps: Array<{ github_app_id: number; month: { multiplier: number | null } | null }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!;
+    expect(row.month?.multiplier).toBeNull();
+    // The key is REQUIRED and explicitly null, so a reader cannot mistake it for
+    // "no chain" — and the SPA parser accepts the payload instead of failing.
+    expect(row.month).toHaveProperty("multiplier");
+    expect(parseApps(body)).not.toBeNull();
+  });
+
+  // The same state reached by WRITES the route accepts: mount 103 distinct bots
+  // at ×1, then reprice them one at a time to the maximum. Every reprice is a
+  // legal single-bot price (the pricing route never rechecks the chain), and the
+  // last one pushes the product past the double range. The list must stay
+  // readable, with the one affected row stating its factor as unavailable.
+  test("a legal reprice into the double range's end degrades one row, not the list", async () => {
+    world();
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    const ids = Array.from({ length: 103 }, (_, index) => `bot-reprice-${index}`);
+    ids.forEach((id, index) => {
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, 1, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
     });
+
+    const list = async (): Promise<{ status: number; multiplier: number | null | undefined }> => {
+      const session = await createSessionValue("dana", null, SESSION_SECRET);
+      const res = await worker.fetch(
+        new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+          headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+        }),
+        envFor(),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        apps: Array<{ github_app_id: number; month: { multiplier: number | null } | null }>;
+      };
+      expect(parseApps(body)).not.toBeNull();
+      return { status: res.status, multiplier: body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)?.month?.multiplier };
+    };
+
+    // 102 reprices: 1000^102 ≈ 1e306, still a double the list serves.
+    for (const id of ids.slice(0, 102)) {
+      expect((await patchPricing({ multiplier: BOT_MULTIPLIER_MAX }, id)).status).toBe(200);
+    }
+    const nearLimit = await list();
+    expect(nearLimit.multiplier).toBeGreaterThan(9e305);
+    expect(Number.isFinite(nearLimit.multiplier)).toBe(true);
+
+    // The 103rd legal reprice: 1000^103 is past the double range.
+    expect((await patchPricing({ multiplier: BOT_MULTIPLIER_MAX }, ids[102]!)).status).toBe(200);
+    expect((await list()).multiplier).toBeNull();
   });
 
   test("a list row's chain-product multiplier parses past the single-bot bound", () => {
@@ -525,6 +584,9 @@ describe("the SPA parser applies the same domain", () => {
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 100_000_000 }))).not.toBeNull();
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 0.01 }))).not.toBeNull();
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: CHAIN_MULTIPLIER_MAX }))).not.toBeNull();
+    // Only a NON-REPRESENTABLE product is null; zero, negative, infinite and
+    // NaN are still refused, so the marker cannot hide a malformed payload.
+    expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: null }))).not.toBeNull();
     // Only an unrenderable product fails: zero, negative, infinite or NaN.
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: 0 }))).toBeNull();
     expect(parseApps(withMonth({ used_rp: 0, owned: false, multiplier: -1 }))).toBeNull();

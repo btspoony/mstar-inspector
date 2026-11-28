@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1, execMigrationScript, seedTarget, syncReviewBotColumn, applyMigration as applyMigrationShared } from "../store/helpers";
 import { AppCountExceededError, createReviewBotsStore } from "../../src/dashboard/apps-store";
@@ -74,97 +75,79 @@ async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Pro
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * A copy of `text` with every comment and string literal masked to spaces,
- * PRESERVING the `${…}` splices of template literals: their braces are real
- * code braces, and the scanner's depth walk needs them. Everything else —
- * regex literals included — reads as whitespace, so a `}` in a comment or a
- * `"` in a string can no longer start or end a body early.
+ * A copy of `text` in which every comment and literal TEXT is blanked, while
+ * the CODE inside a template's `${…}` splices survives: those braces are real
+ * code braces and the depth walk below must count them.
  *
- * shortcut: a regex literal whose body carries an unbalanced quote or a slash
- * in a character class is misread as a division; the store's SQL constants
- * carry none, and the upgrade is a real parser.
+ * The tokenisation is the TypeScript scanner's, not a hand-rolled one: a
+ * regex-based mask cannot tell a splice's `}` from the `}` of an object literal
+ * nested inside it, and it reads a regex literal or an escaped quote as code.
+ * The scanner reports each comment and literal as ONE token, so only their own
+ * text is blanked and every structural character the walk reads is code.
  */
 function maskNonCode(text: string): string {
   const out = text.split("");
-  const mask = (start: number, end: number): void => {
+  const blank = (start: number, end: number): void => {
     for (let k = start; k < end; k += 1) if (out[k] !== "\n") out[k] = " ";
   };
-  // Each frame is a template literal or one of its `${…}` splices. Inside a
-  // template, raw text masks out and only a splice opens live code; inside a
-  // splice (or at the top level) everything is code except comments/strings.
-  type Frame = "tmpl" | "splice";
-  const stack: Frame[] = [];
-  const inTmplText = (): boolean => stack[stack.length - 1] === "tmpl";
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const ch = text[i]!;
-    const next = text[i + 1] ?? "";
-    if (inTmplText()) {
-      if (ch === "\\") {
-        mask(i, Math.min(i + 2, n));
-        i = Math.min(i + 2, n);
+  // Numeric kinds, not names: the enum aliases several spellings to one value,
+  // and the reverse lookup returns whichever alias happens to come first (`{`
+  // reads back as `FirstPunctuation`).
+  // `EndOfFile`, not `EndOfFileToken`: this build only defines the former.
+  const EOF = SyntaxKind.EndOfFile as number;
+  const TEMPLATE_HEAD = SyntaxKind.TemplateHead as number;
+  const TEMPLATE_MIDDLE = SyntaxKind.TemplateMiddle as number;
+  const TEMPLATE_TAIL = SyntaxKind.TemplateTail as number;
+  const TEMPLATE_PLAIN = SyntaxKind.NoSubstitutionTemplateLiteral as number;
+  const STRING_LITERAL = SyntaxKind.StringLiteral as number;
+  const REGEX_LITERAL = SyntaxKind.RegularExpressionLiteral as number;
+  const OPEN_BRACE = SyntaxKind.OpenBraceToken as number;
+  const CLOSE_BRACE = SyntaxKind.CloseBraceToken as number;
+  const scanner = createScanner(true, undefined, text);
+  // The `${…}` splice depth of each enclosing template; `0` = at its `{`.
+  const splices: number[] = [];
+  let cursor = 0;
+  let kind: number = scanner.scan() as number;
+  while (kind !== EOF) {
+    const start: number = scanner.getTokenStart();
+    const end: number = scanner.getTokenEnd();
+    // Trivia (whitespace, comments) is skipped by the scanner: blank the gap.
+    if (start > cursor) blank(cursor, start);
+    cursor = Math.max(cursor, end);
+    if (kind === TEMPLATE_HEAD) {
+      // Keep the `${`'s brace: it is the splice's opening code brace.
+      blank(start, end - 1);
+      splices.push(0);
+    } else if (kind === TEMPLATE_PLAIN || kind === STRING_LITERAL || kind === REGEX_LITERAL) {
+      // A quoted or regex literal is ONE token: its braces and quotes are text.
+      blank(start, end);
+    } else if (kind === TEMPLATE_MIDDLE) {
+      // `}` of one splice, raw text, `${` of the next: both braces stay.
+      blank(start + 1, Math.max(start + 1, end - 1));
+    } else if (kind === TEMPLATE_TAIL) {
+      blank(start + 1, end);
+    } else if (kind === OPEN_BRACE && splices.length > 0) {
+      splices[splices.length - 1] = (splices[splices.length - 1] ?? 0) + 1;
+    } else if (kind === CLOSE_BRACE && splices.length > 0) {
+      if ((splices[splices.length - 1] ?? 0) > 0) {
+        splices[splices.length - 1] = (splices[splices.length - 1] ?? 0) - 1;
+      } else {
+        // This `}` closes the splice, not a block: the splice ends here and the
+        // scanner resumes in the template's raw text.
+        kind = scanner.reScanTemplateToken(false) as number;
+        const tailStart: number = scanner.getTokenStart();
+        const tailEnd: number = scanner.getTokenEnd();
+        if (kind === TEMPLATE_MIDDLE) blank(tailStart + 1, Math.max(tailStart + 1, tailEnd - 1));
+        else if (kind === TEMPLATE_TAIL) blank(tailStart + 1, tailEnd);
+        cursor = Math.max(cursor, tailEnd);
+        if (kind === TEMPLATE_TAIL) splices.pop();
+        kind = scanner.scan() as number;
         continue;
       }
-      if (ch === "`") {
-        mask(i, i + 1);
-        stack.pop();
-        i += 1;
-        continue;
-      }
-      if (ch === "$" && next === "{") {
-        // The splice's braces stay live: they are balanced code the depth
-        // walk counts. Only the `$` masks out, and the `{` is counted as code.
-        mask(i, i + 1);
-        stack.push("splice");
-        i += 2;
-        continue;
-      }
-      mask(i, i + 1);
-      i += 1;
-      continue;
     }
-    // Live code (top level or inside a splice).
-    if (ch === "/" && next === "/") {
-      let j = i + 2;
-      while (j < n && text[j] !== "\n") j += 1;
-      mask(i, j);
-      i = j;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      const end = text.indexOf("*/", i + 2);
-      const stop = end === -1 ? n : end + 2;
-      mask(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      let j = i + 1;
-      while (j < n && text[j] !== ch) {
-        if (text[j] === "\\") j += 1;
-        j += 1;
-      }
-      mask(i, Math.min(j + 1, n));
-      i = Math.min(j + 1, n);
-      continue;
-    }
-    if (ch === "`") {
-      mask(i, i + 1);
-      stack.push("tmpl");
-      i += 1;
-      continue;
-    }
-    if (ch === "}" && stack[stack.length - 1] === "splice") {
-      // The splice's closing brace IS structural code: the depth walk must
-      // see it so the enclosing template's braces stay balanced. Only the
-      // frame ends here — the character itself stays unmasked.
-      stack.pop();
-      i += 1;
-      continue;
-    }
-    i += 1;
+    kind = scanner.scan() as number;
   }
+  if (cursor < text.length) blank(cursor, text.length);
   return out.join("");
 }
 
@@ -176,8 +159,9 @@ function maskNonCode(text: string): string {
  * still read as its async neighbour. This instead finds every declaration,
  * walks its body to the matching close brace, and returns the innermost
  * declaration whose body spans `at`. Body braces are matched by depth over
- * the masked copy, so neither a comment's nor a string's braces can end or
- * extend a body; the `${…}` splices stay live because they are real code.
+ * the scanner-masked copy, so neither a comment's, a string's nor a template's
+ * braces can end or extend a body; the `${…}` splices stay live because they
+ * are real code, and so is a `{` nested inside one.
  */
 function enclosingFunction(rawText: string, at: number): string {
   const text = maskNonCode(rawText);
@@ -1050,6 +1034,23 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect([...spliced.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(spliced, hit.index!))).toEqual([
       "createBot",
     ]);
+    // A `{` NESTED inside a splice closes before the splice does. A masker that
+    // pops its splice frame on the object literal's `}` leaves the real closer
+    // as template text, so one brace stays uncounted and createBot's body runs
+    // to the end of `outer` — crediting the outsider's INSERT to createBot.
+    const nestedSplice = [
+      "function outer() {",
+      "  function createBot() {",
+      "    const note = `note ${JSON.stringify({ ready: true })}`;",
+      "    void note;",
+      "  }",
+      "  const sql = `INSERT INTO review_bots (id) SELECT ?1`;",
+      "  void sql;",
+      "}",
+    ].join("\n");
+    expect(
+      [...nestedSplice.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(nestedSplice, hit.index!)),
+    ).toEqual(["outer"]);
   });
 
   test("src/ holds exactly the two creation-path INSERT INTO review_bots sites, one per creation function", () => {

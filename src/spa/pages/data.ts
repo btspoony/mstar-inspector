@@ -107,8 +107,9 @@ export type AppsPayload = {
     owned?: boolean;
     installed?: boolean;
     /** F1: the App's month state from its MOUNTED CHAIN; `null` = no chain,
-     * which renders the dash rather than a fabricated number. */
-    month?: { used_rp: number; owned: boolean; multiplier: number } | null;
+     * which renders the dash rather than a fabricated number. A row's
+     * `multiplier` is `null` when no double holds the chain's product. */
+    month?: { used_rp: number; owned: boolean; multiplier: number | null } | null;
     /** The workspace's own live installations of this App (D43). */
     installations?: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
     /** The App's ordered chain in this workspace — read-only in this release. */
@@ -141,9 +142,12 @@ export type AppsPayload = {
 /**
  * One list row's month block, or `null` when the field is absent/nil. `used_rp`
  * is a recorded spend (a whole number, zero allowed) and the multiplier is the
- * chain's product — the same domains the writer and the detail parsers apply.
+ * chain's product — an explicit `null` when no double holds it, which renders
+ * the unavailable marker rather than failing the whole list.
  */
-function isAppsRowMonth(value: unknown): value is { used_rp: number; owned: boolean; multiplier: number } {
+function isAppsRowMonth(
+  value: unknown,
+): value is { used_rp: number; owned: boolean; multiplier: number | null } {
   return (
     isRecord(value) &&
     isRpAmount(value.used_rp) &&
@@ -151,8 +155,8 @@ function isAppsRowMonth(value: unknown): value is { used_rp: number; owned: bool
     // The server serves the PRODUCT of the mounted chain, not one bot's stored
     // factor, and the products a legal write can produce are not bounded by the
     // write guard (a price edit or a sub-1 removal lifts one). Any positive
-    // finite product parses; the price is guarded where it is spent.
-    isServedChainProduct(value.multiplier)
+    // finite product parses; `null` is the server's own "not representable".
+    (value.multiplier === null || isServedChainProduct(value.multiplier))
   );
 }
 

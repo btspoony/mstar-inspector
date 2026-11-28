@@ -351,6 +351,20 @@ describe("spend reads 本月已用 in Credits", () => {
     const html = render(payload([app({ month: { used_rp: 1240, owned: true, multiplier: 1 } })]), "installed");
     expect(html).toContain(t("en", "credits.unlimitedOwn", { used: "1.24" }));
   });
+
+  // An unrepresentable chain product is a SERVED state, not a failed read: the
+  // row keeps its recorded spend and says the factor is unavailable instead of
+  // printing a number no double holds.
+  test("an unrepresentable chain factor renders the unavailable marker, not a number", () => {
+    const html = render(
+      payload([app({ month: { used_rp: 1240, owned: false, multiplier: null } })], { month_plan_rp: 5000 }),
+      "installed",
+    );
+    expect(html).toContain(t("en", "apps.chain.factorUnavailable"));
+    // The recorded spend still renders beside the marker: the factor is unknown,
+    // not the usage.
+    expect(html).toContain("1.24 Credits / 5.00 Credits");
+  });
 });
 
 describe("the installed empty state renders ONE create control", () => {

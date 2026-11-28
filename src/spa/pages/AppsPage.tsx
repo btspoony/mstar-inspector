@@ -147,16 +147,21 @@ export function appsTabQuery(tab: AppsTab, defaultTab: AppsTab): string {
  */
 function monthSpendCell(
   locale: SpaBoot["locale"],
-  month: { used_rp: number; owned: boolean } | null,
+  month: { used_rp: number; owned: boolean; multiplier: number | null } | null,
   quotaError: boolean,
   planRp: number | null,
   rpPerCredit?: number,
 ): string {
   if (month === null) return t(locale, "bots.monthNone");
-  if (month.owned) {
-    return usageCeilingCell(locale, month, { owned: true, quotaError: false, ceilingRp: null, rpPerCredit });
-  }
-  return usageCeilingCell(locale, month, { owned: false, quotaError, ceilingRp: planRp, rpPerCredit });
+  const figure = month.owned
+    ? usageCeilingCell(locale, month, { owned: true, quotaError: false, ceilingRp: null, rpPerCredit })
+    : usageCeilingCell(locale, month, { owned: false, quotaError, ceilingRp: planRp, rpPerCredit });
+  // `multiplier: null` = the chain's factor is outside the double range, so no
+  // price can be derived from it. The recorded spend stays (it is history); the
+  // marker says why the figure is not a forecast.
+  return month.multiplier === null
+    ? `${figure} · ${t(locale, "apps.chain.factorUnavailable")}`
+    : figure;
 }
 
 /** The list's pending-bind flow, threaded from the stateful page. */

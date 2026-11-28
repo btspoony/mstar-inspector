@@ -434,6 +434,50 @@ describe("an unshared mount keeps availability and history, not configuration", 
     expect(afterUnshare).toBe(2);
   });
 
+  // The served factor counts what the relay would RUN. An archived row is not
+  // run, so it leaves the factor — while the row, its spend and its unavailable
+  // marker stay visible. Otherwise retiring a bot would keep pricing the chain,
+  // and a large archived factor could take the whole list offline.
+  test("archiving a row removes its factor while the row and its spend stay", async () => {
+    const db = await world();
+    const second = "bot-tenant-second";
+    db.raw.run(
+      `INSERT INTO review_bots (id, workspace_id, name, scope, multiplier, created_at, updated_at)
+       VALUES ('${second}', '${TENANT_WS}', 'second', 'owned', 3, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+       UPDATE review_bots SET multiplier = 2 WHERE id = '${APP_ID}';
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+       VALUES ('${APP_ID}', '${TENANT_WS}', 2, '${second}');
+       -- The list's month window is the CURRENT UTC month: stamp the spend now.
+       INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, bot_id, rp, occurred_at)
+       VALUES ('review-second', 1, 'token-second', '${TENANT_WS}', '${second}', 900, datetime('now'));`,
+    );
+    const read = async (): Promise<{ multiplier: number | null; archived: boolean[]; used: number }> => {
+      const list = (await (await get(db, TENANT_LIST, "mallory")).json()) as {
+        apps: Array<{
+          bot_id: string;
+          month: { multiplier: number | null; used_rp: number } | null;
+          chain: Array<{ archived: boolean }>;
+        }>;
+      };
+      const row = list.apps.find((app) => app.bot_id === APP_ID)!;
+      return {
+        multiplier: row.month?.multiplier ?? null,
+        archived: row.chain.map((entry) => entry.archived),
+        used: row.month?.used_rp ?? 0,
+      };
+    };
+    // 2 × 3 = 6 while both run.
+    expect((await read()).multiplier).toBe(6);
+
+    db.raw.run(`UPDATE review_bots SET archived_at = '2026-02-01T00:00:00.000Z' WHERE id = '${second}'`);
+    const retired = await read();
+    // The ×3 factor leaves the aggregate; the row stays with its marker, and its
+    // recorded spend stays in the month total.
+    expect(retired.multiplier).toBe(2);
+    expect(retired.archived).toEqual([false, true]);
+    expect(retired.used).toBe(900);
+  });
+
   test("a consumer's /bot payload carries no raw ceiling, and the owner's does", async () => {
     const db = await world();
     db.raw.run(`UPDATE review_bots SET monthly_rp = 4000 WHERE id = '${APP_ID}'`);

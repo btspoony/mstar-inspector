@@ -361,6 +361,7 @@ export const zhCN: Dictionary = {
       "此后，正在使用此机器人的工作区会跳过它：投递落到链上的下一个机器人，没有可用机器人时被拒绝，直到重新共享。",
     shareOutsideOfficial: "此机器人所属工作区已不是平台的官方工作区，无法共享。需先由平台操作员指定。",
     shareForbidden: "只有本工作区的所有者或管理员可以共享它的机器人。",
+    nothingToSave: "没有可保存的改动——上限未被修改。",
   },
   pullRequests: {
     backToList: "返回列表",
@@ -527,6 +528,7 @@ export const zhCN: Dictionary = {
       tagMine: "自有",
       tagShared: "共享",
       rowUnavailable: "已不再共享给本工作区——跳过",
+      factorUnavailable: "链路倍率不可用",
       moveUp: "将「{bot}」前移",
       moveDown: "将「{bot}」后移",
       removeBot: "将「{bot}」移出链",

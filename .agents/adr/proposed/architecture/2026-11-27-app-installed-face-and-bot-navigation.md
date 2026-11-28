@@ -33,7 +33,7 @@ The detail payload states which relation the viewer has to the App, and the face
 - The installed face renders **no** creator-only section: no credentials, no share switch, no delete/enable, no metadata refresh, no delivery tab. Its metric band carries 挂载的机器人, 安装 and 本月已用 in Credits. A 24h rejection count is not rendered anywhere — not here, not on the creator face, not on a list.
 - The installed face's chain is the one writer here: the installing workspace's owner/admin reorders it, removes a bot and adds another, and its rows state each bot's default model chain, runtime, multiplier and month spend. A member sees the same rows with no controls present (not disabled). This keeps the split record's rule — only the installing workspace's owner or admin edits a chain.
 - The creator face keeps the App's own settings, delivery and installations, and owns no chain: the App is supply, the mount belongs to the install state. 应用设置 is ONE GitHub App section that carries the cached metadata and the credential state together (webhook URL, saved-credential line, refresh button) — there is no separate credentials block and no repository block, because review policy lives on the repository detail. The operations block stays; the share switch renders only for the official workspace, with the non-official read-only variant stated. The tab set is 应用设置 / 投递状态 / 已安装.
-- Authorization stays server-side: `canManageApp` continues to gate every creator route and field, and the face is a rendering choice over two already-authorized reads, never the gate itself.
+- Authorization stays server-side: `canManageApp` continues to gate every creator route and field with ONE exception — the paged delivery LOG (`GET …/api/apps/:appId/deliveries`) is member-readable: it gates on `requireMember` and narrows a non-owner's rows to its own workspace, while the delivery SUMMARY on the detail payload stays manager-only. The face is a rendering choice over two already-authorized reads, never the gate itself.
 
 ### App identity is stated once
 
@@ -85,7 +85,7 @@ A failed model-option read removes model *selection* only, and only on the bot's
 - No user-visible string contains `RP`; every amount, ceiling and spend figure renders in Credits with two decimals, and every 本月 label reads 本月已用 with its ceiling or 不限.
 - The App detail header contains no bot-settings action; the App detail renders no identity fact twice.
 - A failed model-option read leaves existing chain rows visible on the editable bot face and states what the reader can still do.
-- `canManageApp` still refuses every creator route and field for a non-manager; the chain write on the installed face is authorized by installer owner/admin on the server, never by the rendered face.
+- `canManageApp` still refuses every creator route and field for a non-manager, with the one stated exception: the paged delivery LOG stays member-readable (workspace-scoped), while the delivery SUMMARY stays manager-only; the chain write on the installed face is authorized by installer owner/admin on the server, never by the rendered face.
 
 ## Risks
 

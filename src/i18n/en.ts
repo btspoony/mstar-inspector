@@ -396,6 +396,7 @@ export const en = {
     shareOutsideOfficial:
       "This bot's workspace is no longer the platform's official workspace, so it cannot be shared. An operator sets the designation first.",
     shareForbidden: "Only an owner or admin of this workspace can share its bot.",
+    nothingToSave: "Nothing to save — the ceiling was not changed.",
   },
   pullRequests: {
     backToList: "Back to list",
@@ -562,6 +563,7 @@ export const en = {
       tagMine: "mine",
       tagShared: "shared",
       rowUnavailable: "No longer shared with this workspace — skipped",
+      factorUnavailable: "chain factor unavailable",
       moveUp: "Move {bot} earlier",
       moveDown: "Move {bot} later",
       removeBot: "Remove {bot} from the chain",

@@ -1798,6 +1798,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * mounted bot or a removal of a sub-1 factor lifts an admitted product past
      * the bound, and neither write is this batch's to refuse. The charge stays
      * guarded where the money is taken: `rpFor`/`chargeUsage` fail closed.
+     *
+     * The guard folds in exactly the factors the SERVED value does: a row the
+     * viewer may not price, and an archived row, both count as `1`. Anything
+     * else would let the foreign owner's private price, or a retirement the
+     * relay already skips, decide whether this workspace's mount is admitted.
      */
     async replaceInstallChain(
       input: { appId: string; workspaceId: string; botIds: readonly string[] },
@@ -1855,12 +1860,26 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           // already hold can only shrink or reorder what is served, so it is
           // admitted even when the old chain was already outside the domain:
           // that is the operator's only way to repair it.
+          //
+          // A row the VIEWER may not price — a bot of another workspace that is
+          // no longer shared — counts as `1`, exactly as the read projection
+          // serves it. Folding its stored multiplier in would let the foreign
+          // owner's private price change whether THIS workspace's mount is
+          // admitted, which leaks the number the row masks. An ARCHIVED row
+          // counts as `1` for the same reason reversed: the served factor
+          // leaves it out, so a price the reader never applies must not veto a
+          // mount either. Both predicates are the read projection's, so the two
+          // cannot drift.
           db
             .prepare(
               `WITH RECURSIVE step(i, p) AS (
                  SELECT -1, 1.0
                  UNION ALL
-                 SELECT j.key, step.p * COALESCE((SELECT b.multiplier FROM review_bots b
+                 SELECT j.key, step.p * COALESCE((SELECT CASE
+                                                     WHEN b.archived_at IS NULL
+                                                      AND (b.scope = 'shared' OR b.workspace_id = ?2)
+                                                     THEN b.multiplier ELSE 1 END
+                                                   FROM review_bots b
                                                    WHERE b.id = j.value AND b.deleted_at IS NULL), 1)
                    FROM step JOIN json_each(?3) j ON j.key = step.i + 1
                ),

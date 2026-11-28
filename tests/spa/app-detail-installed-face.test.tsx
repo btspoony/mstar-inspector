@@ -465,6 +465,42 @@ describe("installed face — manager", () => {
     expect(markup).toContain("Archived — skipped");
   });
 
+  // Finding E: the workspace that MOUNTS the bot — not its owner — must see the
+  // retirement in its own chain. The owner archives in another workspace; this
+  // workspace's read is the same row with `archived: true`, and a plain member
+  // reads it too (the chain is served to every member).
+  test("a mounting workspace sees 已归档 in its chain, member and manager alike", () => {
+    const retired = [
+      chainRow({ position: 1, bot_id: "bot-live", name: "Live", month_used_rp: 10 }),
+      chainRow({ position: 2, bot_id: "bot-retired", name: "Retired", owned: false, available: false, archived: true }),
+    ];
+    for (const locale of ["en", "zh_CN"] as const) {
+      const label = t(locale, "appDetail.installed.archivedSkipped");
+      for (const payload of [
+        { ...memberPayload(), chain: retired },
+        { ...managerPayload(), chain: retired },
+      ]) {
+        const html = renderToStaticMarkup(
+          createElement(InstalledChainSection, {
+            locale,
+            appId: "app-demo",
+            chain: payload.chain,
+            // A member gets the same rows with every control absent.
+            canEditChain: "can_edit_chain" in payload ? payload.can_edit_chain : false,
+            mountableBots: [],
+            rpPerCredit: 500,
+            onReordered: async () => true,
+          }),
+        );
+        expect(html).toContain("Retired");
+        expect(html).toContain(label);
+        // The live row stays unmarked: the badge is the retired row's own fact.
+        expect(html.split(label).length - 1).toBe(1);
+      }
+    }
+    expect(t("zh_CN", "appDetail.installed.archivedSkipped")).toContain("已归档");
+  });
+
   test("each row states its default model chain and its runtime", async () => {
     expect(markup).toContain("Default chain");
     expect(markup).toContain("Runtime harness");

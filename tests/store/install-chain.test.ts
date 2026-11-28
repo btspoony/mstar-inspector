@@ -504,6 +504,89 @@ describe("replaceInstallChain — a new mount stays inside the write bound", () 
     expect(isServedChainProduct(chain.reduce((product, bot) => product * bot.multiplier, 1))).toBe(true);
     db.raw.close();
   });
+
+  /**
+   * A retained row whose bot the reader may no longer price must count as `1`
+   * in the guard, exactly as the read projection serves it. Otherwise the
+   * foreign owner's private multiplier decides whether THIS workspace's mount is
+   * admitted — a refusal that changes with a number the row masks is that number
+   * disclosed.
+   */
+  test("a hidden foreign multiplier does not change the mount decision", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBotWithMultiplier(db, "bot-1000a", 1000);
+    seedBotWithMultiplier(db, "bot-1000b", 1000);
+    seedBot(db, "bot-solo", "provider", "shared");
+    seedBot(db, "bot-foreign", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    // Mount the foreign bot while it is still shared, then have its owner stop
+    // sharing it: the row is RETAINED, and from here its price is invisible here.
+    await store.replaceInstallChain({
+      appId: "app-1",
+      workspaceId: "default",
+      botIds: ["bot-solo", "bot-foreign"],
+    });
+    db.raw.run("UPDATE review_bots SET scope = 'owned' WHERE id = 'bot-foreign'");
+
+    // Two different private prices, one candidate chain: the two 1000× factors
+    // are the whole VISIBLE product (1,000,000, inside the bound), and the
+    // foreign row is a `1`. The decision must not move with the hidden number.
+    const decision = async (): Promise<string> =>
+      store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-solo", "bot-1000a", "bot-1000b", "bot-foreign"],
+      });
+    const outcomes: string[] = [];
+    for (const hidden of [1000, 0.01]) {
+      db.raw.prepare("UPDATE review_bots SET multiplier = ? WHERE id = 'bot-foreign'").run(hidden);
+      outcomes.push(await decision());
+    }
+    expect(outcomes).toEqual(["ok", "ok"]);
+    db.raw.close();
+  });
+
+  /**
+   * The served factor counts what the relay RUNS, so an archived row is a `1`
+   * there — and must be a `1` in the guard too, or a retired bot's price vetoes a
+   * mount the reader never prices it in.
+   */
+  test("an archived row does not gate a new mount", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-x", "provider", "shared");
+    seedBot(db, "bot-y", "provider", "shared");
+    seedBot(db, "bot-w", "provider", "shared");
+    seedBot(db, "bot-z", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    // Retire `bot-z` WHILE it is live (a new mount may not be archived), then
+    // price it high: a retained ARCHIVED row, exactly the state served as ×1.
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-z"] });
+    db.raw.prepare("UPDATE review_bots SET archived_at = ? WHERE id = 'bot-z'").run(TS);
+    db.raw.run("UPDATE review_bots SET multiplier = 1000 WHERE id IN ('bot-z', 'bot-x', 'bot-y')");
+    db.raw.run("UPDATE review_bots SET multiplier = 3 WHERE id = 'bot-w'");
+    await store.replaceInstallChain({
+      appId: "app-1",
+      workspaceId: "default",
+      botIds: ["bot-z", "bot-x", "bot-y"],
+    });
+
+    // The visible product is 1000 × 1000 × 3 = 3,000,000, inside the bound.
+    // Counting the archived 1000 as well would make 3 × 10^9 and refuse.
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-z", "bot-x", "bot-y", "bot-w"],
+      }),
+    ).toBe("ok");
+    db.raw.close();
+  });
 });
 
 describe("setBotQuotaOverride — the writer bot_quota_overrides was missing", () => {

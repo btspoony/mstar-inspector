@@ -138,10 +138,12 @@ export function BotPricingSection({
 
   async function savePricing(): Promise<void> {
     if (busy) return;
-    // An untouched ceiling rides the save as the stored RP itself: the field's
-    // two-decimal text is a READ rendering, and round-tripping it would rewrite
-    // `1234 RP` as `1230 RP` (or zero a sub-0.005-Credit ceiling and refuse it).
-    const capValue = capEdited ? parseCreditsInput(cap, rate) : monthlyRp;
+    // An untouched ceiling is OMITTED, which the route reads as "leave the
+    // column alone" — the field's two-decimal text is a READ rendering, so
+    // echoing it back would rewrite `1234 RP` as `1230 RP` (or zero a
+    // sub-0.005-Credit ceiling and refuse it), and echoing the page's stored
+    // copy would overwrite a ceiling another admin changed meanwhile.
+    const capValue = capEdited ? parseCreditsInput(cap, rate) : undefined;
     if (capValue === "invalid") {
       setNotice({ kind: "error", message: t(locale, "bots.overrideInvalid") });
       return;
@@ -156,12 +158,18 @@ export function BotPricingSection({
         return;
       }
     }
+    // Nothing edited (an unshared bot's ceiling untouched): the route requires
+    // at least one field, and there is no write to make.
+    if (nextMultiplier === undefined && capValue === undefined) {
+      setNotice({ kind: "warn", message: t(locale, "botSettings.nothingToSave") });
+      return;
+    }
     setBusy(true);
     setNotice(null);
     try {
       const { status } = await patchJson(`${botApiPath}/pricing`, {
         ...(nextMultiplier === undefined ? {} : { multiplier: nextMultiplier }),
-        monthly_rp: capValue,
+        ...(capValue === undefined ? {} : { monthly_rp: capValue }),
       });
       if (status < 200 || status >= 300) {
         setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
