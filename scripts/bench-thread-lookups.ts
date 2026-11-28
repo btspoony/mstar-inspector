@@ -45,7 +45,6 @@ for (const threads of [5_000, 20_000, 80_000]) {
     VALUES (?, ?, ?, 'bot', 1, 'acme', 'widgets', ?, 'sha', 1, '{}', ?, ?, 'pending', ?, 1, ?)`);
   db.run("BEGIN");
   for (let i = 0; i < threads; i++) {
-    // note: Two threads per finding; every other finding's older thread was superseded by a re-post.
     const finding = Math.floor(i / 2);
     const superseded = i % 4 === 0 ? `pub-${Math.floor(i / 8)}-next` : null;
     insert.run(`thread-${i}`, `finding-${finding}`, `pub-${Math.floor(i / 8)}`, Math.floor(i / 50),
@@ -63,7 +62,6 @@ for (const threads of [5_000, 20_000, 80_000]) {
         const stmt = handle.prepare(sql);
         const bound = sql.includes("LIMIT ?") ? stmt.bind(...ids, BIND_UNBOUND_THREADS_MAX_ENTRIES) : stmt.bind(...ids);
         const results = (await bound.all<{ id: string }>()).results;
-        // note: Only the binding read orders its rows; the untimed final pass sorts the others to compare them as sets.
         if (normalize && !sql.includes("ORDER BY")) results.sort((a, b) => a.id.localeCompare(b.id));
         seen.push(...results);
       }

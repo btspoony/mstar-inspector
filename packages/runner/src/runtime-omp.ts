@@ -104,10 +104,8 @@ function traceStage(stage: string): void {
   console.error(JSON.stringify({ event: "review_stage", stage }));
 }
 
-/** Bound on a free-text slug inside a stage token (the reader caps at 60 chars). */
 const STAGE_SLUG_MAX_CHARS = 20;
 
-/** One token-safe word from a free-text cause: no whitespace, bounded. */
 function stageSlug(text: string | undefined, maxChars = STAGE_SLUG_MAX_CHARS): string {
   if (text === undefined) return "";
   return text.replace(/\s+/g, "-").replace(/[^\w.:=-]/g, "").slice(0, maxChars);
@@ -180,11 +178,6 @@ export function reportFailedStage(cause: string | undefined): string {
   return slug === "" ? "report_failed" : `report_failed:${slug}`;
 }
 
-/**
- * Trace the recheck seat's boundary exactly ONCE per run: `recheck_start` on
- * entry, then the terminal token when the work settles. Every throw path ends
- * on a stage that names a seat that actually ran last.
- */
 function tracedRecheck(work: Promise<RecheckSeatResult>): Promise<RecheckSeatResult> {
   traceStage("recheck_start");
   return work.then(
@@ -199,20 +192,6 @@ function tracedRecheck(work: Promise<RecheckSeatResult>): Promise<RecheckSeatRes
   );
 }
 
-/**
- * Run the report seat through ONE decision path for every level. The session is
- * created only AFTER eligibility says the seat will run, so an ineligible run
- * never opens a session nor emits `report_start`.
- *
- * Terminal stages, by what actually happened:
- * - a document                             -> `report_done:turns=N`
- * - call made, no usable document          -> `report_absent`
- * - NO call made (`budget` / `aborted`)    -> `report_aborted`
- * - the call (or the session) failed       -> `report_failed:<slug>`
- *
- * A clock crossing after `report_start` is therefore a cancellation, never an
- * empty seat: `report_absent` requires that a call actually happened.
- */
 async function tracedReportSeatFor(
   input: AgentRuntimeRunInput,
   getSession: () => Promise<ToolSession>,
@@ -223,9 +202,6 @@ async function tracedReportSeatFor(
 ): Promise<ReportDoc | null> {
   const eligibility = reportEligibility(input, envelope, signal);
   if (!eligibility.ok) {
-    // why: ONE place logs the skip and names it in the trace — the dispatch
-    // log and the stage can never disagree, and no `report_start` claims a
-    // seat that never ran.
     console.error(JSON.stringify({ event: "report_skipped", reason: eligibility.reason }));
     traceStage(reportSkipStage(eligibility.reason));
     return null;
@@ -239,9 +215,6 @@ async function tracedReportSeatFor(
       empty = reason;
     });
   } catch (error) {
-    // why: A REJECTED report call (or a session that could not be created) is a
-    // seat failure, not "no document". The review is never failed by the report
-    // (narrative only), so this stops at the trace.
     traceStage(reportFailedStage(causeText(error)));
     return null;
   }
@@ -502,7 +475,6 @@ export function partitionSeats(reconFacts: readonly string[], level: ReviewLevel
   return plans;
 }
 
-/** The two-seat partition `partitionSeats` asks for when `seats` allows it. */
 function partitionTwoSeats(files: readonly ChangedFile[]): SeatPlan[] {
   const degenerateHalves = (): SeatPlan[] => {
     const paths = files.map((file) => file.path).sort();
@@ -559,7 +531,6 @@ function dispatchBudgetMinutes(level: ReviewLevel): number {
   return budgetMinutes(remainingSoftMinutes(Date.now(), level));
 }
 
-/** Watchdog cadence for one seat's cap check. */
 const SEAT_WATCH_TICK_MS = 250;
 
 /**
@@ -584,16 +555,14 @@ export function seatCapAbortError(windowMs: number): Error {
  *
  * The seat's own clock starts at its FIRST REAL model turn (`firstTurnMs`),
  * never at dispatch: session setup and the skill load are paid by the run, not
- * out of the seat's thinking time. The deep parent keeps the legacy ×2 headroom
- * because its soft cap is a convergence target its own supervision nudges
- * enforce — the hard window must let the steer past the soft cap land instead
- * of cutting the turn mid-yield.
+ * out of the seat's thinking time. The ceiling is the RUNNER's tier maximum
+ * (`RUNNER_MAX_BUDGET_MS`), not the engine's wall-clock table, which is shorter
+ * for `quick` (300 s against 480 s). The deep parent keeps the legacy ×2
+ * headroom because its soft cap is a convergence target its own supervision
+ * nudges enforce — the hard window must let the steer past the soft cap land
+ * instead of cutting the turn mid-yield.
  */
 export function seatDeadlineMs(nowMs: number, firstTurnMs: number, level: ReviewLevel): number {
-  // why: The seat ceiling is the RUNNER's tier maximum, not the engine's
-  // wall-clock table — the two disagree for `quick` (480 s vs 300 s), and the
-  // engine figure is SHORTER than what the old from-spawn cap already gave a
-  // large quick diff. Only the deep parent keeps its ×2 headroom.
   const ceilingMs = RUNNER_MAX_BUDGET_MS[level] * (level === "deep" ? 2 : 1);
   return Math.min(firstTurnMs + ceilingMs, nowMs + remainingOuterMs(nowMs, level) - PUBLICATION_TAIL_MS);
 }
@@ -774,12 +743,6 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
 
 type SeatGap = { plan: SeatPlan; reason?: string };
 
-/**
- * The cap reason OUR watchdog stamped, when it fired. The abort is the runner's
- * decision, so whatever the SDK does next — resolve with a salvaged result or
- * reject with a cleanup timeout — the seat's outcome is a CAP STOP, not the
- * SDK's failure. Reading the signal (not the error) is what keeps that true.
- */
 function watchdogCapReason(watch: SeatWatch): string | undefined {
   const signal = watch.controller.signal;
   return signal.aborted ? causeText(signal.reason) : undefined;
@@ -1053,6 +1016,12 @@ const DEEP_STOP_UNSCANNED = "deep-parent: the whole diff";
 
 const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (mstar.review/v1 envelope)";
 
+/**
+ * The model a seat actually served, read from its own session. Capture it at
+ * the seat's own settlement: a keep-alive child keeps its registry ref but an
+ * idle park nulls the ref's `session`, so a read at the end of the fan-out
+ * loses the served model.
+ */
 export function servedModel(
   session:
     | {
@@ -1068,11 +1037,6 @@ export function servedModel(
   return model === undefined ? undefined : `${model.provider}/${model.id}`;
 }
 
-/**
- * why: The session's journaled entries for the token-usage fold. An
- * unreadable or absent session manager yields an empty input — capture
- * degrades to fewer buckets, never to a review failure.
- */
 function sessionEntries(
   session: { sessionManager?: { getEntries?: () => SessionEntry[] } } | undefined,
 ): SessionEntry[] {
@@ -1085,11 +1049,6 @@ function sessionEntries(
   }
 }
 
-/**
- * why: The session manager's usage statistics for the deep-seat remainder.
- * Same degradation contract as `sessionEntries`: an absent or throwing
- * accessor yields undefined, which emits no remainder bucket.
- */
 function sessionUsageStats(
   session: { sessionManager?: { getUsageStatistics?: () => UsageStatistics } } | undefined,
 ): UsageStatistics | undefined {
@@ -1102,13 +1061,6 @@ function sessionUsageStats(
   }
 }
 
-/**
- * why: Merge the fold's two DISJOINT inputs — session entries (the parent/
- * host session's own calls; a subagent's spend is journaled ONLY in the
- * child's aggregate `SingleResult`, never duplicated into these entries) and
- * every settled subagent result — into the run's per-(provider, model)
- * buckets. Anything unusable drops out silently: analysis data, never a gate.
- */
 function runTokenUsage(
   entries: readonly SessionEntry[],
   singles: readonly (SubagentUsageSource | undefined)[],
@@ -1241,10 +1193,6 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           if (remainingOuterMs(Date.now(), input.level) <= 0) {
             throw new RunnerBudgetExhausted(0, 0);
           }
-          // why: The deep parent IS the wave's only seat: its clock starts
-          // when its turn is dispatched (its first model turn — the prompt
-          // await IS the first inference), and its window is the whole tier
-          // ceiling, bounded only by the attempt's absolute deadline.
           const firstTurnMs = Date.now();
           deadlineTimer = setTimeout(
             deadlineAbort,
@@ -1318,10 +1266,6 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       const parentTurn = runParentTurn()
         .then(
           (ready) => {
-            // why: The deep parent IS the wave's seat. Its terminal token says
-            // whether the turn produced a usable review or stopped empty; the
-            // engine's parent session exposes no per-run turn count, so the
-            // token omits `turns` rather than inventing one.
             traceStage(
               ready.incomplete === undefined
                 ? seatDoneStage(deepSeatId, undefined)
@@ -1369,10 +1313,6 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
       const reportSingles: SubagentUsageSource[] = [];
-      // why: The deep path goes through the SAME eligibility/skip decision as the
-      // fan-out — a `prContext` gate here skipped the seat silently and left the
-      // trace and the dispatch log disagreeing. The session opens lazily, only
-      // once the seat is actually eligible.
       const report = await tracedReportSeatFor(
         input,
         async () => {
@@ -1385,24 +1325,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         reportSingles,
       );
       const appliedModel = servedModel(session);
-      // why: The parent's `task`-dispatched review seats spend inside
-      // `getUsageStatistics()` without journaling entries or reporting a
-      // subagent result; the recheck/report seats run in their OWN sessions,
-      // so their spend is NOT in the parent's stats — the remainder may
-      // subtract only the parent's journaled buckets, never the child
-      // buckets (deep path only: the quick path folds its seat results and
-      // would double-count).
       const tokenUsage = deepTokenUsage(
         sessionUsageStats(parentSession),
         sessionEntries(parentSession),
         [settled?.usage, ...reportSingles],
       );
       return {
-        // why: The deep parent cannot observe its own `task`-dispatched domain
-        // seats, so absence of `incomplete` proves nothing about their
-        // coverage — a seat cap-stopped mid-review still yields a verdict with
-        // the degradation only in `- notes:`. Deep therefore claims NO coverage
-        // rather than fabricating 1/1 reviewed.
         envelope,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
@@ -1433,8 +1361,10 @@ function runTeardownSignal(controller: AbortController, input: AgentRuntimeRunIn
 /**
  * Whether the report seat can run for this round. ONE authority: the dispatch
  * path logs the reason and the trace names it, so the two can never disagree.
- * `review-incomplete` is a nothing-usable round — there is no review to
- * narrate, so no seat is invented for it.
+ * The run's own state is checked first, so a torn-down or out-of-time run never
+ * blames the input for the run's clock; the caller's own signal is read
+ * directly beside the composed teardown signal because `AbortSignal.any`
+ * propagation can land a tick late.
  */
 export type ReportEligibility =
   | { ok: true; headSha: string; prContext: PrContext }
@@ -1453,12 +1383,6 @@ export function reportEligibility(
   envelope: MstarReviewV1,
   signal?: AbortSignal,
 ): ReportEligibility {
-  // why: The run's own state is checked FIRST — a torn-down or out-of-time run
-  // never starts the seat (its budget guard would refuse it), and naming a
-  // missing seat definition there would blame the input for the run's clock.
-  // why: Both signals mean "the run is over": the composed teardown signal and
-  // the caller's own. `AbortSignal.any` propagation can land a tick late, so
-  // the caller's flag is read directly rather than inferred through the fold.
   if (signal?.aborted === true || input.signal?.aborted === true) return { ok: false, reason: "aborted" };
   if (remainingOuterMs(Date.now(), input.level) <= REPORT_TAIL_MARGIN_MS) {
     return { ok: false, reason: "budget-exhausted" };
@@ -1469,10 +1393,6 @@ export function reportEligibility(
   if (!existsSync(join(input.worktreePath, ".omp", "agents", SEAT_AGENT_FILE))) {
     return { ok: false, reason: "seat-definition-missing" };
   }
-  // why: An INCOMPLETE review is still a review — it yields findings and names
-  // its unscanned scope, so its overview, verification notes and fix plan are
-  // exactly what a reader needs. Only a dead run (aborted / out of time) or
-  // missing inputs make the seat ineligible.
   return { ok: true, headSha, prContext: input.prContext };
 }
 
@@ -1565,16 +1485,9 @@ export const ompAgentRuntime: AgentRuntime = {
       const seatSingles: SubagentUsageSource[] = [];
       const settledSeats = new Set<string>();
       const completedSeatIds = new Set<string>();
-      // Why each non-completed seat stopped, keyed by seat id: `cap` for the
-      // time cap, `failed` (plus a bounded slug) for any other loss.
       const seatStops = new Map<string, { reason: "cap" | "failed"; detail?: string }>();
       const group = Promise.allSettled(
         seats.map(async ({ plan, index, id }) => {
-          // why: The SDK wall-clock timer is disabled (`maxRuntimeMs: 0`): it
-          // ticks from spawn, but the seat's budget starts at its first REAL
-          // model turn and its window is its OWN tier ceiling — neither fact
-          // the executor's static cap can express. The watchdog aborts through
-          // the signal the seat consumes.
           const watch = startSeatWatch(input.level);
           const traceId = seatTraceId(index, id);
           let terminalStage = seatFailedStage(traceId, "seat did not settle");
@@ -1599,10 +1512,6 @@ export const ompAgentRuntime: AgentRuntime = {
             });
             seatSingles.push(result.result);
             let outcome = seatOutput(result, index, plan);
-            // why: A watchdog abort that the SDK settled as a FAILED/payload-less
-            // result is still our cap stop — the seat was cut off by the
-            // runner's clock, not by its own provider. A collected payload is
-            // never discarded this way.
             const capReason = outcome.output === null ? watchdogCapReason(watch) : undefined;
             if (capReason !== undefined && outcome.gap === null) {
               outcome = { output: null, gap: { plan, reason: capReason }, failure: null };
@@ -1610,18 +1519,12 @@ export const ompAgentRuntime: AgentRuntime = {
             if (outcome.gap === null && outcome.output !== null) completedSeatIds.add(id);
             else if (outcome.gap !== null) seatStops.set(id, { reason: "cap", detail: outcome.gap.reason });
             else {
-              // why: Name the CAUSE, not the synthesized seat-number prefix —
-              // `structuredOutput.error` carries the schema verdict and the SDK
-              // `error` the provider fault; the status is the last resort.
               const detail =
                 result.result.error ??
                 result.result.structuredOutput?.error ??
                 `no usable output (status ${result.result.structuredOutput?.status ?? "absent"})`;
               seatStops.set(id, { reason: "failed", detail });
             }
-            // why: All THREE outcomes pick their own terminal stage — a
-            // fulfilled-but-failed result (provider error, schema-rejected
-            // payload) must never be reported as a done seat.
             terminalStage =
               outcome.gap !== null
                 ? seatGapStage(traceId, outcome.gap.reason, result.result.requests)
@@ -1632,10 +1535,6 @@ export const ompAgentRuntime: AgentRuntime = {
           } catch (error) {
             const settled = (error as { result?: unknown } | null | undefined)?.result;
             if (settled !== null && typeof settled === "object") seatSingles.push(settled as SubagentUsageSource);
-            // why: When OUR watchdog fired, a rejection is the SDK's cleanup
-            // failing under an abort we already decided on — the seat's outcome
-            // is the cap stop. Rethrowing here would turn a delivered partial
-            // review into a failure and drop the completed siblings' findings.
             const capReason = watchdogCapReason(watch);
             if (capReason !== undefined) {
               seatStops.set(id, { reason: "cap", detail: capReason });
@@ -1646,12 +1545,6 @@ export const ompAgentRuntime: AgentRuntime = {
             terminalStage = seatFailedStage(traceId, causeText(error));
             throw error;
           } finally {
-            // why: Capture the served model HERE, at the seat's own settlement: the
-            // registry ref survives a keep-alive child
-            // (packages/runner/node_modules/@oh-my-pi/pi-coding-agent/src/task/
-            // executor.ts — only a non-keep-alive run unregisters), but an idle
-            // park nulls its `session`, so a read at the END of the fan-out
-            // would race that.
             servedBySeat.set(id, servedModel(AgentRegistry.global().get(id)?.session));
             settledSeats.add(id);
             watch.stop();
@@ -1668,11 +1561,6 @@ export const ompAgentRuntime: AgentRuntime = {
           deliver: (nudge) => nudgeSession(AgentRegistry.global().get(id)?.session, nudge),
         })),
       });
-      // why: A seat that lost for ANY reason beside a sibling that produced
-      // output must not sink the round — the product rule is "deliver what the
-      // seats found". The losers are recorded per seat (for `coverage`) and the
-      // run decides below: ≥1 usable output delivers a partial review, zero
-      // usable output is an explicit failure.
       let outcomes: SeatOutcome[];
       const siblingLosses: { seat: string; detail: string }[] = [];
       let results: PromiseSettledResult<SeatOutcome>[];
@@ -1691,16 +1579,6 @@ export const ompAgentRuntime: AgentRuntime = {
       });
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
-      // why: A seat that finished its own scope is COMPLETED; a cap-stopped
-      // seat's collected payload still contributes findings, but that seat's
-      // scope was never finished, so it is not counted as completed and its
-      // seat lands in `unreviewed`. The round then delivers when at least one
-      // seat completed; with none it is an explicit failure, never a silent
-      // incomplete success.
-      // why: Delivery is keyed on USABLE OUTPUT, not on a completed seat: a
-      // cap-stopped seat still returns the payload it salvaged, and dropping
-      // that beside no completion is exactly the loss this plan removes. The
-      // coverage block discloses the scope gap (0/2 completed is legal).
       if (outputs.length === 0) {
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
@@ -1713,8 +1591,6 @@ export const ompAgentRuntime: AgentRuntime = {
           const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
           exhausted.recheck = settled?.doc ?? null;
           if (settled !== null) exhausted.recheckStatus = settled.status;
-          // why: The failure must name the seat reason, not just a count — the
-          // capped seat's abort reason is the only evidence of WHY it stopped.
           for (const gap of gaps) {
             console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
           }
@@ -1726,9 +1602,6 @@ export const ompAgentRuntime: AgentRuntime = {
           if (served.size === 1) exhausted.appliedModel = [...served][0]!;
           throw exhausted;
         }
-        // why: Zero usable output with no cap is the ONLY remaining failure —
-        // and it must be one, not an `incomplete` envelope at exit 0 that reads
-        // as success downstream. The cause is the first recorded stop reason.
         const firstStop = seats
           .map(({ id }) => ({ id, stop: seatStops.get(id) }))
           .find((entry) => entry.stop !== undefined);
@@ -1739,9 +1612,6 @@ export const ompAgentRuntime: AgentRuntime = {
         console.error(
           `review failed: no usable seat output${firstStop === undefined ? "" : ` (${firstStop.id}: ${cause})`}`,
         );
-        // why: The failure carries the recheck facts it already paid for — a
-        // settled recheck validated older findings, and the worker must still
-        // be able to record that even though the main review is not delivered.
         const failure = new ReviewNoOutputFailure(
           `${firstStop?.id ?? "seat"}: ${cause}`,
         );
@@ -1750,9 +1620,6 @@ export const ompAgentRuntime: AgentRuntime = {
         throw failure;
       }
       if (gaps.length > 0 || siblingLosses.length > 0) {
-        // why: A delivered partial review keeps its seat losses visible in the
-        // runner log; the product statement about coverage rides the coverage
-        // block (the Check summary and the published body render it).
         for (const gap of gaps) {
           console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
         }
@@ -1764,8 +1631,6 @@ export const ompAgentRuntime: AgentRuntime = {
       const coverage: ReviewCoverage = {
         seatsTotal: seats.length,
         seatsCompleted: completedSeatIds.size,
-        // why: The cap outranks other losses as the headline cause; each seat's
-        // own bounded reason keeps a mixed round unambiguous.
         stoppedReason:
           unreviewedSeats.length === 0
             ? null

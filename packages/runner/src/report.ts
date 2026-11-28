@@ -165,7 +165,8 @@ function structuredData(result: Awaited<ReturnType<typeof runStructuredSubagent>
  * The seat is bounded twice: the subagent's own `maxRuntimeMs`, and a local
  * abort timer for the same window, so a child that ignores its budget cannot
  * hold the run past the outer exec guard (which would kill the process before
- * the envelope reached stdout).
+ * the envelope reached stdout). An aborted child settles as a result with no
+ * payload, so the abort is read from the signal, never inferred from the error.
  */
 export async function runReportSeat(input: {
   session: ToolSession;
@@ -176,14 +177,7 @@ export async function runReportSeat(input: {
   model: string[];
   level: ReviewLevel;
   signal?: AbortSignal;
-  /** Collects the settled subagent `SingleResult` for the token-usage fold; the caller may ignore it. */
   usage?: SubagentUsageSource[];
-  /**
-   * Why the seat produced no document, for the caller's terminal trace. Omitted
-   * on a document; a rejected call is a throw, never a reason. `budget` and
-   * `aborted` mean NO SDK call was made — the caller records a cancellation,
-   * not an empty narrative.
-   */
   onEmpty?: (reason: ReportSeatEmptyReason) => void;
 }): Promise<ReportDoc | null> {
   const external = input.signal ?? new AbortController().signal;
@@ -194,9 +188,6 @@ export async function runReportSeat(input: {
   }
   const maxRuntimeMs = remainingOuterMs(Date.now(), input.level) - REPORT_TAIL_MARGIN_MS;
   if (maxRuntimeMs <= 0) {
-    // why: The window vanished between the caller's eligibility check and this
-    // call. No SDK call is made, so the caller must record a CANCELLATION, not
-    // an empty seat — the reason is reported rather than guessed.
     console.error(JSON.stringify({ event: "report_skipped", reason: "budget" }));
     input.onEmpty?.("budget");
     return null;
@@ -240,7 +231,6 @@ export async function runReportSeat(input: {
     const reason = timedOut ? "timeout" : "seat-failed";
     const message = redactedError(error instanceof Error ? error.message : String(error));
     console.error(JSON.stringify({ event: "report_seat_failed", reason, error: message }));
-    // A rejected call is a FAILURE, not an empty narrative: the caller traces it.
     throw error;
   } finally {
     clearTimeout(timer);
@@ -250,11 +240,8 @@ export async function runReportSeat(input: {
     input.usage?.push(result.result);
     data = structuredData(result);
   } catch (error) {
-    // Completed call, no usable document: the seat ran and produced nothing.
     const settled = (error as { result?: unknown } | null | undefined)?.result;
     if (settled !== null && typeof settled === "object") input.usage?.push(settled as SubagentUsageSource);
-    // why: The child settles an aborted call as a result with no payload — that
-    // is the run ending under the seat, not an empty narrative.
     if (external.aborted) {
       console.error(JSON.stringify({ event: "report_seat_aborted" }));
       input.onEmpty?.("aborted");

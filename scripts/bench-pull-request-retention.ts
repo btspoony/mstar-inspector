@@ -9,12 +9,12 @@ import { createReviewBotsStore } from "../src/dashboard/apps-store";
 // window are spread through the ledger. Each run deletes inside a transaction
 // that is rolled back untimed, so every run sees the same rows; both arms must
 // delete the same number of rows, and the same ids whenever all due rows fit
-// under the per-run cap.
+// under the per-run cap. `RETENTION` holds the absent-row defaults of the
+// pull-request retention sweep settings.
 const warmups = 5;
 const runs = 41;
 const DAY_MS = 86_400_000;
 
-// The absent-row defaults of the pull-request retention sweep settings.
 const RETENTION = { days: 90, cap: 500 };
 
 function sqliteTime(ms: number): string {

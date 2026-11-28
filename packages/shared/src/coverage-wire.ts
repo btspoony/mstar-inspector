@@ -1,25 +1,4 @@
-/**
- * The seat-coverage block the runner adds to a successful review output:
- * which seats completed, why the round stopped, and what was left
- * unreviewed. A present block always asserts a full or partial coverage —
- * all seats finished → `stoppedReason: null`, `unreviewed: []`.
- *
- * Absence is NOT failure — it means the round does not assert coverage.
- * Exactly two legal absences exist:
- *
- * - the DEEP tier, whose seats are task-dispatched in a way the runner
- *   cannot observe, so a deep run asserts nothing about coverage at all;
- * - a round where no seat produced usable output (the runner cannot even
- *   see what it lost) — that round is a failure THROUGH THE FAILURE PATH,
- *   never a partial review, and the coverage block simply never claims a
- *   coverage for it.
- *
- * Consumers must treat a missing block as "not asserted": neither success
- * evidence nor failure evidence.
- *
- * This is transport metadata next to the engine envelope, never an envelope
- * field: `mstar.review/v1` is closed and its schema does not grow.
- */
+/** Seat coverage: see docs/specs/feature/review-lifecycle.md § 7.8. */
 
 /**
  * One seat (and its scope) the round did not review, with WHY it stopped in
@@ -33,19 +12,12 @@ export type ReviewSeatUnreviewed = { seat: string; scope: readonly string[]; rea
 export type ReviewCoverage = {
   seatsTotal: number;
   seatsCompleted: number;
-  /**
-   * The round's dominant stop class: `cap` when any seat was stopped by the
-   * time cap (the allocation cause outranks the rest), else `failed` when any
-   * seat was lost another way, null when every seat finished.
-   */
   stoppedReason: "cap" | "failed" | null;
   unreviewed: readonly ReviewSeatUnreviewed[];
 };
 
-/** How long one per-seat reason slug may be, matching the runner's stage bound. */
 const REASON_MAX_CHARS = 40;
 
-/** The closed per-seat reason vocabulary: `cap`, `failed`, `failed:<slug>`. */
 const REASON_RE = /^(?:cap|failed|failed:[\w.:=-]+)$/;
 
 const COVERAGE_KEYS: Record<string, true> = {
@@ -117,23 +89,9 @@ export function isReviewCoverage(value: unknown): value is ReviewCoverage {
   return unreviewed.every((entry) => entry.reason !== "cap");
 }
 
-/** How many scope entries one seat line shows before folding into a count. */
 const MAX_SCOPE_ENTRIES = 3;
-/** How many seats the not-reviewed list shows before folding into a count. */
 const MAX_SEAT_ENTRIES = 3;
 
-/**
- * Display normalization for repository-controlled text (seat names and file
- * paths — a hostile diff can put anything in either): single-line, no
- * Inspector marker syntax, no angle brackets, and no live Markdown control
- * syntax. This is done HERE, inside the one shared formatter, so the Check
- * summary and the published body render the EXACT same sentence — the
- * body's later marker strip can never diverge from the summary's unaugmented
- * render, and a path or seat name can never escape its plain-text position:
- * both surfaces render the text as Markdown, so the control characters are
- * backslash-escaped (the backslash first, or the escapes would escape each
- * other).
- */
 const displayText = (text: string): string =>
   text
     .replace(/<!--\s*mstar-inspector:[a-zA-Z-]+:v1[^>]*-->/g, "")
@@ -160,8 +118,6 @@ const scopeText = (scope: readonly string[]): string => {
  */
 export function partialSeatCoverageLine(coverage: ReviewCoverage | null | undefined): string {
   if (coverage === null || coverage === undefined) return "";
-  // `0/N` is a real coverage state (every seat was stopped but salvaged output
-  // published), so only full coverage renders nothing here.
   if (coverage.seatsCompleted >= coverage.seatsTotal) return "";
   const stopped =
     coverage.stoppedReason === "cap"
@@ -177,9 +133,6 @@ export function partialSeatCoverageLine(coverage: ReviewCoverage | null | undefi
       : ` — not reviewed: ${seats
           .map((seat) => {
             const scope = scopeText(seat.scope);
-            // The headline already names the round's dominant class, so a
-            // per-seat suffix is shown only when it ADDS information (a mixed
-            // round's other cause, or a failure detail).
             const suffix = seat.reason === coverage.stoppedReason ? "" : seat.reason;
             if (suffix === "") return `${displayText(seat.seat)} (${scope})`;
             return `${displayText(seat.seat)} (${scope === "" ? suffix : `${scope}; ${suffix}`})`;

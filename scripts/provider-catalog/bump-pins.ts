@@ -36,7 +36,7 @@
  * Each lock is regenerated from the COMMITTED one, so only the pin's rows move;
  * resolving from the manifest alone would also lift the caret-ranged
  * transitives the committed lock already fixed. The runner install runs in a
- * temp copy, because a nested `packages/runner/node_modules` would shadow the
+ * temp copy, because a nested runner `node_modules` would shadow the
  * root resolution the repo's typecheck and tests use.
  *
  * Every rewrite is anchored on the current pin, so a surface that already moved

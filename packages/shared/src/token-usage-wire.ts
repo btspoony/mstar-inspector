@@ -6,7 +6,8 @@
  * produced no attributable usage (capture faults never fail the review). The
  * `nonce` binds the document to one consumer-issued run: a stale document a
  * failed clear left behind carries a foreign (or no) nonce and the reader
- * drops it — never this run reading a previous run's usage.
+ * drops it — never this run reading a previous run's usage. `costUsd` is the
+ * SDK catalogue estimate — informational, never invoice-grade.
  */
 export const TOKEN_USAGE_PATH = "/workspace/review-token-usage.json";
 
@@ -33,7 +34,6 @@ export type TokenUsageBucket = {
   cacheWrite: number;
   total: number;
   requests: number;
-  /** The SDK's catalogue cost estimate in USD — informational, not invoice-grade. */
   costUsd: number;
 };
 

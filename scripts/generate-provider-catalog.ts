@@ -13,8 +13,8 @@
  * for pipeline consumers; the sandbox image copies only
  * packages/{shared,runner}/src).
  *
- * Inputs (three pinned):
- *   1. `scripts/provider-catalog/inputs/models.dev-<date>.json` — a trimmed snapshot
+ * Inputs (four pinned):
+ *   1. `scripts/provider-catalog/inputs/` → `models.dev-<date>.json` — a trimmed snapshot
  *      of the ai-sdk ecosystem directory dataset (models.dev, fetched from
  *      https://models.dev/api.json by `scripts/provider-catalog/fetch-models-dev.ts`
  *      and trimmed to the fields this generator consumes: id / name / env /

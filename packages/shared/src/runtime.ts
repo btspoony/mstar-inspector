@@ -125,11 +125,6 @@ export type AgentRuntimeRunInput = {
   recheck?: RecheckInput;
   outerDeadlineEpochMs?: number;
   recheckAssignmentMaxBytes?: number;
-  /**
-   * The fan-out the partition must produce, the worker's own choice (a small
-   * diff under `review.seats.*` can ask for fewer seats than the tier). Absent
-   * is `REVIEW_SEATS[level]`; a level without an entry does not use this input.
-   */
   seats?: number;
   prContext?: PrContext;
   signal?: AbortSignal;
@@ -138,17 +133,11 @@ export type AgentRuntimeRunInput = {
 /** One completed review run: the validated envelope plus its optional side documents. */
 export type ReviewRunResult = {
   envelope: MstarReviewV1;
-  /**
-   * The run's seat coverage, present on every delivered run and absent only
-   * when no seat produced usable output (that round is a failure, never a
-   * partial review). Transport metadata beside the closed envelope.
-   */
   coverage?: ReviewCoverage;
   recheck: RecheckDoc | null;
   recheckStatus?: RecheckStatus;
   report: ReportDoc | null;
   appliedModel?: string;
-  /** The run's per-(provider, model) token spend; absent/empty means nothing attributable. */
   tokenUsage?: TokenUsageBucket[];
 };
 
