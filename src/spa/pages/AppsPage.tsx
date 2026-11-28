@@ -123,11 +123,11 @@ export function installedAppsOf(payload: AppsPayload): AppsPayload["apps"] {
   return payload.apps.filter((app) => app.installed === true);
 }
 
-/** The tab the URL names, or the D8 default once membership is known. */
-export function appsTabOf(search: string, hasInstalled: boolean): AppsTab {
+/** The tab the URL names; the route's default is 已安装的应用. */
+export function appsTabOf(search: string): AppsTab {
   const value = new URLSearchParams(search).get("tab");
   if (value === "installed" || value === "created") return value;
-  return hasInstalled ? "installed" : "created";
+  return "installed";
 }
 
 /** F2: the real default is omitted; every other tab is spelled out. */
@@ -180,7 +180,7 @@ export type AppsReadState =
 export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [apps, setApps] = useState<AppsReadState>({ kind: "loading" });
-  const [tab, setTab] = useState<AppsTab>(() => appsTabOf(window.location.search, false));
+  const [tab, setTab] = useState<AppsTab>(() => appsTabOf(window.location.search));
   const base = apiBase();
   const canCreate = canCreateAppFor(boot, base === "/dashboard" ? null : base.slice("/dashboard/".length));
   const unavailableReason =
@@ -232,14 +232,16 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     [base, load],
   );
 
-  const defaultTab: AppsTab | null =
-    apps.kind === "ok" ? (installedAppsOf(apps.payload).length > 0 ? "installed" : "created") : null;
+  // The route's default is 已安装的应用 whatever the payload holds: the empty
+  // state carries the browse-shared-App entry, and creating has its own
+  // header action, so neither needs to be the landing tab.
+  const defaultTab: AppsTab = "installed";
 
-  // F2: an unknown / stale `?tab=` resolves to the REAL default once the
-  // payload lands, and the URL is corrected to the canonical
-  // (default-omitted) spelling. A known tab is the reader's choice — kept.
+  // F2: an unknown / stale `?tab=` resolves to the default once the payload
+  // lands, and the URL is corrected to the canonical (default-omitted)
+  // spelling. A known tab is the reader's choice — kept.
   useEffect(() => {
-    if (defaultTab === null) return;
+    if (apps.kind !== "ok") return;
     // A legacy `?tab=bots` address is the bot directory's, not this page's:
     // correcting it here would strip the spelling the redirect reads.
     if (legacyBotsTabRedirect(window.location.pathname, window.location.search) !== null) return;
@@ -250,13 +252,9 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     }
     setTab(defaultTab);
     if (raw !== null) {
-      window.history.replaceState(
-        null,
-        "",
-        `${window.location.pathname}${appsTabQuery(defaultTab, defaultTab)}`,
-      );
+      window.history.replaceState(null, "", window.location.pathname);
     }
-  }, [defaultTab]);
+  }, [apps.kind]);
 
   useEffect(() => {
     const onPop = () => {
@@ -269,12 +267,11 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
         window.location.replace(legacy);
         return;
       }
-      if (defaultTab === null) return;
-      setTab(appsTabOf(window.location.search, defaultTab === "installed"));
+      setTab(appsTabOf(window.location.search));
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [defaultTab]);
+  }, []);
 
   // A legacy `?tab=bots` bookmark is the bot directory now: replace the entry
   // and never render the list under it. The effect is unconditional — the
@@ -296,7 +293,7 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     window.history.pushState(
       null,
       "",
-      `${window.location.pathname}${appsTabQuery(target, defaultTab ?? "created")}`,
+      `${window.location.pathname}${appsTabQuery(target, defaultTab)}`,
     );
     setTab(target);
   }
@@ -357,7 +354,7 @@ export function AppsView({
   const installed = loaded ? installedAppsOf(loaded) : [];
   const ownedApps = loaded?.apps.filter((app) => app.owned !== false) ?? [];
   const hasCreated = ownedApps.length > 0;
-  const activeTab: AppsTab = tab ?? (installed.length > 0 ? "installed" : "created");
+  const activeTab: AppsTab = tab ?? "installed";
   // Apps this workspace already installed are never offered for install again.
   const installedAppIds: ReadonlySet<string> = installedAppIdsOf(installed);
   const createAction = (

@@ -48,7 +48,7 @@ import {
   type BotSettingsPayload,
   type ModelOptionGroup,
 } from "./data";
-import { creditAmount, effectiveMultiplier, usageCeilingCell } from "./credits";
+import { effectiveMultiplier } from "./credits";
 import { BotPricingSection, BotSettingsView } from "./BotSettingsPage";
 import { NoticeRegion, PageNotice, type OpNotice } from "./PageNotice";
 
@@ -222,20 +222,11 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
         .map((entry) => ({ name: entry.name, chain: splitModelChain(entry.chain) }))
     : [];
 
-  // One ceiling semantics everywhere (F3/13): a consumer's metric states the
-  // enforced ceiling as `已用 / 上限`; the OWNER of the bot — whoever in that
-  // workspace is reading — is never metered against one. Ownership decides
-  // this; `can_manage` only decides which controls exist.
-  const monthValue = usageCeilingCell(
-    locale,
-    overview ? { used_rp: overview.month_used_rp } : null,
-    {
-      owned,
-      quotaError: payload.quota_error === true,
-      ceilingRp: overview?.effective_ceiling ?? null,
-      rpPerCredit,
-    },
-  );
+  // The band states the month's spend only; the ceiling state and the
+  // remaining budget live in 使用情况 below, where they have room to read.
+  const monthValue = overview
+    ? formatCredits(overview.month_used_rp, rpPerCredit)
+    : t(locale, "bots.monthNone");
   // The multiplier is a consumer price: an unshared bot — and the owner of any
   // bot — is effectively ×1 everywhere it is presented as effective. The
   // stored value stays in the owner's pricing editor.

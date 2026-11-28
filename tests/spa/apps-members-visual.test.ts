@@ -43,7 +43,7 @@ const renderAppsPage = (): string =>
         createElement(AppsView, {
           locale: "en",
           state: "ok",
-          payload: { viewer: { login: "mallory", role: "admin" }, apps: [appRow()] },
+          payload: { viewer: { login: "mallory", role: "admin" }, apps: [appRow({ installed: true })] },
           canCreate: true,
           unavailableReason: "",
           onRetry: () => {},
@@ -374,7 +374,7 @@ describe("empty-state copy (A6)", () => {
         onRetry: () => {},
       }),
     );
-    expect(apps).toContain(t("en", "apps.emptyTitle"));
+    expect(apps).toContain(t("en", "apps.installed.emptyTitle"));
     expect(apps).not.toMatch(/apps\.empty\b/);
     expect(isDictionaryKey("apps.empty")).toBe(false);
     expect(isDictionaryKey("members.empty")).toBe(false);
@@ -465,7 +465,7 @@ describe("Create action is a boot capability (I-000082)", () => {
       expect(html, `apps=${apps}`).toContain(t("en", "apps.createUnavailable.role"));
       expect(html, `apps=${apps}`).toContain(t("en", "apps.heading"));
     }
-    expect(renderFace(false, 0)).toContain(t("en", "apps.emptyTitle"));
+    expect(renderFace(false, 0)).toContain(t("en", "apps.installed.emptyTitle"));
   });
 });
 
@@ -524,8 +524,8 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
       expect(html.match(/data-slot="create-app-chooser"/g)?.length, `apps=${apps}`).toBe(1);
       expect(html, `apps=${apps}`).toContain(t("en", "apps.create"));
     }
-    expect(renderFace(0)).toContain(t("en", "apps.emptyTitle"));
-    expect(renderFace(0)).toContain(t("en", "apps.emptyDescription"));
+    expect(renderFace(0)).toContain(t("en", "apps.installed.emptyTitle"));
+    expect(renderFace(0)).toContain(t("en", "apps.installed.emptyDescription"));
   });
 
   test("the Apps list loading face is the shared table skeleton", () => {
@@ -612,7 +612,7 @@ describe("Apps list metric band (payload-proved facts only)", () => {
 
   test("the empty list keeps its guidance and reports three honest zeroes", () => {
     const empty = renderFace([]);
-    expect(empty).toContain(t("en", "apps.emptyTitle"));
+    expect(empty).toContain(t("en", "apps.installed.emptyTitle"));
     expect([...empty.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
       [t("en", "apps.metricApps"), "0"],
       [t("en", "apps.metricEnabled"), "0"],

@@ -299,9 +299,12 @@ describe("the consumer face", () => {
       expect(text).toContain("3.00 Credits");
       expect(text).toContain("2.91 Credits");
       expect(text).not.toContain("5.00 Credits");
-      // Item 13: the metric states the limit as `已用 / 上限`, and a shared
-      // bot's stored multiplier shows through.
-      expect(text).toContain("0.09 Credits / 3.00 Credits");
+      // The band states the month's spend alone; the enforced ceiling rides the
+      // usage rows above, never the figure.
+      const band = face.container.querySelector('[data-slot="metric-band"]')?.textContent ?? "";
+      expect(band).toContain("0.09 Credits");
+      expect(band).not.toContain("0.09 Credits / 3.00 Credits");
+      // Item 13: a shared bot's stored multiplier shows through.
       expect(text).toContain("×4");
       // The billing source names the providing workspace.
       expect(text).toContain(t("en", "botDetail.usage.source"));
@@ -584,9 +587,12 @@ describe("ceiling semantics follow ownership, not manage permission", () => {
     const face = await mountBot(memberPayload);
     try {
       const text = face.text();
-      expect(text).toContain(t("en", "credits.unlimitedOwn", { used: "1.24" }));
+      // The band reports the spend; the owner's ceiling stays out of it.
+      const band = face.container.querySelector('[data-slot="metric-band"]')?.textContent ?? "";
+      expect(band).toContain("1.24 Credits");
+      expect(band).not.toContain(t("en", "credits.unlimitedOwn", { used: "1.24" }));
       // Neither the finite ceiling nor the unknown marker may appear.
-      expect(text).not.toContain("3.00 Credits / 3.00 Credits");
+      expect(text).not.toContain("1.24 Credits / 3.00 Credits");
       expect(text).not.toContain(t("en", "bots.monthUnknown"));
       // Still the read-only face: the ceiling fact does not hand out controls.
       expect(face.container.querySelector('[role="tablist"]')).toBeNull();
@@ -599,7 +605,10 @@ describe("ceiling semantics follow ownership, not manage permission", () => {
   test("the same stored ceiling reads finite for a real consumer", async () => {
     const face = await mountBot(CONSUMER);
     try {
-      expect(face.text()).toContain("0.09 Credits / 3.00 Credits");
+      const band = face.container.querySelector('[data-slot="metric-band"]')?.textContent ?? "";
+      expect(band).toContain("0.09 Credits");
+      expect(band).not.toContain("0.09 Credits / 3.00 Credits");
+      expect(face.text()).toContain("3.00 Credits");
     } finally {
       await face.close();
     }

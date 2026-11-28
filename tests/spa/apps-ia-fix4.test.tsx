@@ -152,10 +152,11 @@ describe("F10 — the bot detail branches on quota_error", () => {
     }
   });
 
-  test("a KNOWN unlimited plan still reads 'no ceiling'", async () => {
+  test("a KNOWN unlimited plan states no error marker", async () => {
     const page = await mountBot(BOT_PAYLOAD);
     try {
-      expect(page.text).toContain(t("en", "credits.noCeiling", { used: "0.04" }));
+      // The band is the bare figure; no ceiling marker rides it either way.
+      expect(page.text).toContain("0.04 Credits");
       expect(page.text).not.toContain(t("en", "bots.monthUnknown"));
     } finally {
       await page.cleanup();
