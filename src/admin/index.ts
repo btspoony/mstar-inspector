@@ -1150,3 +1150,17 @@ for (const route of ADMIN_ROUTES) {
   else if (route.method === "patch") adminApp.patch(route.path, route.handler);
   else adminApp.delete(route.path, route.handler);
 }
+
+/**
+ * A failed console read must say what broke: this surface is where a
+ * deployment gets diagnosed, so a 500 answers with the error's own sentence
+ * instead of Hono's bare "Internal Server Error" text, and an unmatched path
+ * answers JSON rather than an HTML body the SPA cannot parse.
+ */
+adminApp.onError((error, c) => {
+  const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  console.error(JSON.stringify({ event: "admin_route_failed", path: new URL(c.req.url).pathname, detail }));
+  return c.json({ error: "internal_error", detail }, 500);
+});
+
+adminApp.notFound((c) => c.json({ error: "not_found", path: new URL(c.req.url).pathname }, 404));

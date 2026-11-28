@@ -1,9 +1,17 @@
 import type { ReactNode } from "react";
-import type { Locale } from "../../i18n";
+import { t, type Locale } from "../../i18n";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import type { Loaded } from "./api";
 import type { AdminPageId } from "./pages";
+
+/**
+ * A failed read's headline plus the server's own answer. The console exists to
+ * diagnose itself, so the detail is never swallowed.
+ */
+export function withDetail(locale: Locale, headline: string, detail: string): string {
+  return detail === "" ? headline : `${headline} ${t(locale, "admin.refusalDetail", { detail })}`;
+}
 
 export function Screen<T>({
   state,
@@ -19,7 +27,9 @@ export function Screen<T>({
   children: (data: T) => ReactNode;
 }) {
   if (state.status === "loading") return <PageSkeleton locale={locale} kind="table" />;
-  if (state.status === "error") return <ErrorState locale={locale} message={failed} onRetry={onRetry} />;
+  if (state.status === "error") {
+    return <ErrorState locale={locale} message={withDetail(locale, failed, state.detail)} onRetry={onRetry} />;
+  }
   return <>{children(state.data)}</>;
 }
 

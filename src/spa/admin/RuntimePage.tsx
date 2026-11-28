@@ -46,7 +46,7 @@ import {
   type RouteWorkflowConfig,
   type SeatSettingsConfig,
 } from "./api";
-import { ConsolePath, Screen } from "./screen";
+import { ConsolePath, Screen, withDetail } from "./screen";
 
 const ADMISSION_DROP_FIELDS = [
   { reason: "pr-held", label: "admin.runtime.admissionDropsPrHeld" },
@@ -230,7 +230,9 @@ function DurationReportCard({ locale }: { locale: Locale }) {
           <p className="text-sm text-muted-foreground">{t(locale, "common.loading")}</p>
         ) : state.status === "error" ? (
           <div className="flex flex-wrap items-center gap-3">
-            <p className="text-sm text-muted-foreground">{t(locale, "common.loadFailed")}</p>
+            <p className="text-sm text-muted-foreground">
+              {withDetail(locale, t(locale, "common.loadFailed"), state.detail)}
+            </p>
             <Button type="button" variant="secondary" onClick={reload}>
               {t(locale, "common.retry")}
             </Button>

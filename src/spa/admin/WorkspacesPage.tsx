@@ -33,7 +33,7 @@ import {
   useLoaded,
   type WorkspaceRow,
 } from "./api";
-import { ConsolePath, Screen } from "./screen";
+import { ConsolePath, Screen, withDetail } from "./screen";
 import { TableSearch } from "./TableSearch";
 
 const PLAN_IDS = ["free", "pro", "unlimited"] as const;
@@ -120,7 +120,10 @@ function OfficialWorkspaceCard({
         ) : null}
         {state.status === "error" ? (
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            <PageNotice kind="error" message={t(locale, "admin.workspaces.officialLoadFailed")} />
+            <PageNotice
+              kind="error"
+              message={withDetail(locale, t(locale, "admin.workspaces.officialLoadFailed"), state.detail)}
+            />
             <Button type="button" variant="secondary" size="sm" onClick={reload}>
               {t(locale, "common.retry")}
             </Button>
