@@ -95,6 +95,12 @@ export function BotPricingSection({
 
   const [multiplier, setMultiplier] = useState(String(app.multiplier ?? 1));
   const [cap, setCap] = useState(monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit));
+  // Whether the ceiling field holds a user edit. The editor renders the stored
+  // ceiling at the read faces' two-decimal quantum, so converting it back on a
+  // save nobody asked for would rewrite `1234 RP` as `1230 RP` (or round a
+  // sub-0.005-Credit ceiling to `0.00` and refuse it). Untouched therefore
+  // sends the stored RP verbatim.
+  const [capEdited, setCapEdited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [shareNotice, setShareNotice] = useState<OpNotice | null>(null);
@@ -106,6 +112,7 @@ export function BotPricingSection({
     // The same two-decimal quantum the read faces render: 1,234 RP reads
     // 1.23 here exactly as it does in `1.23 Credits` there.
     setCap(monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit));
+    setCapEdited(false);
   }, [app.multiplier, monthlyRp, rpPerCredit]);
 
   async function submitScope(scope: "owned" | "shared"): Promise<OpNotice> {
@@ -131,7 +138,10 @@ export function BotPricingSection({
 
   async function savePricing(): Promise<void> {
     if (busy) return;
-    const capValue = parseCreditsInput(cap, rate);
+    // An untouched ceiling rides the save as the stored RP itself: the field's
+    // two-decimal text is a READ rendering, and round-tripping it would rewrite
+    // `1234 RP` as `1230 RP` (or zero a sub-0.005-Credit ceiling and refuse it).
+    const capValue = capEdited ? parseCreditsInput(cap, rate) : monthlyRp;
     if (capValue === "invalid") {
       setNotice({ kind: "error", message: t(locale, "bots.overrideInvalid") });
       return;
@@ -227,7 +237,10 @@ export function BotPricingSection({
               inputMode="decimal"
               className="w-32"
               value={cap}
-              onChange={(event) => setCap(event.target.value)}
+              onChange={(event) => {
+                setCap(event.target.value);
+                setCapEdited(true);
+              }}
             />
             <span className="text-xs text-muted-foreground">{t(locale, "botDetail.share.monthlyCapHint")}</span>
           </label>

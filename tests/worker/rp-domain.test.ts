@@ -253,6 +253,9 @@ describe("the SPA parser applies the same domain", () => {
 
   const appsPayload = (row: Record<string, unknown>): Record<string, unknown> => ({
     viewer: { login: "dana", role: "admin" },
+    // The list's plan fact: `parseApps` fails an absence without `quota_error`,
+    // so a fixture that omits it describes no payload the route can serve.
+    month_plan_rp: null,
     apps: [
       {
         github_app_id: 1,
@@ -336,6 +339,83 @@ describe("the SPA parser applies the same domain", () => {
     expect(row.month?.multiplier).toBe(100 * 100);
     // And the guard the SPA applies accepts the payload the server sends.
     expect(parseApps(body)).not.toBeNull();
+  });
+
+  // A reorder mounts no new id, so the write guard never runs and the factors
+  // arrive in whatever order the operator put them. 103 `1000×` factors ahead of
+  // the sub-1 ones overflow a plain left fold to `Infinity` while the product is
+  // still `10` — the list must serve the finite product, not fail on it.
+  test("a reorder that would overflow a left fold still serves a finite product that parses", async () => {
+    world();
+    const factors = [...Array(103).fill(BOT_MULTIPLIER_MAX), ...Array(154).fill(BOT_MULTIPLIER_MIN)];
+    // The premise: a plain fold over this order is `Infinity`, not the answer.
+    expect(factors.reduce((product, factor) => product * factor, 1)).toBe(Number.POSITIVE_INFINITY);
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    factors.forEach((factor, index) => {
+      const id = `bot-reorder-${index}`;
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, factor, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      apps: Array<{ github_app_id: number; month: { multiplier: number } | null }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === GITHUB_APP_ID)!;
+    // 1000^103 × 0.01^154 = 10^(309-308) = 10.
+    expect(row.month?.multiplier).toBeCloseTo(10, 6);
+    expect(Number.isFinite(row.month?.multiplier)).toBe(true);
+    expect(parseApps(body)).not.toBeNull();
+  });
+
+  // The other end: no double holds the product, so the route names the refusal
+  // instead of serving `Infinity` (which every reader rejects).
+  test("a chain whose product no double holds answers an explicit refusal", async () => {
+    world();
+    const factors = Array(103).fill(BOT_MULTIPLIER_MAX);
+    db.raw
+      .prepare("INSERT INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+      .run(BOT_ROW, OFFICIAL, NOW);
+    factors.forEach((factor, index) => {
+      const id = `bot-huge-${index}`;
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots (id, workspace_id, name, multiplier, scope, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'shared', ?, ?)`,
+        )
+        .run(id, OFFICIAL, id, factor, NOW, NOW);
+      db.raw
+        .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, ?, ?)")
+        .run(BOT_ROW, OFFICIAL, index + 1, id);
+    });
+
+    const session = await createSessionValue("dana", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/${OFFICIAL}/api/apps`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(),
+    );
+    expect(res.status).toBe(500);
+    expect((await res.json()) as unknown).toEqual({
+      error: "the mounted chain's price factor is not representable",
+    });
   });
 
   test("a list row's chain-product multiplier parses past the single-bot bound", () => {

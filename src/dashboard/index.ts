@@ -2128,6 +2128,39 @@ async function appsListWithHealth(
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 
+/**
+ * The served chain factor: the product of the mounted multipliers.
+ *
+ * Accumulated as a mantissa rescaled by powers of two, so no INTERMEDIATE value
+ * overflows or underflows. A legal chain can put 103 `1000×` factors before its
+ * sub-1 ones: a plain left fold reaches `Infinity` midway while the product is
+ * `10`. The final rescale is one multiply.
+ *
+ * `null` = no double holds the product (the exponent runs past the type's
+ * range). The caller refuses that explicitly rather than serving `Infinity`,
+ * which every reader rejects as a non-product.
+ */
+function servedChainProduct(factors: readonly number[]): number | null {
+  const SPLIT = 2 ** 30;
+  let mantissa = 1;
+  let exponent = 0;
+  for (const factor of factors) {
+    if (!Number.isFinite(factor) || factor <= 0) return null;
+    mantissa *= factor;
+    while (mantissa >= SPLIT) {
+      mantissa /= SPLIT;
+      exponent += 30;
+    }
+    while (mantissa > 0 && mantissa < 1 / SPLIT) {
+      mantissa *= SPLIT;
+      exponent -= 30;
+    }
+    if (!Number.isFinite(mantissa) || mantissa === 0) return null;
+  }
+  const product = mantissa * 2 ** exponent;
+  return Number.isFinite(product) && product > 0 ? product : null;
+}
+
 const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
@@ -2178,6 +2211,31 @@ const appListRoute = async (c: DashboardContext) => {
       return null;
     }),
   ]);
+  // The served factor counts only what the relay would RUN: a row whose bot
+  // stopped being available is skipped before any price applies, so folding its
+  // stored factor in would both misprice the chain and disclose the owner's
+  // current price. Recorded spend stays `used_rp` — that is history, not a price.
+  //
+  // A chain whose product no double holds is REFUSED here rather than served as
+  // `Infinity`: every reader rejects that as a non-product, and a silent one
+  // would fail the whole list with no cause named.
+  const chainProducts = new Map<string, number>();
+  for (const app of rows) {
+    const chain = chains.get(app.id) ?? [];
+    if (chain.length === 0) continue;
+    const product = servedChainProduct(
+      chain.filter((bot) => bot.available).map((bot) => bot.multiplier),
+    );
+    if (product === null) {
+      logSettingsFailure(
+        "api_apps_list_chain_product",
+        app.id,
+        new Error("the mounted chain's price factor is not representable"),
+      );
+      return c.json({ error: "the mounted chain's price factor is not representable" }, 500);
+    }
+    chainProducts.set(app.id, product);
+  }
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
     ...(rpPerCredit === null ? {} : { rp_per_credit: rpPerCredit }),
@@ -2219,15 +2277,10 @@ const appListRoute = async (c: DashboardContext) => {
             : {
                 used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
                 owned: chain.every((bot) => bot.owned),
-                // The served factor counts only what the relay would RUN: a row
-                // whose bot stopped being available is skipped before any price
-                // applies, so folding its stored factor in would both misprice
-                // the chain and disclose the owner's current price. Recorded
-                // spend stays `used_rp` above — that is history, not a price.
-                multiplier: chain.reduce(
-                  (product, bot) => (bot.available ? product * bot.multiplier : product),
-                  1,
-                ),
+                // The chain's factor, accumulated without an intermediate
+                // overflow (see `servedChainProduct`); refused above when no
+                // double holds it.
+                multiplier: chainProducts.get(app.id)!,
               },
         bot_id: app.id,
         github_name: app.github_name ?? null,

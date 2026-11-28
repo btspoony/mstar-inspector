@@ -281,6 +281,52 @@ describe("the bot page's share switch", () => {
     }
   });
 
+  test("a multiplier-only save leaves the stored ceiling byte-for-byte", async () => {
+    // 1,234 RP renders as `1.23`; converting that text back would store 1,230.
+    const view = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", multiplier: 2, monthly_rp: 1234 },
+    });
+    try {
+      const multiplier = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.multiplier")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, multiplier, "5");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 5, monthly_rp: 1234 } }]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a ceiling below the display quantum is not zeroed by an unrelated save", async () => {
+    // 4 RP is 0.004 Credits — the field reads `0.00`, which the input parser
+    // would refuse as non-positive. An untouched field must not be re-read.
+    const view = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", multiplier: 2, monthly_rp: 4 },
+    });
+    try {
+      const capInput = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      expect(capInput?.value).toBe("0.00");
+      const multiplier = view.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.multiplier")}"]`,
+      ) as unknown as HTMLInputElement;
+      await typeInto(view.win, multiplier, "3");
+      await view.click(view.buttonWith(t(locale, "common.save")));
+
+      const pricing = view.sent.filter((row) => row.path.endsWith("/pricing"));
+      expect(pricing).toEqual([{ path: expect.any(String), method: "PATCH", body: { multiplier: 3, monthly_rp: 4 } }]);
+      expect(String(view.container.textContent)).not.toContain(t(locale, "bots.overrideInvalid"));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   test("a bad multiplier names the multiplier, not the ceiling integer", async () => {
     const view = await mount({ app: { ...payload().app, scope: "shared", multiplier: 2 } });
     try {
