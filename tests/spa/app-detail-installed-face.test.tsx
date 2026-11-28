@@ -539,7 +539,7 @@ describe("installed face — manager", () => {
     expect(row.ceiling).toBe(t("en", "credits.unbounded"));
   });
 
-  test("an unavailable shared bot states its own ceiling, never own-bot wording", async () => {
+  test("an unavailable shared bot reads no ceiling, never own-bot wording", async () => {
     const row = await spendAndCeiling([
       chainRow({
         position: 1,

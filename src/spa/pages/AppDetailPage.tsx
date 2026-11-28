@@ -480,9 +480,9 @@ export function InstalledChainSection({
             {chain.map((row, index) => {
               const href = `${apiBase()}/bots/${encodeURIComponent(row.bot_id)}`;
               const multiplier = row.owned || !row.available ? 1 : row.multiplier;
-              // Only the workspace's OWN bot is unbounded by ownership. An
-              // unavailable row is still a shared bot the owner withdrew, so it
-              // states its recorded cap (or "no ceiling"), never own-bot wording.
+              // The store withholds an unavailable row's ceiling
+              // (`effective_monthly_rp` is null: the relay skips it), so that row
+              // reads "no ceiling". Own-bot wording is reserved for `row.owned`.
               const ceiling = row.owned
                 ? t(locale, "credits.unboundedOwn")
                 : row.effective_monthly_rp === null
