@@ -1361,11 +1361,10 @@ function runTeardownSignal(controller: AbortController, input: AgentRuntimeRunIn
 /**
  * Whether the report seat can run for this round. ONE authority: the dispatch
  * path logs the reason and the trace names it, so the two can never disagree.
- * `review-incomplete` is a nothing-usable round — there is no review to
- * narrate, so no seat is invented for it. The run's own state is checked first,
- * so a torn-down or out-of-time run never blames the input for the run's clock;
- * the caller's own signal is read directly beside the composed teardown signal
- * because `AbortSignal.any` propagation can land a tick late.
+ * The run's own state is checked first, so a torn-down or out-of-time run never
+ * blames the input for the run's clock; the caller's own signal is read
+ * directly beside the composed teardown signal because `AbortSignal.any`
+ * propagation can land a tick late.
  */
 export type ReportEligibility =
   | { ok: true; headSha: string; prContext: PrContext }
