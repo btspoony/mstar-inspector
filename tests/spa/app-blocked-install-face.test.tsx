@@ -46,6 +46,7 @@ const chainRow = (overrides: Partial<AppChainEntry> = {}): AppChainEntry => ({
 function blockedInstallPayload(): SettingsBlockedInstallPayload {
   return {
     can_manage: true,
+    can_edit_chain: true,
     blocked: true,
     blocked_reason: "bot_not_shared",
     viewer_relation: "installed",

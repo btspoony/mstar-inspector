@@ -43,7 +43,6 @@ import {
   appDetailSearchQuery,
   appDisplayName,
   appStatusPill,
-  formatCredits,
   hasTargetFacts,
   parseAppDetailSearch,
   parseModels,
@@ -176,7 +175,12 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   // Every bot this workspace may mount. Read ONCE beside the page: the editor's
   // "add" list must exclude what the chain already carries, and the server's
   // ordering (D18) is the order an operator expects.
-  const [mountable, setMountable] = useState<Array<{ id: string; name: string }>>([]);
+  const [mountable, setMountable] = useState<Array<{ id: string; name: string; description?: string | null }>>([]);
+  // The workspace's plan ceiling facts ride the same read as the chooser:
+  // the installed face's aggregate month metric pairs its spend with them
+  // exactly like the Apps list does.
+  const [planRp, setPlanRp] = useState<number | null>(null);
+  const [quotaError, setQuotaError] = useState(true);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
@@ -245,8 +249,10 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           setMountable(
             payload.bots
               .filter((bot) => !bot.archived)
-              .map((bot) => ({ id: bot.id, name: bot.name })),
+              .map((bot) => ({ id: bot.id, name: bot.name, description: bot.description })),
           );
+          setPlanRp(payload.plan_monthly_rp);
+          setQuotaError(payload.quota_error === true);
         }
       })
       .catch(() => {
@@ -318,6 +324,8 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           modelsLoading={modelsLoading}
           notice={notice}
           search={search}
+          planRp={planRp}
+          quotaError={quotaError}
           from={from}
           mountable={mountable}
           onReload={load}
@@ -417,7 +425,7 @@ function useChainOrderEditor(
 /**
  * The installed face's chain section — ONE control surface: the row ↑↓✕
  * controls live in the table's actions column and 添加机器人 sits in the
- * section header. A member (canManage false) gets the same rows with the
+ * section header. A member (`can_edit_chain` false) gets the same rows with the
  * controls ABSENT, not disabled. The creator face carries no chain at all —
  * the chain is what the App mounts, a fact of the install state.
  */
@@ -425,7 +433,7 @@ export function InstalledChainSection({
   locale,
   appId,
   chain,
-  canManage,
+  canEditChain,
   mountableBots,
   rpPerCredit,
   onReordered,
@@ -433,9 +441,14 @@ export function InstalledChainSection({
   locale: SpaBoot["locale"];
   appId: string;
   chain: readonly AppChainEntry[];
-  canManage: boolean;
+  /**
+   * The server's own answer to "would the chain write land" — an install row
+   * AND the owner/admin role, never `can_manage` alone: a target-only manager
+   * has no install row, so the write would 404 `not_installer`.
+   */
+  canEditChain: boolean;
   /** Bots this workspace may mount, already minus the mounted ones. */
-  mountableBots: readonly { id: string; name: string }[];
+  mountableBots: readonly { id: string; name: string; description?: string | null }[];
   /** The payload's credit rate; absent ⇒ the documented 1,000 RP fallback. */
   rpPerCredit?: number;
   onReordered: () => Promise<unknown>;
@@ -459,6 +472,7 @@ export function InstalledChainSection({
             >
               {row.name}
             </a>
+            <span className="font-mono text-xs text-muted-foreground">{row.bot_id}</span>
             <span className="text-muted-foreground">
               {t(locale, row.owned ? "apps.chain.tagMine" : "apps.chain.tagShared")}
             </span>
@@ -514,7 +528,7 @@ export function InstalledChainSection({
       ),
     },
   ];
-  if (canManage) {
+  if (canEditChain) {
     columns.push({
       // No header copy: the buttons carry their own aria-labels.
       header: "",
@@ -568,7 +582,7 @@ export function InstalledChainSection({
         <h2 className="text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) font-(weight:--typo-heading-16-weight) text-(--text-primary)">
           {t(locale, "appDetail.installed.chainTitle")}
         </h2>
-        {canManage && mountableBots.length > 0 ? (
+        {canEditChain && mountableBots.length > 0 ? (
           <details data-slot="app-chain-add">
             <summary className="cursor-pointer text-sm text-muted-foreground">
               {t(locale, "appDetail.installed.addBot")}
@@ -585,6 +599,8 @@ export function InstalledChainSection({
                   onClick={() => add(bot.id)}
                 >
                   + {bot.name}
+                  {bot.description ? <span className="text-xs text-muted-foreground">{bot.description}</span> : null}
+                  <span className="font-mono text-xs text-muted-foreground">{bot.id}</span>
                 </Button>
               ))}
             </div>
@@ -617,6 +633,8 @@ export function InstalledAppFace({
   payload,
   notice,
   mountable = [],
+  planRp = null,
+  quotaError = false,
   onReload,
 }: {
   locale: SpaBoot["locale"];
@@ -624,7 +642,11 @@ export function InstalledAppFace({
   payload: SettingsPayload;
   notice: { kind: NoticeKind; message: string } | null;
   /** Bots this workspace may mount, unfiltered — the face subtracts the chain. */
-  mountable?: Array<{ id: string; name: string }>;
+  mountable?: Array<{ id: string; name: string; description?: string | null }>;
+  /** The workspace's plan ceiling; `null` is a KNOWN unlimited plan. */
+  planRp?: number | null;
+  /** F10: the plan ceiling could not be resolved — the aggregate errs, never "no ceiling". */
+  quotaError?: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const pill = appStatusPill(locale, payload.app);
@@ -633,12 +655,28 @@ export function InstalledAppFace({
   // future selection, it does not erase Credits already used this month. The
   // archived row stays listed (marked unavailable) and still counts here.
   const monthSpendRp = chain.reduce((sum, row) => sum + row.month_used_rp, 0);
+  // The SAME ceiling presentation the Apps list uses: an all-own chain is
+  // unbounded (不限（自有机器人）), otherwise the workspace's plan ceiling
+  // rides the figure as 已用 / 上限, its known-unlimited state or the F10
+  // unknown marker — and NO chain is nothing metered, not zero usage.
+  const monthValue = chain.length === 0
+    ? t(locale, "bots.monthNone")
+    : usageCeilingCell(
+        locale,
+        { used_rp: monthSpendRp },
+        {
+          owned: chain.every((row) => row.owned),
+          quotaError,
+          ceilingRp: planRp,
+          rpPerCredit: payload.rp_per_credit,
+        },
+      );
   const metrics: Metric[] = [
     { key: t(locale, "appDetail.installed.metricMounted"), value: chain.length },
     { key: t(locale, "appDetail.installed.metricInstallations"), value: (payload.installations ?? []).length },
     {
       key: t(locale, "appDetail.installed.metricSpend"),
-      value: formatCredits(monthSpendRp, payload.rp_per_credit),
+      value: monthValue,
     },
   ];
   return (
@@ -700,7 +738,7 @@ export function InstalledAppFace({
           locale={locale}
           appId={appId}
           chain={chain}
-          canManage={payload.can_manage}
+          canEditChain={payload.can_edit_chain}
           mountableBots={mountable.filter((bot) => !chain.some((row) => row.bot_id === bot.id))}
           rpPerCredit={payload.rp_per_credit}
           onReordered={onReload}
@@ -863,6 +901,8 @@ export function AppDetailView({
   search,
   from = null,
   mountable = [],
+  planRp = null,
+  quotaError = false,
   onReload,
   onSearch,
 }: {
@@ -876,7 +916,11 @@ export function AppDetailView({
   /** The wayfinding param the page parsed off the URL; null when absent/invalid. */
   from?: AppDetailFrom | null;
   /** Bots this workspace may mount, unfiltered — the view subtracts the chain. */
-  mountable?: Array<{ id: string; name: string }>;
+  mountable?: Array<{ id: string; name: string; description?: string | null }>;
+  /** The workspace's plan ceiling; `null` is a KNOWN unlimited plan. */
+  planRp?: number | null;
+  /** F10: the plan ceiling could not be resolved — the aggregate errs, never "no ceiling". */
+  quotaError?: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
   onSearch: (next: AppDetailSearch) => void;
 }) {
@@ -891,6 +935,8 @@ export function AppDetailView({
         payload={payload}
         notice={notice}
         mountable={mountable}
+        planRp={planRp}
+        quotaError={quotaError}
         onReload={onReload}
       />
     );

@@ -112,6 +112,7 @@ const CONFIG_SECTIONS: Omit<BotConfigSections, "app"> = {
 function managerPayload(): SettingsManagePayload {
   return {
     can_manage: true,
+    can_edit_chain: false,
     viewer_relation: "created",
     rp_per_credit: RATE,
     official_workspace: true,
@@ -142,6 +143,7 @@ function managerPayload(): SettingsManagePayload {
 function memberInstalledPayload(): SettingsReadOnlyPayload {
   return {
     can_manage: false,
+    can_edit_chain: false,
     viewer_relation: "installed",
     rp_per_credit: RATE,
     workspace_id: WORKSPACE_ID,
@@ -158,6 +160,9 @@ function managerInstalledPayload(): SettingsManagePayload {
   return {
     ...managerPayload(),
     viewer_relation: "installed",
+    // The installer fact: the workspace holds the install row AND manages it,
+    // so the chain controls are the server's own yes.
+    can_edit_chain: true,
     installation: { id: 88123456, account_login: "mallory", removed: false },
   };
 }
@@ -300,7 +305,7 @@ async function mountBot(payload: Record<string, unknown>, locale: SpaBoot["local
   globalThis.fetch = (async (input: unknown) => {
     const url = String(input);
     if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(payload);
-    if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+    if (url.endsWith("/api/review-bots/bot-1/models")) return Response.json({ groups: [] });
     if (url.includes("/api/provider-catalog")) {
       return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
     }

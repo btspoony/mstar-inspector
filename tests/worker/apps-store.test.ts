@@ -74,17 +74,113 @@ async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Pro
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * A copy of `text` with every comment and string literal masked to spaces,
+ * PRESERVING the `${…}` splices of template literals: their braces are real
+ * code braces, and the scanner's depth walk needs them. Everything else —
+ * regex literals included — reads as whitespace, so a `}` in a comment or a
+ * `"` in a string can no longer start or end a body early.
+ *
+ * shortcut: a regex literal whose body carries an unbalanced quote or a slash
+ * in a character class is misread as a division; the store's SQL constants
+ * carry none, and the upgrade is a real parser.
+ */
+function maskNonCode(text: string): string {
+  const out = text.split("");
+  const mask = (start: number, end: number): void => {
+    for (let k = start; k < end; k += 1) if (out[k] !== "\n") out[k] = " ";
+  };
+  // Each frame is a template literal or one of its `${…}` splices. Inside a
+  // template, raw text masks out and only a splice opens live code; inside a
+  // splice (or at the top level) everything is code except comments/strings.
+  type Frame = "tmpl" | "splice";
+  const stack: Frame[] = [];
+  const inTmplText = (): boolean => stack[stack.length - 1] === "tmpl";
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const ch = text[i]!;
+    const next = text[i + 1] ?? "";
+    if (inTmplText()) {
+      if (ch === "\\") {
+        mask(i, Math.min(i + 2, n));
+        i = Math.min(i + 2, n);
+        continue;
+      }
+      if (ch === "`") {
+        mask(i, i + 1);
+        stack.pop();
+        i += 1;
+        continue;
+      }
+      if (ch === "$" && next === "{") {
+        // The splice's braces stay live: they are balanced code the depth
+        // walk counts. Only the `$` masks out, and the `{` is counted as code.
+        mask(i, i + 1);
+        stack.push("splice");
+        i += 2;
+        continue;
+      }
+      mask(i, i + 1);
+      i += 1;
+      continue;
+    }
+    // Live code (top level or inside a splice).
+    if (ch === "/" && next === "/") {
+      let j = i + 2;
+      while (j < n && text[j] !== "\n") j += 1;
+      mask(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      const stop = end === -1 ? n : end + 2;
+      mask(i, stop);
+      i = stop;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < n && text[j] !== ch) {
+        if (text[j] === "\\") j += 1;
+        j += 1;
+      }
+      mask(i, Math.min(j + 1, n));
+      i = Math.min(j + 1, n);
+      continue;
+    }
+    if (ch === "`") {
+      mask(i, i + 1);
+      stack.push("tmpl");
+      i += 1;
+      continue;
+    }
+    if (ch === "}" && stack[stack.length - 1] === "splice") {
+      // The splice's closing brace IS structural code: the depth walk must
+      // see it so the enclosing template's braces stay balanced. Only the
+      // frame ends here — the character itself stays unmasked.
+      stack.pop();
+      i += 1;
+      continue;
+    }
+    i += 1;
+  }
+  return out.join("");
+}
+
+/**
  * The name of the function whose BODY contains `at`, or `<module>`.
  *
  * Line-scanning for the nearest `    async x(` credits an INSERT to whatever
  * member was declared above it, so a hit moved into a later non-async function
  * still read as its async neighbour. This instead finds every declaration,
  * walks its body to the matching close brace, and returns the innermost
- * declaration whose body spans `at`. Body braces are matched by depth; the
- * `${…}` splices inside the store's template literals are themselves balanced,
- * so the depth stays true.
+ * declaration whose body spans `at`. Body braces are matched by depth over
+ * the masked copy, so neither a comment's nor a string's braces can end or
+ * extend a body; the `${…}` splices stay live because they are real code.
  */
-function enclosingFunction(text: string, at: number): string {
+function enclosingFunction(rawText: string, at: number): string {
+  const text = maskNonCode(rawText);
   let best: { name: string; start: number } | null = null;
   for (const decl of text.matchAll(/\b(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)\s*(?:<[^<>]*>)?\s*\(/g)) {
     const name = decl[1]!;
@@ -916,6 +1012,43 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect([...source.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(source, hit.index!))).toEqual([
       "createBot",
       "createLater",
+    ]);
+  });
+
+  test("braces inside comments and strings cannot end or extend a function body", () => {
+    // A lone `}` inside a comment BEFORE the member would end the enclosing
+    // object's body early for a naive depth walk, crediting the INSERT to
+    // `<module>` or the wrong function; a string's braces do the same.
+    const source = [
+      "function outer() {",
+      "  return {",
+      "    // closes the record here } — or so a naive scanner believes",
+      "    async createBot(input: string): Promise<boolean> {",
+      '      const note = "a brace: } and another {";',
+      "      const sql = `INSERT INTO review_bots (id) SELECT 'unused'`;",
+      "      return sql.length > 0 && note.length > 0 && input.length > 0;",
+      "    },",
+      "  };",
+      "}",
+    ].join("\n");
+    expect([...source.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(source, hit.index!))).toEqual([
+      "createBot",
+    ]);
+    // And the template splice still scans as code: an INSERT inside `${…}`
+    // belongs to the enclosing function, not to the literal's text.
+    const spliced = [
+      "function outer() {",
+      "  return {",
+      "    async createBot(input: string): Promise<boolean> {",
+      "      const rows = [1];",
+      "      const sql = `INSERT INTO review_bots (id) SELECT ${rows.map((row) => row).join(\",\")}`;",
+      "      return sql.length > 0 && input.length > 0;",
+      "    },",
+      "  };",
+      "}",
+    ].join("\n");
+    expect([...spliced.matchAll(/INSERT INTO review_bots\b/g)].map((hit) => enclosingFunction(spliced, hit.index!))).toEqual([
+      "createBot",
     ]);
   });
 

@@ -101,6 +101,7 @@ const INSTALLATIONS = [
 function managerPayload(): SettingsManagePayload {
   return {
     can_manage: true,
+    can_edit_chain: true,
     viewer_relation: "installed",
     rp_per_credit: 500,
     official_workspace: true,
@@ -144,6 +145,7 @@ function managerPayload(): SettingsManagePayload {
 function memberPayload(): SettingsReadOnlyPayload {
   return {
     can_manage: false,
+    can_edit_chain: false,
     viewer_relation: "installed",
     rp_per_credit: 500,
     workspace_id: WORKSPACE_ID,
@@ -159,6 +161,7 @@ function memberPayload(): SettingsReadOnlyPayload {
 function blockedManagerPayload(): SettingsBlockedPayload {
   return {
     can_manage: true,
+    can_edit_chain: false,
     blocked: true,
     blocked_reason: "bot_not_shared",
     viewer_relation: "installed",
@@ -185,6 +188,7 @@ function blockedManagerPayload(): SettingsBlockedPayload {
 function blockedMemberPayload(): SettingsReadOnlyPayload {
   return {
     can_manage: false,
+    can_edit_chain: false,
     viewer_relation: "installed",
     rp_per_credit: 500,
     workspace_id: WORKSPACE_ID,
@@ -202,7 +206,7 @@ const MOUNTABLE = [{ id: "bot-extra", name: "Extra Bot" }];
 function renderFace(
   payload: SettingsPayload,
   from: "installed" | "created" | null = null,
-  mountable = MOUNTABLE,
+  mountable: Array<{ id: string; name: string; description?: string | null }> = MOUNTABLE,
 ): string {
   return renderToStaticMarkup(
     createElement(AppDetailView, {
@@ -294,13 +298,71 @@ describe("installed face — manager", () => {
     expect(markup).toContain("4803300");
   });
 
-  test("the metric band is 挂载的机器人 / 安装 / 本月已用 with the payload's credit rate", () => {
+  test("the metric band is 挂载的机器人 / 安装 / 本月已用 with the shared ceiling presentation", () => {
     expect(markup).toContain("Mounted bots");
     expect(markup).toContain("Installations");
     expect(markup).toContain("Used this month");
     // 620 + 45 + 5 RP at 500 RP/Credit: the archived row's past spend is still
     // this month's spend (archiving stops selection, not accounting).
     expect(markup).toContain("1.34 Credits");
+  });
+
+  test("the aggregate 本月已用 is the SAME ceiling presentation the Apps list renders", async () => {
+    // Mixed chain + a stated plan ceiling: used/total rides the figure.
+    const ceiling = renderToStaticMarkup(
+      createElement(AppDetailView, {
+        locale: "en",
+        appId: "app-demo",
+        payload: managerPayload(),
+        groups: [],
+        notice: null,
+        search: SEARCH,
+        from: "installed",
+        mountable: MOUNTABLE,
+        planRp: 5000,
+        onReload: async () => true,
+        onSearch: () => {},
+      }),
+    );
+    expect(ceiling).toContain("1.34 Credits / 10.00 Credits");
+
+    // An all-own chain is unbounded whatever the plan says.
+    const own = renderFace(
+      { ...managerPayload(), chain: CHAIN.map((row) => ({ ...row, owned: true })) },
+      "installed",
+    );
+    expect(own).toContain("1.34 Credits · unlimited (own bot)");
+
+    // A non-own chain with no plan ceiling states it; it never reads bare.
+    const none = renderFace(managerPayload(), "installed");
+    expect(none).toContain("1.34 Credits · no ceiling");
+
+    // The F10 unknown state is the error marker, never "no ceiling".
+    const unknown = renderToStaticMarkup(
+      createElement(AppDetailView, {
+        locale: "en",
+        appId: "app-demo",
+        payload: managerPayload(),
+        groups: [],
+        notice: null,
+        search: SEARCH,
+        from: "installed",
+        mountable: MOUNTABLE,
+        quotaError: true,
+        onReload: async () => true,
+        onSearch: () => {},
+      }),
+    );
+    expect(unknown).toContain("ceiling unavailable");
+    // The band itself must not claim a ceiling state it does not know —
+    // per-row cells may legitimately say "no ceiling", so check the band.
+    const bandZone = unknown.slice(unknown.indexOf("Used this month"), unknown.indexOf("Used this month") + 400);
+    expect(bandZone).toContain("ceiling unavailable");
+    expect(bandZone).not.toContain("no ceiling");
+
+    // NO chain mounted is nothing metered — the dash, not 0.00 Credits.
+    const empty = renderFace({ ...managerPayload(), chain: [] }, "installed");
+    expect(empty).not.toContain("0.00 Credits");
   });
 
   test("the install/bind block shows the bound account with its state", () => {
@@ -315,6 +377,25 @@ describe("installed face — manager", () => {
     expect(unbound).toContain("Bind to this target");
   });
 
+  test("a manager WITHOUT the install row (target-only) reads the rows with the controls absent", async () => {
+    // `can_manage` alone is not the chain authority: the server answers
+    // can_edit_chain false when there is no install row, because the chain
+    // write would 404 `not_installer`. The face offers nothing it cannot write.
+    const targetOnly = renderFace({
+      ...managerPayload(),
+      can_edit_chain: false,
+      installation: null,
+    });
+    await withMarkup(targetOnly, (container) => {
+      expect(container.querySelector('[data-slot="installed-chain"]')).not.toBeNull();
+      expect(container.querySelector('[data-slot="app-chain-add"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Move Studio Reviewer earlier"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Remove Security Scanner from the chain"]')).toBeNull();
+      // The rows themselves still read.
+      expect(container.textContent).toContain("Studio Reviewer");
+    });
+  });
+
   test("the chain has ONE control surface: 添加机器人 in the section header, ↑↓✕ on the rows", async () => {
     await withMarkup(markup, (container) => {
       const section = container.querySelector('[data-slot="installed-chain"]');
@@ -322,13 +403,37 @@ describe("installed face — manager", () => {
       // The add affordance lives in the section header, not in a chip row below.
       const header = section!.firstElementChild!;
       expect(header.querySelector("summary")?.textContent).toBe("Add bot");
-      expect(section!.querySelector('[data-slot="app-chain-reorder"]')).toBeNull();
+      // The accessible controls, counted: exactly one move/remove affordance
+      // per bot per action — any duplicated reorder surface would double them.
+      const controls = (verb: string) =>
+        [...section!.querySelectorAll("button[aria-label]")].filter((button) =>
+          button.getAttribute("aria-label")?.startsWith(verb),
+        );
+      for (const [verb, count] of [
+        ["Move ", 6],
+        ["Remove ", 3],
+        ["Add ", 1],
+      ] as const) {
+        expect(controls(verb)).toHaveLength(count);
+      }
       expect(container.querySelector('[aria-label="Move Studio Reviewer earlier"]')).not.toBeNull();
       expect(container.querySelector('[aria-label="Move Docs Scanner later"]')).not.toBeNull();
       expect(container.querySelector('[aria-label="Remove Security Scanner from the chain"]')).not.toBeNull();
       // The add list offers only the unmounted bot.
       expect(container.querySelector('[aria-label="Add Extra Bot"]')).not.toBeNull();
       expect(container.querySelector('[aria-label="Add Studio Reviewer"]')).toBeNull();
+    });
+  });
+
+  test("the mount chooser rows carry the same identity: name, description, muted id", async () => {
+    const withDescription = renderFace(managerPayload(), null, [
+      { id: "bot-extra", name: "Extra Bot", description: "Reviews the extras." },
+    ]);
+    await withMarkup(withDescription, (container) => {
+      const add = container.querySelector('[aria-label="Add Extra Bot"]');
+      expect(add?.textContent).toContain("Extra Bot");
+      expect(add?.textContent).toContain("Reviews the extras.");
+      expect(add?.textContent).toContain("bot-extra");
     });
   });
 
@@ -349,6 +454,12 @@ describe("installed face — manager", () => {
     await withMarkup(markup, (container) => {
       const link = container.querySelector('a[href$="/bots/bot-studio"]');
       expect(link?.textContent).toBe("Studio Reviewer");
+      // The mount identity is name + description + the muted internal id.
+      const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+        tr.textContent?.includes("Studio Reviewer"),
+      );
+      expect(row?.textContent).toContain("bot-studio");
+      expect(row?.textContent).toContain("Default review bot: DeepSeek first, Flash fallback.");
     });
     expect(markup).toContain("1.24 Credits");
     expect(markup).toContain("Archived — skipped");
@@ -563,7 +674,7 @@ describe("the chain rows' effective multiplier (item 13)", () => {
           // An unshared foreign remnant: mounted but skipped — never a price.
           chainRow({ position: 3, bot_id: "bot-gone", name: "Gone", owned: false, available: false, multiplier: 9 }),
         ],
-        canManage: false,
+        canEditChain: false,
         mountableBots: [],
         onReordered: async () => {},
       }),
@@ -591,7 +702,7 @@ describe("the installed chain's write path", () => {
   type Sent = { url: string; method: string; body: unknown };
 
   async function mountEditor(input: {
-    canManage: boolean;
+    canEditChain: boolean;
     chain?: AppChainEntry[];
     mountableBots?: Array<{ id: string; name: string }>;
   }) {
@@ -619,7 +730,7 @@ describe("the installed chain's write path", () => {
           locale: "en" as const,
           appId: "app-1",
           chain: input.chain ?? EDITOR_CHAIN,
-          canManage: input.canManage,
+          canEditChain: input.canEditChain,
           // The parent subtracts the mounted bots before they reach this section.
           mountableBots: input.mountableBots ?? [],
           onReordered: async () => {
@@ -654,7 +765,7 @@ describe("the installed chain's write path", () => {
   }
 
   test("moving a bot down PATCHes the WHOLE order and re-reads the chain", async () => {
-    const surface = await mountEditor({ canManage: true });
+    const surface = await mountEditor({ canEditChain: true });
     await surface.click(surface.labelled(t("en", "apps.chain.moveDown", { bot: "Alpha" }))[0]!);
 
     const patch = surface.sent.find((request) => request.method === "PATCH");
@@ -667,19 +778,19 @@ describe("the installed chain's write path", () => {
   });
 
   test("the first row cannot move up and the last cannot move down; a single row disables both", async () => {
-    const surface = await mountEditor({ canManage: true });
+    const surface = await mountEditor({ canEditChain: true });
     expect(surface.labelled(t("en", "apps.chain.moveUp", { bot: "Alpha" }))[0]!.hasAttribute("disabled")).toBe(true);
     expect(surface.labelled(t("en", "apps.chain.moveDown", { bot: "Beta" }))[0]!.hasAttribute("disabled")).toBe(true);
     await surface.close();
 
-    const single = await mountEditor({ canManage: true, chain: [EDITOR_CHAIN[0]!] });
+    const single = await mountEditor({ canEditChain: true, chain: [EDITOR_CHAIN[0]!] });
     expect(single.labelled(t("en", "apps.chain.moveUp", { bot: "Alpha" }))[0]!.hasAttribute("disabled")).toBe(true);
     expect(single.labelled(t("en", "apps.chain.moveDown", { bot: "Alpha" }))[0]!.hasAttribute("disabled")).toBe(true);
     await single.close();
   });
 
   test("adding a bot appends it to the full order and re-reads the chain", async () => {
-    const surface = await mountEditor({ canManage: true, mountableBots: [{ id: "bot-c", name: "Gamma" }] });
+    const surface = await mountEditor({ canEditChain: true, mountableBots: [{ id: "bot-c", name: "Gamma" }] });
     await surface.click(surface.labelled(t("en", "apps.chain.addNamed", { bot: "Gamma" }))[0]!);
     const patch = surface.sent.find((request) => request.method === "PATCH");
     expect(patch?.body).toEqual({ botIds: ["bot-a", "bot-b", "bot-c"] });
@@ -688,21 +799,21 @@ describe("the installed chain's write path", () => {
   });
 
   test("removing a bot rewrites the order without it; the LAST row cannot be removed", async () => {
-    const surface = await mountEditor({ canManage: true });
+    const surface = await mountEditor({ canEditChain: true });
     await surface.click(surface.labelled(t("en", "apps.chain.removeBot", { bot: "Alpha" }))[0]!);
     const patch = surface.sent.find((request) => request.method === "PATCH");
     expect(patch?.body).toEqual({ botIds: ["bot-b"] });
     await surface.close();
 
     // D27: one row left — its remove control is present but disabled.
-    const single = await mountEditor({ canManage: true, chain: [EDITOR_CHAIN[0]!] });
+    const single = await mountEditor({ canEditChain: true, chain: [EDITOR_CHAIN[0]!] });
     const remove = single.labelled(t("en", "apps.chain.removeBot", { bot: "Alpha" }))[0]!;
     expect(remove.hasAttribute("disabled")).toBe(true);
     await single.close();
   });
 
   test("an EMPTY chain still offers the add affordance to a manager", async () => {
-    const surface = await mountEditor({ canManage: true, chain: [], mountableBots: [{ id: "bot-c", name: "Gamma" }] });
+    const surface = await mountEditor({ canEditChain: true, chain: [], mountableBots: [{ id: "bot-c", name: "Gamma" }] });
     expect(surface.text()).toContain(t("en", "apps.chain.empty"));
     await surface.click(surface.labelled(t("en", "apps.chain.addNamed", { bot: "Gamma" }))[0]!);
     const patch = surface.sent.find((request) => request.method === "PATCH");
@@ -728,7 +839,7 @@ describe("the installed chain's write path", () => {
           locale: "en" as const,
           appId: "app-1",
           chain: EDITOR_CHAIN,
-          canManage: true,
+          canEditChain: true,
           mountableBots: [],
           onReordered: async () => {
             reloads += 1;

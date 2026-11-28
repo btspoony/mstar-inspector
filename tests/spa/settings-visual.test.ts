@@ -29,6 +29,7 @@ const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
+  can_edit_chain: false,
   viewer_relation: "created",
   installation: null,
   pending_installations: [],

@@ -123,7 +123,7 @@ async function mountBot(payload: Record<string, unknown>): Promise<{ text: strin
   globalThis.fetch = (async (input: unknown) => {
     const url = String(input);
     if (url.includes("/api/review-bots/")) return Response.json(payload);
-    if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+    if (url.endsWith("/api/review-bots/bot-shared/models")) return Response.json({ groups: [] });
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;
   const container = win.document.createElement("div");
@@ -195,7 +195,7 @@ describe("reload race — a landed write survives a failed follow-up read", () =
         if (writeLanded) return new Response("unavailable", { status: 503 });
         return Response.json({ ...BOT_PAYLOAD, can_manage: true, owned: true, app: { ...BOT_PAYLOAD.app, scope: "owned" } });
       }
-      if (url.endsWith("/api/models")) {
+      if (url.endsWith("/api/review-bots/bot-shared/models")) {
         modelsReads += 1;
         return Response.json({
           groups: [{ provider: "anthropic", source: "verified", selectors: ["anthropic/m"] }],

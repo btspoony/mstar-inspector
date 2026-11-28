@@ -89,7 +89,7 @@ async function mountBot(payload: Record<string, unknown>) {
   globalThis.fetch = (async (input: unknown) => {
     const url = String(input);
     if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(payload);
-    if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+    if (url.endsWith("/api/review-bots/bot-1/models")) return Response.json({ groups: [] });
     if (url.includes("/api/provider-catalog")) {
       return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
     }
@@ -143,6 +143,10 @@ describe("the owner face", () => {
       expect(text).toContain(t("en", "settings.seats"));
       expect(text).toContain(t("en", "settings.runtimeHarness"));
       expect(text).toContain(t("en", "botDetail.archive.dangerTitle"));
+      // The common header carries the mount identity: the name, the muted
+      // internal id, and the provider workspace — visible chrome, not a URL.
+      expect(text).toContain("bot-1");
+      expect(text).toContain("Acme");
       // The metric band and the usage rows speak Credits at two decimals.
       expect(text).toContain("1.24 Credits");
       expect(text).toContain(t("en", "credits.usedThisMonth"));
@@ -169,8 +173,10 @@ describe("the owner face", () => {
   });
 
   test("an unshared bot with a stored multiplier is effectively ×1 everywhere it is presented", async () => {
-    // The stored 3 stays in the owner's pricing input; the metric band and the
-    // capability line — effective presentations — read ×1.
+    // Every EFFECTIVE presentation reads ×1: the metric band, the capability
+    // line — and the DISABLED pricing input, because an unshared bot has no
+    // consumer. The stored 3 survives as the draft the input binds once
+    // sharing switches back on.
     const priced = botPayload({
       app: { ...(botPayload().app as Record<string, unknown>), scope: "owned", multiplier: 3 },
     });
@@ -185,7 +191,28 @@ describe("the owner face", () => {
       const input = face.container.querySelector(
         `input[aria-label="${t("en", "botDetail.share.multiplier")}"]`,
       ) as HTMLInputElement | null;
+      expect(input?.disabled).toBe(true);
+      expect(input?.value).toBe("1");
+    } finally {
+      await face.close();
+    }
+  });
+
+  test("sharing a stored-3 bot re-exposes the stored multiplier in the editable input", async () => {
+    // The draft is kept, not overwritten: the same bot after sharing reads
+    // the stored 3 in the now-editable control.
+    const shared3 = botPayload({
+      app: { ...(botPayload().app as Record<string, unknown>), scope: "shared", multiplier: 3 },
+    });
+    const face = await mountBot(shared3);
+    try {
+      const input = face.container.querySelector(
+        `input[aria-label="${t("en", "botDetail.share.multiplier")}"]`,
+      ) as HTMLInputElement | null;
+      expect(input?.disabled).toBe(false);
       expect(input?.value).toBe("3");
+      // The metric band is the owner's own read: still effectively ×1.
+      expect(face.text()).toContain("×1");
     } finally {
       await face.close();
     }
@@ -369,6 +396,7 @@ describe("a confirmed archive whose re-read fails", () => {
     const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
     const realFetch = globalThis.fetch;
     let archivedWritten = false;
+    let archivePatches = 0;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/review-bots/bot-1/bot")) {
@@ -379,9 +407,10 @@ describe("a confirmed archive whose re-read fails", () => {
       }
       if (url.endsWith("/api/review-bots/bot-1/archive") && init?.method === "PATCH") {
         archivedWritten = true;
+        archivePatches += 1;
         return Response.json({ ok: true });
       }
-      if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+      if (url.endsWith("/api/review-bots/bot-1/models")) return Response.json({ groups: [] });
       if (url.includes("/api/provider-catalog")) {
         return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
       }
@@ -406,7 +435,30 @@ describe("a confirmed archive whose re-read fails", () => {
       for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
 
       await click(buttonWith(t("en", "botDetail.archive.open"), container as unknown as ParentNode));
+
+      // THE DIALOG, tested as a dialog: it is open and it states the three
+      // consequences — selection stops, other workspaces can no longer chain
+      // it, and it can be restored.
+      const dialog = win.document.body.querySelector('[role="dialog"]');
+      expect(dialog).not.toBeNull();
+      const hint = t("en", "botDetail.archive.dangerHint");
+      expect(dialog?.textContent).toContain(hint);
+      expect(dialog?.textContent).toMatch(/stops being selected by any review/);
+      expect(dialog?.textContent).toMatch(/can no longer add it to a bot chain/);
+      expect(dialog?.textContent).toMatch(/restore it at any time/);
+      // Merely OPENING the confirmation issues no write.
+      expect(archivePatches).toBe(0);
+
+      // CANCELLING it issues none either, and the page is unchanged.
+      await click(buttonWith(t("en", "common.cancel"), win.document.body as unknown as ParentNode));
+      expect(archivePatches).toBe(0);
+      expect(container.textContent).toContain(t("en", "botDetail.archive.open"));
+
+      // Re-open and CONFIRM: exactly one write, after the confirmation only.
+      await click(buttonWith(t("en", "botDetail.archive.open"), container as unknown as ParentNode));
+      expect(archivePatches).toBe(0);
       await click(buttonWith(t("en", "botDetail.archive.confirm"), win.document.body as unknown as ParentNode));
+      expect(archivePatches).toBe(1);
 
       // The confirmed state wins over the payload the page could not re-read:
       // the config is locked, the archive action is gone, and the failure is
@@ -444,7 +496,7 @@ describe("a confirmed restore whose re-read fails", () => {
         if (lastArchived === false && readFails) return new Response("unavailable", { status: 503 });
         return Response.json(botPayload({ archived: lastArchived !== false }));
       }
-      if (url.endsWith("/api/models")) return Response.json({ groups: [] });
+      if (url.endsWith("/api/review-bots/bot-1/models")) return Response.json({ groups: [] });
       if (url.includes("/api/provider-catalog")) {
         return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
       }

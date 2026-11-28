@@ -257,10 +257,12 @@ export function parseUsableBots(data: unknown): UsableBotsPayload | null {
   if (typeof data.workspace_id !== "string") return null;
   if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
   // `null` is a known unlimited plan; a present number must sit in the RP
-  // ceiling domain, and an absent field is the unknown state the flag marks.
+  // ceiling domain, and an absent field is the unknown state the flag marks —
+  // absence WITHOUT the flag would read as unlimited, so it fails the parse.
   if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && !isRpCeiling(data.plan_monthly_rp)) {
     return null;
   }
+  if (data.plan_monthly_rp === undefined && data.quota_error !== true) return null;
   // Same guard the App-detail parser applies: a present rate must be the whole
   // positive number the profile writer accepts, never a fraction or zero.
   if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
@@ -671,7 +673,7 @@ function isAppChainEntry(value: unknown): value is AppChainEntry {
     typeof value.owned === "boolean" &&
     typeof value.available === "boolean" &&
     isStoredBotMultiplier(value.multiplier) &&
-    typeof value.month_used_rp === "number" &&
+    isRpAmount(value.month_used_rp) &&
     (value.effective_monthly_rp === null || isRpCeiling(value.effective_monthly_rp)) &&
     typeof value.archived === "boolean" &&
     (value.default_chain === null || typeof value.default_chain === "string") &&
@@ -1095,6 +1097,12 @@ function isViewerRelation(value: unknown): value is ViewerRelation {
 type AppDetailViewerFacts = {
   viewer_relation: ViewerRelation;
   rp_per_credit?: number;
+  /**
+   * The server's own answer to "would the chain write land" — an install row
+   * AND the owner/admin role. Required on every face: a payload without it is
+   * a parse failure, never a default to editable.
+   */
+  can_edit_chain: boolean;
 };
 
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
@@ -2300,6 +2308,10 @@ export function parseApps(data: unknown): AppsPayload | null {
     return null;
   }
   if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
+  // The server omits the ceiling ONLY in the unknown branch. An absence
+  // without the flag would read as a known-unlimited plan through `?? null`,
+  // which is exactly the wrong answer — the payload fails the parse instead.
+  if (data.month_plan_rp === undefined && data.quota_error !== true) return null;
   // A row is an object first: `isRecord(app)` inside the chain guard alone would
   // let a non-object row through and render half a list. Chain rows pass the
   // same guard as the detail parser: a malformed row fails the whole parse
@@ -2765,6 +2777,10 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (data.rp_per_credit !== undefined && !isStoredRpPerCredit(data.rp_per_credit)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
+  // The chain-edit capability is REQUIRED on every face: without it the SPA
+  // cannot know whether add/move/remove would even be admitted, so the
+  // payload fails the parse rather than defaulting to editable.
+  if (typeof data.can_edit_chain !== "boolean") return null;
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
   if (data.app.status !== null && typeof data.app.status !== "string") return null;
   if (!isNullableString(data.app.created_by)) return null;

@@ -32,6 +32,7 @@ async function readUnder(pathname: string): Promise<{ url: string; apps: string[
     return new Response(
       JSON.stringify({
         viewer: { login: "octocat", role: "admin" },
+        month_plan_rp: null,
         apps: [{ github_app_id: 1, github_slug: `${workspace}-app` }],
       }),
       { status: 200 },
@@ -50,6 +51,7 @@ describe("AppsPage list face — split payload leaves list links on the numeric 
   test("list rows stay keyed by github_app_id; the settings split adds no list key", () => {
     const payload = parseApps({
       viewer: { login: "octocat", role: "admin" },
+      month_plan_rp: null,
       apps: [{ github_app_id: 1001, github_slug: "acme-app" }],
     });
     expect(payload?.apps[0]?.github_app_id).toBe(1001);
@@ -125,6 +127,7 @@ describe("AppsPage create dialog", () => {
       return new Response(
         JSON.stringify({
           viewer: { login: "octocat", role: "admin" },
+          month_plan_rp: null,
           apps: [
             {
               github_app_id: 1001,

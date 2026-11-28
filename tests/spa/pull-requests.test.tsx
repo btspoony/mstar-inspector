@@ -48,6 +48,7 @@ const IDENTITY_APP = {
 
 const identityPayload: SettingsPayload = {
   can_manage: false,
+  can_edit_chain: false,
   viewer_relation: "installed",
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",

@@ -90,7 +90,7 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
         botGets += 1;
         return Response.json(BOT_PAYLOAD);
       }
-      if (url.endsWith("/api/models")) {
+      if (url.endsWith("/api/review-bots/bot-1/models")) {
         modelsCalls += 1;
         return modelsShouldFail
           ? new Response("unavailable", { status: 503 })
@@ -167,7 +167,7 @@ describe("F14 — BotDetailPage keeps a models failure visible and retries it", 
     globalThis.fetch = (async (input: unknown) => {
       const url = String(input);
       if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(BOT_PAYLOAD);
-      if (url.endsWith("/api/models")) return Response.json({ groups: "nope" });
+      if (url.endsWith("/api/review-bots/bot-1/models")) return Response.json({ groups: "nope" });
       return new Response("not found", { status: 404 });
     }) as unknown as typeof fetch;
 
@@ -199,7 +199,7 @@ describe("QC F3-3 — options never gate the page", () => {
     globalThis.fetch = (async (input: unknown) => {
       const url = String(input);
       if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(payload);
-      if (url.endsWith("/api/models")) {
+      if (url.endsWith("/api/review-bots/bot-1/models")) {
         modelsCalls += 1;
         // Held forever: a pending options read must leave the page usable.
         return new Promise<Response>(() => {});

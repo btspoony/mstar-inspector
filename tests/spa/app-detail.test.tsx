@@ -45,6 +45,7 @@ const IDENTITY_APP = {
 
 const identityPayload = {
   can_manage: false as const,
+  can_edit_chain: false as const,
   viewer_relation: "created" as const,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-1",
@@ -57,6 +58,7 @@ const identityPayload = {
 function blockedPayload(): SettingsBlockedPayload {
   return {
     can_manage: true,
+    can_edit_chain: false,
     blocked: true,
     blocked_reason: "bot_not_shared",
     viewer_relation: "created",
@@ -106,6 +108,7 @@ function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id
 
 const managePayload = {
   can_manage: true as const,
+  can_edit_chain: false as const,
   viewer_relation: "created" as const,
   official_workspace: true as const,
   can_configure_bot: true as const,
@@ -142,6 +145,7 @@ const managePayload = {
 
 const untargetedPayload: SettingsUntargetedPayload = {
   can_manage: true,
+  can_edit_chain: false,
   viewer_relation: "created",
   official_workspace: true,
   can_configure_bot: true,
@@ -1284,7 +1288,8 @@ describe("the mount chooser never offers an archived bot (mounted behaviour)", (
           ...managePayload,
           viewer_relation: "installed",
           can_manage: true,
-          installation: null,
+          can_edit_chain: true,
+          installation: { id: 88123456, account_login: "btspoony", removed: false },
           pending_installations: [],
           chain: [],
         });

@@ -36,6 +36,10 @@ const payload = (apps: AppsPayload["apps"], extra: Partial<AppsPayload> = {}): A
   viewer: { login: "mallory", role: "admin" },
   apps,
   shared_bots: [],
+  // The route always states the plan fact: `null` is its known-unlimited
+  // spelling, and a payload without it is the F10 unknown state — never a
+  // silent unlimited.
+  month_plan_rp: null,
   ...extra,
 });
 
@@ -127,6 +131,7 @@ async function mountWithDialog(appsPayload: Record<string, unknown>) {
 describe("the create action is a real create dialog", () => {
   test("titled 创建 GitHub App, the manifest POST primary, no repository-add path", async () => {
     const page = await mountWithDialog({
+      month_plan_rp: null,
       viewer: { login: "octocat", role: "admin" },
       apps: [app({ installed: false })],
       shared_bots: [],
@@ -151,6 +156,7 @@ describe("the create action is a real create dialog", () => {
 
   test("the dialog renders even when the workspace created no App", async () => {
     const page = await mountWithDialog({
+      month_plan_rp: null,
       viewer: { login: "octocat", role: "admin" },
       apps: [],
       shared_bots: [],
@@ -170,6 +176,7 @@ describe("the create action is a real create dialog", () => {
 
   test("an App this workspace already installed is not offered for install again", async () => {
     const page = await mountWithDialog({
+      month_plan_rp: null,
       viewer: { login: "octocat", role: "admin" },
       apps: [app({ bot_id: "app-shared-installed", github_slug: "shared-installed", installed: true })],
       shared_bots: [],
@@ -270,6 +277,7 @@ describe("pending installations attach to their App's row", () => {
 
   test("one bind click posts to the registered API route and does not open the App detail", async () => {
     const page = await mountInstalled({
+      month_plan_rp: null,
       viewer: { login: "octocat", role: "admin" },
       apps: [app({ installed: true, month: { used_rp: 0, owned: true, multiplier: 1 } })],
       shared_bots: [],
@@ -439,6 +447,7 @@ describe("both shared-App entrypoints apply one eligibility rule", () => {
 
   test("an App the workspace already installed never reaches the header dialog's cards", async () => {
     const page = await mountWithDialog({
+      month_plan_rp: null,
       viewer: { login: "octocat", role: "admin" },
       apps: [app({ bot_id: "app-shared-installed", github_slug: "shared-installed", installed: true })],
       shared_bots: [],

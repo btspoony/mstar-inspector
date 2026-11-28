@@ -13,6 +13,7 @@ import { withMarkup } from "./dom";
 
 const managePayload: SettingsManagePayload = {
   can_manage: true,
+  can_edit_chain: false,
   viewer_relation: "created",
   official_workspace: true,
   can_configure_bot: true,
@@ -59,6 +60,7 @@ const managePayload: SettingsManagePayload = {
 
 const untargetedPayload: SettingsUntargetedPayload = {
   can_manage: true,
+  can_edit_chain: false,
   viewer_relation: "created",
   official_workspace: true,
   can_configure_bot: true,

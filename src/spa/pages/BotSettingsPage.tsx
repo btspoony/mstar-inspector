@@ -12,6 +12,7 @@ import {
   FlowSection,
   Input,
 } from "@design-system";
+import { creditAmount } from "./credits";
 import { LoadingNotice, NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { isBotMultiplier, isRpCeiling } from "../../contracts/rp-limits";
 import { patchJson, postForm } from "../api";
@@ -93,7 +94,7 @@ export function BotPricingSection({
   const monthlyRp = isRpCeiling(app.monthly_rp) ? app.monthly_rp : null;
 
   const [multiplier, setMultiplier] = useState(String(app.multiplier ?? 1));
-  const [cap, setCap] = useState(monthlyRp === null ? "" : String(monthlyRp / rate));
+  const [cap, setCap] = useState(monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [shareNotice, setShareNotice] = useState<OpNotice | null>(null);
@@ -102,8 +103,10 @@ export function BotPricingSection({
   // A landed write re-reads the payload; the stored values replace the draft.
   useEffect(() => {
     setMultiplier(String(app.multiplier ?? 1));
-    setCap(monthlyRp === null ? "" : String(monthlyRp / rate));
-  }, [app.multiplier, monthlyRp, rate]);
+    // The same two-decimal quantum the read faces render: 1,234 RP reads
+    // 1.23 here exactly as it does in `1.23 Credits` there.
+    setCap(monthlyRp === null ? "" : creditAmount(monthlyRp, rpPerCredit));
+  }, [app.multiplier, monthlyRp, rpPerCredit]);
 
   async function submitScope(scope: "owned" | "shared"): Promise<OpNotice> {
     let status: number;
@@ -210,7 +213,10 @@ export function BotPricingSection({
               inputMode="decimal"
               className="w-32"
               disabled={!shared}
-              value={multiplier}
+              // Unshared the input is disabled and reads the EFFECTIVE value
+              // (×1, as every effective presentation does); the stored draft
+              // stays in state untouched, so re-sharing restores it as-is.
+              value={shared ? multiplier : "1"}
               onChange={(event) => setMultiplier(event.target.value)}
             />
           </label>

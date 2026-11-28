@@ -27,6 +27,7 @@ const chainRow = {
 /** The smallest valid App-detail payload: the read-only (non-manager) face. */
 const settingsPayload = {
   can_manage: false,
+  can_edit_chain: false,
   workspace_id: "ws-1",
   viewer_relation: "installed",
   rp_per_credit: 1000,
@@ -163,6 +164,7 @@ describe("parseBotSettings — archived", () => {
 describe("parseApps — list chain rows", () => {
   const listPayload = {
     viewer: { login: "mallory", role: "member" },
+    month_plan_rp: null,
     apps: [
       {
         github_app_id: 123,
@@ -183,6 +185,31 @@ describe("parseApps — list chain rows", () => {
     expect(parsed?.apps[0]?.chain?.[0]?.archived).toBe(false);
   });
 
+  test("a chain row's month spend must be a recorded RP amount — no negative, no fraction", () => {
+    for (const bad of [-1, 1.5, Number.NaN, "40"]) {
+      expect(
+        parseApps({ ...listPayload, apps: [{ ...listPayload.apps[0], chain: [{ ...chainRow, month_used_rp: bad }] }] }),
+        `spend ${String(bad)}`,
+      ).toBeNull();
+    }
+    // Zero is a recorded amount: the month started and nothing was spent.
+    expect(
+      parseApps({ ...listPayload, apps: [{ ...listPayload.apps[0], chain: [{ ...chainRow, month_used_rp: 0 }] }] }),
+    ).not.toBeNull();
+  });
+
+  test("the plan ceiling's known state requires the field: absence without quota_error is a failure", () => {
+    // The server omits the ceiling ONLY in the declared unknown branch. An
+    // absence otherwise would read as a KNOWN unlimited plan through `?? null`,
+    // so the payload fails the parse instead of lying about the plan.
+    const absent = parseApps({ viewer: listPayload.viewer, apps: [] });
+    expect(absent).toBeNull();
+    // The declared unknown state parses and carries its flag.
+    expect(parseApps({ viewer: listPayload.viewer, apps: [], quota_error: true })?.quota_error).toBe(true);
+    // `null` is the KNOWN unlimited spelling and stays valid.
+    expect(parseApps({ viewer: listPayload.viewer, apps: [], month_plan_rp: null })).not.toBeNull();
+  });
+
   test("a missing or non-boolean archived in a list chain row fails the parse", () => {
     const { archived: _omitted, ...without } = chainRow;
     expect(parseApps({ ...listPayload, apps: [{ ...listPayload.apps[0], chain: [without] }] })).toBeNull();
@@ -200,6 +227,7 @@ describe("parseApps — list chain rows", () => {
 describe("parseSettings — viewer_relation on every App-detail face", () => {
   const manageFace = {
     can_manage: true,
+    can_edit_chain: false,
     official_workspace: true,
     can_configure_bot: true,
     installation: null,
@@ -267,6 +295,7 @@ describe("parseSettings — viewer_relation on every App-detail face", () => {
 
   const blockedFace = {
     can_manage: true,
+    can_edit_chain: false,
     blocked: true,
     blocked_reason: "bot_not_shared",
     viewer_relation: "created",
@@ -423,6 +452,7 @@ describe("parseApps — a pending row without can_bind is shown, not dropped", (
   const payload = (rows: unknown[]) => ({
     viewer: { login: "alice", role: "member" },
     apps: [],
+    month_plan_rp: null,
     pending_installations: rows,
   });
 
@@ -518,6 +548,13 @@ describe("amount guards — the parsers apply the writer's domain", () => {
     }
   });
 
+  test("the usable-bots plan ceiling obeys the same absence rule", () => {
+    const { plan_monthly_rp: _omitted, ...withoutPlan } = botsPayload();
+    expect(parseUsableBots(withoutPlan)).toBeNull();
+    expect(parseUsableBots({ ...withoutPlan, quota_error: true })?.quota_error).toBe(true);
+    expect(parseUsableBots({ ...withoutPlan, plan_monthly_rp: null })).not.toBeNull();
+  });
+
   test("a malformed plan ceiling or recorded spend fails the list parse", () => {
     for (const bad of [0, -1, 1.5, "20000"]) {
       expect(parseUsableBots(botsPayload({ plan_monthly_rp: bad })), `plan ${String(bad)}`).toBeNull();
@@ -533,7 +570,7 @@ describe("amount guards — the parsers apply the writer's domain", () => {
   test("a non-object list row is refused, not rendered", () => {
     const { viewer } = { viewer: { login: "alice", role: "member" } };
     for (const bad of ["row", 7, null, [], undefined]) {
-      expect(parseApps({ viewer, apps: [bad] }), String(bad)).toBeNull();
+      expect(parseApps({ viewer, month_plan_rp: null, apps: [bad] }), String(bad)).toBeNull();
     }
     // A well-formed row beside a malformed one still fails the whole parse.
     const good = {
@@ -546,8 +583,8 @@ describe("amount guards — the parsers apply the writer's domain", () => {
       created_by: "alice",
       health: { latest: null, rejected24h: 0 },
     };
-    expect(parseApps({ viewer, apps: [good, 42] })).toBeNull();
-    expect(parseApps({ viewer, apps: [good] })).not.toBeNull();
+    expect(parseApps({ viewer, month_plan_rp: null, apps: [good, 42] })).toBeNull();
+    expect(parseApps({ viewer, month_plan_rp: null, apps: [good] })).not.toBeNull();
   });
 
   test("a list row's month block must carry a recorded spend and a price-bounded chain product", () => {
@@ -563,17 +600,17 @@ describe("amount guards — the parsers apply the writer's domain", () => {
       health: { latest: null, rejected24h: 0 },
       month: { used_rp: 40, owned: false, multiplier: 1 },
     };
-    expect(parseApps({ viewer, apps: [row] })).not.toBeNull();
+    expect(parseApps({ viewer, month_plan_rp: null, apps: [row] })).not.toBeNull();
     // The multiplier here is the CHAIN's product and the READ domain is any
     // positive finite number: a legal price edit or a sub-1 removal can lift an
     // admitted chain past the WRITE bound, and that must never fail the list.
-    expect(parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: 100 * 100 } }] })).not.toBeNull();
-    expect(parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: 10_000_000 } }] })).not.toBeNull();
+    expect(parseApps({ viewer, month_plan_rp: null, apps: [{ ...row, month: { ...row.month, multiplier: 100 * 100 } }] })).not.toBeNull();
+    expect(parseApps({ viewer, month_plan_rp: null, apps: [{ ...row, month: { ...row.month, multiplier: 10_000_000 } }] })).not.toBeNull();
     expect(
-      parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: CHAIN_MULTIPLIER_MAX + 1 } }] }),
+      parseApps({ viewer, month_plan_rp: null, apps: [{ ...row, month: { ...row.month, multiplier: CHAIN_MULTIPLIER_MAX + 1 } }] }),
     ).not.toBeNull();
     expect(
-      parseApps({ viewer, apps: [{ ...row, month: { ...row.month, multiplier: CHAIN_MULTIPLIER_MAX } }] }),
+      parseApps({ viewer, month_plan_rp: null, apps: [{ ...row, month: { ...row.month, multiplier: CHAIN_MULTIPLIER_MAX } }] }),
     ).not.toBeNull();
     for (const bad of [
       { used_rp: 1.5, owned: false, multiplier: 1 },
@@ -583,10 +620,10 @@ describe("amount guards — the parsers apply the writer's domain", () => {
       { used_rp: 40, owned: "no", multiplier: 1 },
       "month",
     ]) {
-      expect(parseApps({ viewer, apps: [{ ...row, month: bad }] }), JSON.stringify(bad)).toBeNull();
+      expect(parseApps({ viewer, month_plan_rp: null, apps: [{ ...row, month: bad }] }), JSON.stringify(bad)).toBeNull();
     }
     // `null` is the "no chain mounted" fact the dash renders.
-    expect(parseApps({ viewer, apps: [{ ...row, month: null }] })).not.toBeNull();
+    expect(parseApps({ viewer, month_plan_rp: null, apps: [{ ...row, month: null }] })).not.toBeNull();
   });
 
   test("an overview without effective_ceiling is a failure, while explicit null is 'no ceiling'", () => {

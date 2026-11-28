@@ -235,6 +235,36 @@ describe("the bot page's share switch", () => {
     }
   });
 
+  test("the ceiling input uses the read faces' two-decimal quantum, integral values included", async () => {
+    // 1,234 RP at the default rate renders 1.23 in the editor exactly as it
+    // does in `1.23 Credits` on the read faces — never the raw 1.234.
+    const fractional = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", monthly_rp: 1234 },
+    });
+    try {
+      const capInput = fractional.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      expect(capInput?.value).toBe("1.23");
+    } finally {
+      await fractional.cleanup();
+    }
+    // An integral Credit ceiling keeps its decimals: 12,000 RP reads 12.00.
+    const integral = await mount({
+      rp_per_credit: 1000,
+      app: { ...payload().app, scope: "shared", monthly_rp: 12000 },
+    });
+    try {
+      const capInput = integral.container.querySelector(
+        `input[aria-label="${t(locale, "botDetail.share.monthlyCap")}"]`,
+      ) as unknown as HTMLInputElement;
+      expect(capInput?.value).toBe("12.00");
+    } finally {
+      await integral.cleanup();
+    }
+  });
+
   test("the ceiling converts at the served rate, not a guessed 1,000", async () => {
     const view = await mount({ rp_per_credit: 500 });
     try {

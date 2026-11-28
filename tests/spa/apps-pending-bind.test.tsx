@@ -32,6 +32,7 @@ const payload = (extra: Partial<AppsPayload> = {}): AppsPayload => ({
   apps: [],
   shared_bots: [],
   pending_installations: [],
+  month_plan_rp: null,
   ...extra,
 });
 

@@ -32,6 +32,7 @@ const key = (provider: string, keyId: string, overrides: Partial<ProviderKeyRow>
 function payload(overrides: Partial<SettingsManagePayload & ProviderManagementPayload> = {}): SettingsManagePayload & ProviderManagementPayload {
   return {
     can_manage: true,
+    can_edit_chain: false,
     viewer_relation: "created",
     installation: null,
     pending_installations: [],

@@ -74,7 +74,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   const base = apiBase();
 
   /**
-   * The options read — the ONLY place `/api/models` is fetched. It is the owner
+   * The options read — the ONLY place the bot's models are fetched. It is the owner
    * editor's own source: a failed read keeps the error face with its retry, a
    * body that does not parse is a failure too (never an empty catalog), and a
    * successful one swaps the groups in place. It never touches the bot payload,
@@ -92,7 +92,10 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
       setModelsLoading(false);
     };
     try {
-      const models = parseModels(await fetchJson(`${base}/api/models`));
+      // The owner-gated per-bot route — `/api/models` is not registered.
+      const models = parseModels(
+        await fetchJson(`${base}/api/review-bots/${encodeURIComponent(botId)}/models`),
+      );
       // A body that does not parse is a failure too — never an empty catalog.
       if (models === null) {
         settle(true, []);
@@ -109,7 +112,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
     setModelsError(false);
     // The bot payload is the page: it settles and renders on its own, so a
     // consumer never waits for options it does not render, and a slow or hung
-    // `/api/models` cannot hold the overview back.
+    // models read cannot hold the overview back.
     const botRead = await fetchJson(`${base}/api/review-bots/${encodeURIComponent(botId)}/bot`).then(
       (value) => ({ ok: true as const, value }),
       () => ({ ok: false as const }),
@@ -250,7 +253,8 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
         <span className="flex flex-col gap-1.5">
           {app.description ? <span>{app.description}</span> : null}
           <span className="flex flex-wrap items-center gap-2">
-            <span className="font-mono">{app.id}</span>
+            {overview ? <span className="text-muted-foreground">{overview.provider_workspace}</span> : null}
+            <span className="font-mono text-muted-foreground">{app.id}</span>
             {archived ? (
               <StatusBadge tone="neutral">{t(locale, "bots.list.archived")}</StatusBadge>
             ) : (
