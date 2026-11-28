@@ -584,10 +584,12 @@ export function seatCapAbortError(windowMs: number): Error {
  *
  * The seat's own clock starts at its FIRST REAL model turn (`firstTurnMs`),
  * never at dispatch: session setup and the skill load are paid by the run, not
- * out of the seat's thinking time. The deep parent keeps the legacy ×2 headroom
- * because its soft cap is a convergence target its own supervision nudges
- * enforce — the hard window must let the steer past the soft cap land instead
- * of cutting the turn mid-yield.
+ * out of the seat's thinking time. The ceiling is the RUNNER's tier maximum
+ * (`RUNNER_MAX_BUDGET_MS`), not the engine's wall-clock table, which is shorter
+ * for `quick` (300 s against 480 s). The deep parent keeps the legacy ×2
+ * headroom because its soft cap is a convergence target its own supervision
+ * nudges enforce — the hard window must let the steer past the soft cap land
+ * instead of cutting the turn mid-yield.
  */
 export function seatDeadlineMs(nowMs: number, firstTurnMs: number, level: ReviewLevel): number {
   // why: The seat ceiling is the RUNNER's tier maximum, not the engine's
@@ -1053,6 +1055,12 @@ const DEEP_STOP_UNSCANNED = "deep-parent: the whole diff";
 
 const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (mstar.review/v1 envelope)";
 
+/**
+ * The model a seat actually served, read from its own session. Capture it at
+ * the seat's own settlement: a keep-alive child keeps its registry ref but an
+ * idle park nulls the ref's `session`, so a read at the end of the fan-out
+ * loses the served model.
+ */
 export function servedModel(
   session:
     | {
@@ -1434,7 +1442,10 @@ function runTeardownSignal(controller: AbortController, input: AgentRuntimeRunIn
  * Whether the report seat can run for this round. ONE authority: the dispatch
  * path logs the reason and the trace names it, so the two can never disagree.
  * `review-incomplete` is a nothing-usable round — there is no review to
- * narrate, so no seat is invented for it.
+ * narrate, so no seat is invented for it. The run's own state is checked first,
+ * so a torn-down or out-of-time run never blames the input for the run's clock;
+ * the caller's own signal is read directly beside the composed teardown signal
+ * because `AbortSignal.any` propagation can land a tick late.
  */
 export type ReportEligibility =
   | { ok: true; headSha: string; prContext: PrContext }

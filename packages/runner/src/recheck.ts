@@ -311,7 +311,6 @@ function recheckStructuredData(single: Partial<StructuredSubagentResult["result"
 export type RecheckSeatResult = {
   doc: RecheckDoc | null;
   status: RecheckStatus;
-  /** The seat's settled `SingleResult` when the child produced one — carries `usage`/`requests`/`resolvedModel` for the token-usage fold. */
   usage?: SubagentUsageSource;
 };
 

@@ -665,14 +665,6 @@ export function chainAttributionBlock(
     return formatFailureAttribution(cause, [`chain attribution unavailable: ${(error as Error).message}`]);
   }
 }
-/**
- * Remove the token-usage document without letting a removal fault become a
- * second failure — the startup clear and the empty-fold clear share it. If
- * unlink fails, the stale content is truncated to zero bytes as a fallback
- * where the file stays writable, so the reader sees absence or "not a
- * document", never this run reading a previous run's usage. Both legs are
- * logged, never thrown: usage is analysis data, not a gate.
- */
 function clearTokenUsageDoc(path: string): boolean {
   try {
     rmSync(path, { force: true });
@@ -688,9 +680,7 @@ function clearTokenUsageDoc(path: string): boolean {
   }
   try {
     writeFileSync(path, "");
-  } catch {
-    // Removal and truncation both failed; the clear already logged its fault.
-  }
+  } catch {}
   return false;
 }
 

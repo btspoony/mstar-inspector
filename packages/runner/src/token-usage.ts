@@ -1,15 +1,3 @@
-/**
- * why: Pure token-usage aggregation for the review side document. Folds the
- * SDK's session entries (assistant `message` turns and off-transcript
- * `model_usage` records) plus settled subagent results into per-(provider,
- * model) buckets. The runner merges the two sources because they are
- * DISJOINT — a subagent's spend is never duplicated into the parent's
- * session entries (it lands in `getUsageStatistics()` only), so folding both
- * cannot double-count and folding neither silently drops the seats' spend.
- *
- * Everything here is a pure function over plain values: capture faults
- * degrade to fewer buckets, never to a thrown error that would fail a review.
- */
 import type { SessionEntry, SingleResult } from "@oh-my-pi/pi-coding-agent";
 import type { Usage } from "@oh-my-pi/pi-ai";
 
@@ -47,8 +35,6 @@ function newBucket(provider: string, model: string): TokenUsageBucket {
 
 function bucketFor(buckets: Map<string, TokenUsageBucket>, provider: string, model: string): TokenUsageBucket | undefined {
   if (provider.trim() === "" || model.trim() === "") return undefined;
-  // JSON keeps (a, bcde) and (ab, cde) distinct — a bare `${provider}${model}`
-  // concatenation merges them into one bucket.
   const key = JSON.stringify([provider, model]);
   let bucket = buckets.get(key);
   if (bucket === undefined) {
@@ -58,13 +44,6 @@ function bucketFor(buckets: Map<string, TokenUsageBucket>, provider: string, mod
   return bucket;
 }
 
-/**
- * why: Fold one provider-reported `Usage` into `bucket` plus one request.
- * A missing usage object still counts its request — the request happened even
- * when the provider declined to meter it (a usage-less assistant turn is the
- * recorded evidence of one). Non-finite fields degrade to 0: capture is
- * analysis data, never a gate, and never fabricates a number.
- */
 function foldUsage(bucket: TokenUsageBucket, usage: Usage | undefined, requests: number): void {
   bucket.requests += requests;
   if (usage === undefined || usage === null) return;
