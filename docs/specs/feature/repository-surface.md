@@ -16,7 +16,7 @@ Out of scope: review pipeline behaviour, billing and quota faces, cross-workspac
 |----|----------|
 | N1 | The sidebar carries five entries in the order 仓库 (Repositories) → 应用 (Apps) → 机器人 (Bots) → 成员 (Members) → 设置 (Settings). The repository entry uses the `FolderGit2` icon and is current on every `/dashboard/<workspaceRef>/repos…` path. |
 | N2 | The family carries the `repos` route segment: the list is `/dashboard/<workspaceRef>/repos` — the dashboard default, where `/dashboard` and the retired `/dashboard/apps` spelling both redirect — the fixed default entry is `/dashboard/<workspaceRef>/repos/all`, one repository is `/dashboard/<workspaceRef>/repos/<targetId>` carrying the target UUID. 仓库 / Repositories is a display name, never a path segment. |
-| N3 | The workspace page segments are `repos`, `apps`, `members`, `settings`. There is no deployment-level copy of the repository surface: the two dashboard roots refuse to render it (they redirect), and a workspace-less `/dashboard/<segment>/…` path is the family's 404 before SPA dispatch. |
+| N3 | The workspace page segments are `repos`, `apps`, `bots`, `members`, `settings`. There is no deployment-level copy of the repository surface: the two dashboard roots refuse to render it (they redirect), and a workspace-less `/dashboard/<segment>/…` path is the family's 404 before SPA dispatch. |
 
 ### Repository list
 
